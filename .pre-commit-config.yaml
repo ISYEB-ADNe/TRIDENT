@@ -1,0 +1,46 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.11.24
+    hooks:
+      - id: uv-lock
+
+  - repo: local
+    hooks:
+      - id: nbstripout
+        name: Strip Jupyter notebook output
+        entry: uv run nbstripout
+        language: system
+        types: [jupyter]
+
+      - id: codespell
+        name: Check spelling
+        entry: uv run codespell
+        language: system
+        types: [markdown, python, text]
+        exclude: ^data/
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.20
+    hooks:
+      - id: ruff-check
+        name: ruff fix
+        args: [--fix, --exit-non-zero-on-fix]
+        types_or: [python, pyi, jupyter]
+
+      - id: ruff-format
+        name: ruff format
+        types_or: [python, pyi, jupyter]

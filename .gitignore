@@ -1,0 +1,68 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build / packaging
+build/
+dist/
+*.egg
+*.egg-info/
+.eggs/
+wheels/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test / lint / coverage caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+
+# Secrets / environment
+.env
+.env.*
+.streamlit/secrets.toml
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+._*
+Thumbs.db
+
+# TRIDENT runtime output
+results/
+output/
+reports/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+logs/
+
+# Large data / exports
+*.csv
+*.parquet
+*.xlsx
+data/
+datasets/
+gbif_data.zip
+
+# Local-only Claude guidance (not shared)
+CLAUDE.md
