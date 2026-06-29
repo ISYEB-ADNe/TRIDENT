@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://trident-nxanjv7pk4z2fnkyulzvwt.streamlit.app/"><img src="https://img.shields.io/badge/live%20demo-Streamlit-22c55e?style=flat-square" alt="Live demo" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20Strict%201.0.0-0e7490?style=flat-square" alt="License" /></a>
   <img src="https://img.shields.io/badge/python-3.12-0e7490?style=flat-square" alt="Python 3.12" />
 </p>
@@ -131,7 +132,7 @@ CONTACT_EMAIL=your-email@example.com
 
 ### Online demo
 
-A hosted demo will be available on Streamlit Cloud (link to be added). It is meant for trying TRIDENT on small inputs and may be limited; run it locally (above) for full analyses.
+A hosted demo is live on Streamlit Cloud: <https://trident-nxanjv7pk4z2fnkyulzvwt.streamlit.app/>. It is meant for trying TRIDENT on small inputs and may be limited. In particular, the EXTRA step (BOLD) may be blocked on the hosted demo, since BOLD can refuse requests from shared cloud IPs; run TRIDENT locally (above) for full analyses.
 
 ## Example
 
