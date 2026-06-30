@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use TRIDENT, please cite the preprint below."
+title: "TRIDENT (Taxonomic Resolution and IDentification using Environmental dNa Traces): An Optimized Algorithm for Vertebrate Taxonomic Assignments in eDNA Metabarcoding, Integrating Molecular, Taxonomic, and Ecological Criteria"
+authors:
+  - family-names: Haderlé
+    given-names: Rachel
+  - family-names: Jung
+    given-names: Gabriel
+  - family-names: Riou
+    given-names: Manon
+  - family-names: Ung
+    given-names: Visotheary
+  - family-names: Jung
+    given-names: Jean-Luc
+preferred-citation:
+  type: article
+  title: "TRIDENT (Taxonomic Resolution and IDentification using Environmental dNa Traces): An Optimized Algorithm for Vertebrate Taxonomic Assignments in eDNA Metabarcoding, Integrating Molecular, Taxonomic, and Ecological Criteria"
+  authors:
+    - family-names: Haderlé
+      given-names: Rachel
+    - family-names: Jung
+      given-names: Gabriel
+    - family-names: Riou
+      given-names: Manon
+    - family-names: Ung
+      given-names: Visotheary
+    - family-names: Jung
+      given-names: Jean-Luc
+  journal: bioRxiv
+  year: 2026
+  doi: 10.64898/2026.06.29.735257
+  url: "https://doi.org/10.64898/2026.06.29.735257"
+  notes: "Preprint, not yet peer-reviewed."

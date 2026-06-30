@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="https://trident-nxanjv7pk4z2fnkyulzvwt.streamlit.app/"><img src="https://img.shields.io/badge/live%20demo-Streamlit-22c55e?style=flat-square" alt="Live demo" /></a>
+  <a href="https://doi.org/10.64898/2026.06.29.735257"><img src="https://img.shields.io/badge/preprint-bioRxiv-b91c1c?style=flat-square" alt="bioRxiv preprint" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20Strict%201.0.0-0e7490?style=flat-square" alt="License" /></a>
   <img src="https://img.shields.io/badge/python-3.12-0e7490?style=flat-square" alt="Python 3.12" />
 </p>
@@ -242,9 +243,9 @@ example/       Sample FASTA input + worked example notebook
 
 ## How to cite
 
-A peer-reviewed paper describing TRIDENT is in review. Until it is published, please cite:
+A preprint describing TRIDENT is available on bioRxiv. Please cite:
 
-> Haderlé R., Jung G., Riou M., Ung V., Jung J.-L. TRIDENT (Taxonomic Resolution and IDentification using Environmental dNa Traces): An Optimized Algorithm for Vertebrate Taxonomic Assignments in eDNA Metabarcoding, Integrating Molecular, Taxonomic, and Ecological Criteria. Manuscript in review.
+> Haderlé R., Jung G., Riou M., Ung V., Jung J.-L. TRIDENT (Taxonomic Resolution and IDentification using Environmental dNa Traces): An Optimized Algorithm for Vertebrate Taxonomic Assignments in eDNA Metabarcoding, Integrating Molecular, Taxonomic, and Ecological Criteria. bioRxiv 2026.06.29.735257 (2026). https://doi.org/10.64898/2026.06.29.735257
 
 ## License
 
