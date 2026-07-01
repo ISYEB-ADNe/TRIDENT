@@ -11,6 +11,7 @@
 <p align="center">
   <a href="https://trident-nxanjv7pk4z2fnkyulzvwt.streamlit.app/"><img src="https://img.shields.io/badge/live%20demo-Streamlit-22c55e?style=flat-square" alt="Live demo" /></a>
   <a href="https://doi.org/10.64898/2026.06.29.735257"><img src="https://img.shields.io/badge/preprint-bioRxiv-b91c1c?style=flat-square" alt="bioRxiv preprint" /></a>
+  <a href="https://doi.org/10.5281/zenodo.21108395"><img src="https://img.shields.io/badge/DOI-10.5281%2Fzenodo.21108395-0e7490?style=flat-square" alt="Zenodo DOI" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20Strict%201.0.0-0e7490?style=flat-square" alt="License" /></a>
   <img src="https://img.shields.io/badge/python-3.12-0e7490?style=flat-square" alt="Python 3.12" />
 </p>

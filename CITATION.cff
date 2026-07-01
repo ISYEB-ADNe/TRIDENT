@@ -1,6 +1,9 @@
 cff-version: 1.2.0
 message: "If you use TRIDENT, please cite the preprint below."
 title: "TRIDENT (Taxonomic Resolution and IDentification using Environmental dNa Traces): An Optimized Algorithm for Vertebrate Taxonomic Assignments in eDNA Metabarcoding, Integrating Molecular, Taxonomic, and Ecological Criteria"
+version: 0.1.0
+date-released: 2026-07-01
+doi: 10.5281/zenodo.21108395
 authors:
   - family-names: Haderlé
     given-names: Rachel
