@@ -59,9 +59,6 @@ def compute_pairwise_identity(
             f"No alignment found for sequences of length {len(seq1)} and {len(seq2)}"
         )
         return 0.0
-    except Exception as e:
-        logger.error(f"Alignment failed: {e}")
-        return 0.0
 
     aligned = [(a, b) for a, b in zip(best[0], best[1]) if a != "-" or b != "-"]
     if not aligned:

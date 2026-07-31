@@ -476,7 +476,7 @@ def display_hypo_check_controls():
     db_cols = ["hypo_check_ev_exponent"]
 
     presets = get_recent_param_sets(
-        st.session_state.db_path, "hypo_check_params", db_cols
+        st.session_state.db_path, "hypo_check_inputs", db_cols
     )
     param_preset_selector(
         presets,

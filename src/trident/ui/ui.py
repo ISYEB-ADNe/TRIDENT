@@ -17,6 +17,7 @@ from typing import Any
 
 import pandas as pd
 import streamlit as st
+from loguru import logger
 
 
 # Suppress Streamlit's thread context warnings (Streamlit uses standard logging internally)
@@ -252,6 +253,42 @@ def init_session_state():
         st.session_state.setdefault(key, value)
 
 
+def coerce_stored_value(value, default):
+    """Restore a persisted override to the type of *default*.
+
+    Cache inputs round-trip through SQLite as strings, and the value written
+    depends on the caller: a notebook passing ``98.0`` stores ``"98.0"`` where
+    the app's int widget stores ``"98"``. A plain ``type(default)(value)`` cast
+    fails on the former, so numbers go through ``float`` first.
+
+    Anything that cannot be represented as the default's type falls back to
+    *default*, since feeding a widget a value it cannot render corrupts the
+    parameter it is bound to.
+    """
+    if default is None:
+        return value
+    if value is None:
+        return default
+
+    target = type(default)
+
+    # bool before int: bool is an int subclass, and bool("False") is True.
+    if target is bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+            return value.strip().lower() == "true"
+        return default
+
+    if isinstance(value, target) and not isinstance(value, bool):
+        return value
+
+    try:
+        return int(float(value)) if target is int else target(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def persist_value(key: str, default):
     """Pre-seed a widget key from the persistent override store.
 
@@ -262,14 +299,7 @@ def persist_value(key: str, default):
     if key not in st.session_state:
         overrides = st.session_state._widget_overrides
         if key in overrides:
-            value = overrides[key]
-            # Cast override to match the default's type (DB stores strings)
-            if default is not None and value is not None:
-                try:
-                    value = type(default)(value)
-                except (ValueError, TypeError):
-                    pass
-            st.session_state[key] = value
+            st.session_state[key] = coerce_stored_value(overrides[key], default)
         else:
             st.session_state[key] = default
 
@@ -743,7 +773,15 @@ def get_recent_param_sets(db_path, table_name, columns, limit=5):
         rows = cursor.fetchall()
         conn.close()
         return [dict(zip(columns, row)) for row in rows]
-    except Exception:
+    except sqlite3.OperationalError as exc:
+        # A missing table is normal before its step has run for the first time,
+        # so it stays at debug; anything else (unknown column, corrupt file)
+        # means the query itself is wrong and should be visible.
+        level = "debug" if "no such table" in str(exc) else "warning"
+        getattr(logger, level)(f"No presets from {table_name}: {exc}")
+        return []
+    except Exception as exc:
+        logger.warning(f"No presets from {table_name}: {exc}")
         return []
 
 
