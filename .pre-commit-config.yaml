@@ -30,17 +30,17 @@ repos:
         name: Check spelling
         entry: uv run codespell
         language: system
-        types: [markdown, python, text]
+        types_or: [markdown, python, text]
         exclude: ^data/
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.20
-    hooks:
       - id: ruff-check
         name: ruff fix
-        args: [--fix, --exit-non-zero-on-fix]
+        entry: uv run ruff check --fix --exit-non-zero-on-fix
+        language: system
         types_or: [python, pyi, jupyter]
 
       - id: ruff-format
         name: ruff format
+        entry: uv run ruff format
+        language: system
         types_or: [python, pyi, jupyter]
