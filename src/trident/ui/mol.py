@@ -18,6 +18,7 @@ from trident.logging import get_log_level
 from trident.ui.ui import (
     styled_or_plain,
     COL,
+    BLAST_HELP,
     get_recent_param_sets,
     param_preset_selector,
     persist_value,
@@ -81,7 +82,7 @@ def display_ncbi_parameters():
             "Max hits per query",
             1,
             1000,
-            help="Number of NCBI hits returned per sequence",
+            help=BLAST_HELP["max_hits"],
             key="ncbi_max_hits",
         )
         save_widget("ncbi_max_hits")
@@ -94,7 +95,7 @@ def display_ncbi_parameters():
             "E-value exponent ($10^{-x}$)",
             0,
             50,
-            help="Exponent of the significance threshold for matches",
+            help=BLAST_HELP["ev_exponent"],
             key="ncbi_ev_exponent",
         )
         save_widget("ncbi_ev_exponent")
@@ -120,7 +121,7 @@ def display_ncbi_parameters():
                 "Batch size",
                 1,
                 100,
-                help="Number of sequences processed in each batch for NCBI BLAST requests",
+                help=BLAST_HELP["batch_size"],
                 key="ncbi_batch_size",
             )
             save_widget("ncbi_batch_size")
@@ -130,7 +131,7 @@ def display_ncbi_parameters():
                 "Parallel Threads",
                 1,
                 10,
-                help="Number of batches processed in parallel for NCBI BLAST requests",
+                help=BLAST_HELP["n_threads"],
                 key="ncbi_num_threads",
             )
             save_widget("ncbi_num_threads")

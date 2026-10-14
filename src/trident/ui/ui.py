@@ -167,6 +167,26 @@ COL = {
     ),
 }
 
+# Help text for the NCBI BLAST settings shared by the MOL and HYPO tabs.
+BLAST_HELP = {
+    "max_hits": (
+        "Maximum number of NCBI database sequences returned per query sequence; "
+        "lower-scoring hits beyond this limit are not retrieved."
+    ),
+    "ev_exponent": (
+        "Maximum E-value, as 10^-x: only hits at or below this "
+        "threshold are kept. A larger x is stricter."
+    ),
+    "batch_size": (
+        "Number of query sequences sent together in one NCBI BLAST request. "
+        "Larger batches mean fewer but longer requests, which NCBI may time out."
+    ),
+    "n_threads": (
+        "Number of BLAST requests run at NCBI at the same time. More can speed up "
+        "large inputs, but NCBI throttles heavy use, so too many can make batches fail."
+    ),
+}
+
 # --------------------------------------------------------------------
 # SESSION STATE MANAGEMENT
 # -------------------------------------------------------------------
