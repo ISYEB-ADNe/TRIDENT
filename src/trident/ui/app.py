@@ -119,6 +119,21 @@ def main():
         label_visibility="collapsed",
     )
 
+    # The control keeps the selected tab by its displayed label: when a step
+    # finishes and its label gains a ✅, the selection is lost on the next rerun
+    # (clicking the active tab also deselects it). Reopen the last tab shown,
+    # with a single rerun: if that does not restore it, show it without looping.
+    if current_tab is None:
+        last_tab = st.session_state.get("last_tab", "start")
+        if not st.session_state.get("tab_restoring"):
+            st.session_state.tab_restoring = True
+            st.session_state.requested_tab = last_tab
+            st.rerun()
+        current_tab = last_tab
+    else:
+        st.session_state.tab_restoring = False
+    st.session_state.last_tab = current_tab
+
     # Tab Content Rendering
     if current_tab == "start":
         from trident.ui import inputs
