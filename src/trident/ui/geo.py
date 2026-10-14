@@ -20,6 +20,8 @@ from trident.clients.gbif import (
 )
 
 from trident.ui.ui import (
+    failed_items,
+    show_failed_items_banner,
     styled_or_plain,
     COL,
     get_recent_param_sets,
@@ -231,7 +233,10 @@ def _gbif_search_and_merge(
     user_agent,
     progress_info,
 ):
-    """Run GBIF search + merge in a background thread."""
+    """Run GBIF search + merge in a background thread.
+
+    Returns (merged DataFrame, merge params, species whose GBIF query failed).
+    """
 
     def _update_progress(fraction, text):
         progress_info["fraction"] = fraction
@@ -261,7 +266,7 @@ def _gbif_search_and_merge(
     if "gbif_extent" in gbif_merge_df.columns:
         gbif_merge_df["gbif_extent"] = gbif_merge_df["gbif_extent"].astype(str)
 
-    return gbif_merge_df, gbif_merge_params
+    return gbif_merge_df, gbif_merge_params, failed_items(gbif_search_df)
 
 
 def gbif_search_job(*, force_rerun, retry_empty=False, status, progress_bar, params):
@@ -282,7 +287,7 @@ def gbif_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     def _poll():
         progress_bar.progress(progress_info["fraction"], text=progress_info["text"])
 
-    gbif_merge_df, gbif_merge_params = run_with_progress(
+    gbif_merge_df, gbif_merge_params, gbif_failed = run_with_progress(
         logsink.wrap(_gbif_search_and_merge),
         species_list,
         tax_df,
@@ -300,6 +305,7 @@ def gbif_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     # 4. Save to State
     st.session_state.gbif_search_df = gbif_merge_df
     st.session_state.gbif_search_params = gbif_merge_params
+    st.session_state.gbif_search_failed = gbif_failed
 
     logsink.flush_to_ui()
     logger.remove(handler_id)
@@ -343,6 +349,11 @@ def gbif_search_workflow():
             logs_prefix="gbif_",
             threaded=True,
             status_label="🗺️ Running GBIF search...",
+        )
+
+    if mode == "IDENTICAL":
+        show_failed_items_banner(
+            st.session_state.gbif_search_failed, "species", "species", source="GBIF"
         )
 
     # Results Preview

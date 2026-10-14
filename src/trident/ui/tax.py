@@ -13,6 +13,8 @@ import trident.pipelines as pipe
 from trident.logging import get_log_level
 
 from trident.ui.ui import (
+    failed_items,
+    show_failed_items_banner,
     styled_or_plain,
     COL,
     StreamlitLogSink,
@@ -72,6 +74,7 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
         )
     else:
         resolution_df = None
+    tax_failed = failed_items(resolution_df)
 
     # Attach acceptedName/acceptedNameUsageID (raw scientificName kept). Stored
     # back so Results' MOL+GEO match also keys on the accepted name.
@@ -106,6 +109,7 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
         logsink=logsink,
         on_poll=_poll,
     )
+    tax_failed += failed_items(worms_search_df)
 
     # 4. Post-Processing (Merge and Finalize)
     status.update(label="🧬 Merging with MOL list...", state="running")
@@ -134,6 +138,7 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
     # comparison (compare_keys=["worms_marine_only"]) matches after a run.
     st.session_state.tax_params = final_params
     st.session_state.tax_df = tax_df
+    st.session_state.tax_failed = tax_failed
     st.session_state.tax_summary_df = summary_df
     st.session_state.tax_species = tax_df["scientificName"].unique().tolist()
 
@@ -181,7 +186,7 @@ def worms_search_workflow():
         mol_df = st.session_state.mol_df
         unique_genera = len(pipe.prepare_worms_input(mol_df))
 
-        run_step_workflow(
+        mode = run_step_workflow(
             df_key="tax_df",
             params_key="tax_params",
             flag_key="worms_search_flag",
@@ -196,6 +201,13 @@ def worms_search_workflow():
             threaded=True,
             status_label="🔍 Expanding genera from MOL list...",
         )
+        if mode == "IDENTICAL":
+            show_failed_items_banner(
+                st.session_state.tax_failed,
+                "name or genus",
+                "names or genera",
+                source="WoRMS",
+            )
 
 
 # --------------------------------------------------------------------

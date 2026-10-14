@@ -16,6 +16,8 @@ from trident.logging import get_log_level
 
 
 from trident.ui.ui import (
+    failed_items,
+    show_failed_items_banner,
     styled_or_plain,
     COL,
     BLAST_HELP,
@@ -187,6 +189,7 @@ def ncbi_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
 
     st.session_state.ncbi_search_df = ncbi_search_df
     st.session_state.ncbi_search_params = ncbi_search_params
+    st.session_state.ncbi_search_failed = failed_items(ncbi_search_df)
 
     reset_state_after("ncbi_search_df")
     logger.remove(handler_id)
@@ -226,6 +229,13 @@ def ncbi_search_workflow():
         )
 
     # Search overview and raw results
+    if mode == "IDENTICAL":
+        show_failed_items_banner(
+            st.session_state.ncbi_search_failed,
+            "sequence",
+            "sequences",
+            source="NCBI BLAST",
+        )
     if mode != "NEW":
         display_ncbi_search_overview()
 

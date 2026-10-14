@@ -39,6 +39,7 @@ from trident.core.utils import (
     top_hit_per_group,
 )
 from trident.clients.ncbi import (
+    BlastCircuit,
     create_sequence_batches,
     run_blast_batches,
     process_blast_results,
@@ -168,8 +169,9 @@ def run_hypo_search(
         identity_cutoff: Minimum identity percentage to retain.
         ntop: If > 0, keep only top N hits per query by identity.
         progress_handler: Optional progress tracker.
-        failure_sink: If provided, seq_ids whose proxy BLAST errored are appended
-            here so the cache layer retries them instead of caching them as empty.
+        failure_sink: If provided, the ids of proxy records (BOLD sequences)
+            whose BLAST errored are appended here so the cache layer retries
+            them instead of caching them as empty.
 
     Returns:
         DataFrame with NCBI BLAST results for proxy sequences.
@@ -178,6 +180,7 @@ def run_hypo_search(
     logger.info(f"Starting HYPO search: {len(sequences_dict)} {seq_word}")
 
     all_results = []
+    circuit = BlastCircuit()  # shared by every MOTU of this run
     for seq_id, seq_dict in sequences_dict.items():
         logger.info(f"Processing {seq_id} ({len(seq_dict['sequences'])} seqs)")
         batches = create_sequence_batches(seq_dict["sequences"], batch_size)
@@ -188,11 +191,13 @@ def run_hypo_search(
             hitlist_size=max_hits,
             entrez_query=seq_dict["entrez_query"],
             progress_handler=progress_handler,
+            circuit=circuit,
         )
-        # A proxy BLAST error fails this seq_id; report it so the search is
-        # retried rather than cached as empty.
+        # Report the proxy records whose BLAST errored: they are the cache key
+        # (seq_id of each proxy record, not the MOTU seq_id), so they are retried
+        # on the next run rather than cached as empty.
         if failed_ids and failure_sink is not None:
-            failure_sink.append(seq_id)
+            failure_sink.extend(failed_ids)
         if not results.empty:
             results = process_blast_results(
                 results, fasta_sequences=seq_dict["sequences"]
@@ -465,6 +470,7 @@ def run_hypo_check(
     )
 
     all_results = []
+    circuit = BlastCircuit()  # one check per sequence: stop retrying if NCBI is down
     for index, row in sequences_df.iterrows():
         seq_id, sci_name, seq_dna = (
             row["seq_id"],
@@ -479,6 +485,7 @@ def run_hypo_check(
             evalue=10 ** (-ev_exponent),
             batch_id=index,
             hitlist_size=10,
+            circuit=circuit,
         )
 
         if blast_res is None:
@@ -566,6 +573,21 @@ def finalize_hypo_results(
         hypo_filter_params = {}
     if hypo_check_params is None:
         hypo_check_params = {}
+
+    # Empty check results (e.g. every check query failed) come back from the
+    # cache with no columns at all; treat them as "no check hit".
+    if hypo_check_df.empty:
+        hypo_check_df = ensure_columns(
+            hypo_check_df.copy(),
+            (
+                "seq_id",
+                "scientificName",
+                "identity_percentage",
+                "query_cover",
+                "hit_url",
+                "hit_found",
+            ),
+        )
 
     # Best check hit per (seq_id, scientificName)
     check_hits = top_hit_per_group(

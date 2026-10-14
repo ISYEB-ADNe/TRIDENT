@@ -11,6 +11,7 @@ import queue
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field, fields, asdict
 from collections.abc import Callable
 from typing import Any
@@ -203,6 +204,7 @@ class AppState:
     ncbi_logs: list[str] = field(default_factory=list)
     ncbi_search_flag: bool = False
     ncbi_search_params: dict[str, Any] = field(default_factory=dict)
+    ncbi_search_failed: list[str] = field(default_factory=list)
     ncbi_search_df: "pd.DataFrame | None" = None
     ncbi_filter_flag: bool = False
     mol_params: dict[str, Any] = field(default_factory=dict)
@@ -215,11 +217,13 @@ class AppState:
     tax_params: dict[str, Any] = field(default_factory=dict)
     tax_species: list[str] = field(default_factory=list)
     tax_summary_df: "pd.DataFrame | None" = None
+    tax_failed: list[str] = field(default_factory=list)
     tax_df: "pd.DataFrame | None" = None
 
     gbif_logs: list[str] = field(default_factory=list)
     gbif_search_flag: bool = False
     gbif_search_params: dict[str, Any] = field(default_factory=dict)
+    gbif_search_failed: list[str] = field(default_factory=list)
     gbif_search_df: "pd.DataFrame | None" = None
     gbif_filter_flag: bool = False
     gbif_filter_df: "pd.DataFrame | None" = None
@@ -234,6 +238,7 @@ class AppState:
     bold_search_params: dict[str, Any] = field(default_factory=dict)
     bold_input_species: list[str] = field(default_factory=list)
     bold_missing_species: list[str] = field(default_factory=list)
+    bold_search_failed: list[str] = field(default_factory=list)
     bold_search_df: "pd.DataFrame | None" = None
     bold_filter_logs: list[str] = field(default_factory=list)
     bold_filter_flag: bool = False
@@ -246,6 +251,7 @@ class AppState:
     hypo_logs: list[str] = field(default_factory=list)
     hypo_search_flag: bool = False
     hypo_merge_params: dict[str, Any] = field(default_factory=dict)
+    hypo_search_failed: list[str] = field(default_factory=list)
     hypo_merge_df: "pd.DataFrame | None" = None
     hypo_filter_flag: bool = False
     hypo_filter_params: dict[str, Any] = field(default_factory=dict)
@@ -253,6 +259,7 @@ class AppState:
     hypo_check_logs: list[str] = field(default_factory=list)
     hypo_check_flag: bool = False
     hypo_check_params: dict[str, Any] = field(default_factory=dict)
+    hypo_check_failed: list[str] = field(default_factory=list)
     hypo_check_df: "pd.DataFrame | None" = None
     hypo_check_summary_df: "pd.DataFrame | None" = None
     hypo_params: dict[str, Any] = field(default_factory=dict)
@@ -520,14 +527,52 @@ def require_prerequisite(key: str, message: str) -> bool:
     return True
 
 
+def failed_items(df) -> list[str]:
+    """Items whose query failed in the call that returned *df*.
+
+    Read from ``df.attrs["failed_items"]``, set by ``save_to_db``. Empty when
+    *df* is missing or did not come from a cached step.
+    """
+    if df is None:
+        return []
+    return [str(x) for x in dict.fromkeys(df.attrs.get("failed_items", []))]
+
+
+def show_failed_items_banner(
+    failed, item: str = "item", items: str = "items", source: str = ""
+) -> None:
+    """Warn about items whose query failed in the last run.
+
+    Failed items are not cached (see ``failure_sink`` in ``save_to_db``), so a
+    plain re-run queries them again while everything else comes from the cache.
+    """
+    failed = list(failed or [])
+    if not failed:
+        return
+    shown = ", ".join(failed[:10])
+    if len(failed) > 10:
+        shown += f", ... (+{len(failed) - 10} more)"
+    request = f"the {source} request" if source else "the request"
+    label = item if len(failed) == 1 else items
+    st.warning(
+        f"⚠️ {len(failed)} {label} could not be queried: {request} failed "
+        "after retries, so they were not saved. Click **Re-run with Same "
+        "Settings** to retry only these; everything else comes from the cache.\n\n"
+        f"{shown}"
+    )
+
+
 def show_missing_results_banner(
-    input_values, result_df, key_col: str, item_label: str = "items"
+    input_values, result_df, key_col: str, item_label: str = "items", failed=None
 ) -> None:
     """Warn when items from THIS run's input are absent from its result.
 
     Compares the current input against the current result (not the whole cache
-    history). A missing item means the source returned no records this run,
-    either a genuine empty or a failed query; "Retry empty results" re-queries.
+    history). Items in *failed* are left out: they are reported by
+    ``show_failed_items_banner``. The remaining missing items returned no
+    records and are cached as empty; "Retry empty results" re-queries them
+    (useful if the source changed, or for a database written before failures
+    were tracked, where a failed query was cached as empty).
     """
     inputs = set(input_values or [])
     if not inputs:
@@ -535,12 +580,12 @@ def show_missing_results_banner(
     found = set()
     if result_df is not None and not result_df.empty and key_col in result_df.columns:
         found = set(result_df[key_col].dropna().unique())
-    n_missing = len(inputs - found)
+    n_missing = len(inputs - found - set(failed or []))
     if n_missing:
-        st.warning(
-            f"⚠️ {n_missing}/{len(inputs)} {item_label} returned no records. If you "
-            "expected data (e.g. after a failed query), set Cache to "
-            "**Retry empty results** and re-run."
+        st.info(
+            f"{n_missing}/{len(inputs)} {item_label} returned no records (saved "
+            "as empty). To query them again, set Cache to **Retry empty "
+            "results** and re-run."
         )
 
 
@@ -583,7 +628,9 @@ class StreamlitLogSink:
     On Cloud, concurrent sessions share one process and one global
     ``loguru.logger``.  This sink only accepts log messages from threads
     registered via ``allow_current_thread()`` or ``wrap()``, preventing
-    cross-session log leakage.
+    cross-session log leakage. ``wrap()`` also tags the call's log context
+    with this sink, so threads the call spawns in a copy of its context (the
+    BLAST batch workers, see ``run_blast_batches``) are accepted too.
     """
 
     def __init__(self, container=None, prefix=""):
@@ -591,6 +638,8 @@ class StreamlitLogSink:
         self.prefix = prefix
         self.log_queue = queue.Queue()
         self._allowed_threads: set[int] = {threading.get_ident()}
+        # Unique per sink (id() can be reused once a sink is freed).
+        self._tag = uuid.uuid4().hex
 
         # Initialize session state logs
         log_key = f"{self.prefix}logs"
@@ -601,9 +650,12 @@ class StreamlitLogSink:
         self._allowed_threads.add(threading.get_ident())
 
     def thread_filter(self, record):
-        """Loguru filter: accept only 'trident' messages from registered threads."""
+        """Loguru filter: accept only 'trident' messages from registered
+        threads, or tagged with this sink by ``wrap()``."""
         if not record["name"].startswith("trident"):
             return False
+        if record["extra"].get("log_sink") == self._tag:
+            return True
         return record["thread"].id in self._allowed_threads
 
     def wrap(self, fn, before=None):
@@ -619,7 +671,8 @@ class StreamlitLogSink:
             self.allow_current_thread()
             if before:
                 before()
-            return fn(*args, **kwargs)
+            with logger.contextualize(log_sink=self._tag):
+                return fn(*args, **kwargs)
 
         return wrapper
 

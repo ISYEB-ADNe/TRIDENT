@@ -491,7 +491,13 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
     If the wrapped function declares a ``failure_sink`` parameter, it receives a
     list to append the identifying values of items whose query failed; those
     items are excluded from caching and retried on the next run (see
-    ``_failed_item_filter``).
+    ``_failed_item_filter``). The values reported during this call are also
+    exposed as ``df.attrs["failed_items"]`` on the returned DataFrame, so the
+    UI can tell failed items from genuinely empty ones. The attribute lives in
+    memory only (not stored in SQLite) and describes this call: items that
+    failed in an earlier call are re-executed, so they appear again only if
+    they fail again. pandas may copy ``attrs`` onto frames derived from the
+    result; only read it on the frame returned here.
     """
     match_map = cache.match_map
 
@@ -560,6 +566,17 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
                     _set_schema_version(conn)
                     base_run_id = _next_run_id(conn, table_name)
 
+                    # Items the function reported as failed get neither result
+                    # rows nor an inputs row, so they are retried next run. A
+                    # result row without its inputs row would be orphaned, and
+                    # its run_id could later be reused by another item.
+                    failed = _failed_item_filter(failure_sink, match_map)
+                    failed_run_ids = {
+                        base_run_id + i
+                        for i, item in enumerate(uncached_items)
+                        if failed(item)
+                    }
+
                     # 3a. Save result rows (if any)
                     if new_df is not None and len(new_df) > 0:
                         if not isinstance(new_df, pd.DataFrame):
@@ -599,12 +616,20 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
 
                         new_df["run_id"] = new_df["run_id"].astype(int)
 
-                        _add_missing_columns(conn, table_name, new_df)
-                        new_df.to_sql(
-                            name=table_name, con=conn, if_exists="append", index=False
-                        )
+                        # Rows of failed items are returned for this run but
+                        # not saved (see failed_run_ids above).
+                        to_save = new_df[~new_df["run_id"].isin(failed_run_ids)]
+                        if len(to_save) > 0:
+                            _add_missing_columns(conn, table_name, to_save)
+                            to_save.to_sql(
+                                name=table_name,
+                                con=conn,
+                                if_exists="append",
+                                index=False,
+                            )
                         logger.debug(
-                            f"Saved {len(new_df)} rows across {len(uncached_items)} run_ids"
+                            f"Saved {len(to_save)} rows across "
+                            f"{len(uncached_items) - len(failed_run_ids)} run_ids"
                         )
                         cached_dfs.append(new_df.drop("run_id", axis=1))
 
@@ -612,13 +637,12 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
                     # legitimately empty queries are not re-executed. Items the
                     # function reported as failed are skipped, so a transient
                     # failure is retried next run rather than cached as empty.
-                    failed = _failed_item_filter(failure_sink, match_map)
                     kept = [
                         (i, item)
                         for i, item in enumerate(uncached_items)
-                        if not failed(item)
+                        if base_run_id + i not in failed_run_ids
                     ]
-                    n_failed = len(uncached_items) - len(kept)
+                    n_failed = len(failed_run_ids)
                     if n_failed:
                         logger.warning(
                             f"{func.__name__}: {n_failed} item(s) failed and were "
@@ -657,6 +681,7 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
                     if non_empty
                     else pd.DataFrame()
                 )
+                result_df.attrs["failed_items"] = list(failure_sink)
                 return result_df, params
 
         return wrapper
@@ -739,8 +764,12 @@ def _empty_run_ids(conn: sqlite3.Connection, table_name: str) -> list[int]:
 def clear_empty_cache(db_path: str | Path, table_name: str) -> int:
     """Remove cached entries that produced zero result rows.
 
-    Useful for retrying items that failed (e.g. network error) without
-    re-running items that succeeded.
+    Their items are then re-queried on the next run, without re-running items
+    that returned rows. Failed queries do not need this: they are never cached
+    (see ``failure_sink`` in ``save_to_db``) and are retried on every run. It
+    serves genuinely empty results worth querying again (the source database
+    may have changed), and databases written before failures were tracked,
+    where a failed query was cached as empty.
 
     Returns the number of entries cleared.
     """

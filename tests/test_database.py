@@ -6,6 +6,7 @@ import pytest
 from datetime import datetime, timezone
 
 from trident.core.database import (
+    CustomCache,
     FullCache,
     PartialCache,
     save_to_db,
@@ -361,6 +362,86 @@ def test_failed_items_not_provenanced(db_path):
     assert "bad" not in prov_names
     prov = load_provenance(db_path, "test_fail_prov")
     assert len(prov) == 1  # only 'a'
+
+
+def test_failed_items_exposed_on_result_for_this_call_only(db_path):
+    """The result carries this call's failures, so the UI can tell them apart
+    from genuine empties; a later call that succeeds reports none."""
+    failing = {"bad"}
+
+    @save_to_db(
+        "test_fail_attrs", cache=PartialCache(items_kwarg="names", item_key="name")
+    )
+    def step(names, failure_sink=None):
+        rows = []
+        for n in names:
+            if n in failing:
+                failure_sink.append(n)
+                continue
+            if n != "empty":
+                rows.append({"name": n, "v": 1})
+        return pd.DataFrame(rows, columns=["name", "v"])
+
+    df, _ = step(["a", "bad", "empty"], db_path=db_path)
+    assert df.attrs["failed_items"] == ["bad"]
+
+    failing.clear()  # the source recovers: 'bad' is retried and succeeds
+    df, _ = step(["a", "bad", "empty"], db_path=db_path)
+    assert df.attrs["failed_items"] == []
+    assert set(df["name"]) == {"a", "bad"}
+
+
+def test_failed_items_leave_no_orphan_rows(db_path):
+    """A failure is matched on the first key only, so a sibling item that
+    succeeded is not cached either. Its rows must not be saved without an
+    inputs row: their run_id would later be reused by another item, which
+    would then load them as its own results."""
+
+    def prepare(pairs, **kwargs):
+        items = [{"seq_id": s, "query": q} for s, q in pairs]
+        return items, {}
+
+    def rebuild(uncached, bound_kwargs):
+        keep = {(i["seq_id"], i["query"]) for i in uncached}
+        return {
+            **bound_kwargs,
+            "pairs": [p for p in bound_kwargs["pairs"] if p in keep],
+        }
+
+    @save_to_db(
+        "test_orphans",
+        cache=CustomCache(
+            prepare_fn=prepare,
+            rebuild_fn=rebuild,
+            match_map_dict={"seq_id": "seq_id", "query": "query"},
+        ),
+    )
+    def step(pairs, failure_sink=None):
+        rows = []
+        for seq_id, query in pairs:
+            if (seq_id, query) == ("P1", "A"):
+                failure_sink.append("P1")  # P1 errors under query A only
+            elif seq_id in ("P1", "P2"):
+                rows.append(
+                    {"seq_id": seq_id, "query": query, "hit": f"{seq_id}{query}"}
+                )
+        return pd.DataFrame(rows, columns=["seq_id", "query", "hit"])
+
+    # P1 fails under A, succeeds under B: neither is cached, no row is saved.
+    df, _ = step([("P1", "A"), ("P1", "B")], db_path=db_path)
+    assert list(df["hit"]) == ["P1B"]  # still returned for this run
+    with get_connection(db_path) as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'test_orphans'"
+            ).fetchone()[0]
+            == 0
+        )
+
+    # New items take run_ids 1 and 2; P3 is a genuine empty.
+    step([("P2", "C"), ("P3", "D")], db_path=db_path)
+    df, _ = step([("P3", "D")], db_path=db_path)  # served from the cache
+    assert df.empty
 
 
 # --- Fingerprint / content-based invalidation ---

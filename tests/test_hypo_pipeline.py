@@ -3,7 +3,8 @@
 prepare_hypo_input (build per-seq BLAST inputs + Entrez query), run_hypo_merge
 (map proxy hits back to target species), run_hypo_filter (threshold), and
 finalize_hypo_results (attach the per-species NCBI check). The two network steps
-(run_hypo_search, run_hypo_check) are not unit-tested here.
+(run_hypo_search, run_hypo_check) are only tested for their failure handling,
+with BLAST stubbed out.
 
 The cached steps are wrapped by @save_to_db (+ @preserve_sequence_order); we
 unwrap to the pure logic so no database is involved.
@@ -12,9 +13,14 @@ unwrap to the pure logic so no database is involved.
 import inspect
 
 import pandas as pd
+from Bio.Seq import Seq
+from Bio.SeqRecord import SeqRecord
 
+import trident.pipelines.hypo_pipeline as hypo_pipeline
+from trident.core.database import view_cached_runs
 from trident.pipelines.hypo_pipeline import (
     prepare_hypo_input,
+    run_hypo_search,
     run_hypo_merge,
     run_hypo_filter,
     finalize_hypo_results,
@@ -166,3 +172,48 @@ def test_finalize_check_absent_leaves_ncbi_stats_na():
     )
     out = _finalize(hypo_filter_df, hypo_check_df)
     assert pd.isna(out.iloc[0]["ncbi_top_identity_percentage"])
+
+
+def test_finalize_tolerates_columnless_check_results():
+    """Every check query failed: the cache returns a frame with no columns.
+    Finalize must keep the HYPO species, with no check stats, not crash."""
+    hypo_filter_df = pd.DataFrame(
+        {
+            "seq_id": ["t1"],
+            "scientificName": ["Gadus morhua"],
+            "identity_percentage": [95.0],
+            "query_cover": [100.0],
+        }
+    )
+    out = _finalize(hypo_filter_df, pd.DataFrame())
+    assert list(out["scientificName"]) == ["Gadus morhua"]
+    assert pd.isna(out.iloc[0]["ncbi_top_identity_percentage"])
+
+
+# --- run_hypo_search: failure handling ---
+
+
+def test_hypo_search_failed_proxy_blast_is_not_cached(tmp_path, monkeypatch):
+    """A proxy record whose BLAST errored must be retried, not cached as "no
+    hits". The cache key is the proxy record id, so that is what gets reported."""
+
+    def blast(batches, **kwargs):
+        # P1 errors; P2 is searched and genuinely returns no hits.
+        return pd.DataFrame(), ["P1"]
+
+    monkeypatch.setattr(hypo_pipeline, "run_blast_batches", blast)
+    sequences = {
+        "t1": {
+            "sequences": [
+                SeqRecord(Seq("ACGT"), id="P1"),
+                SeqRecord(Seq("TTGG"), id="P2"),
+            ],
+            "entrez_query": '"Gadus morhua"[orgn]',
+        }
+    }
+    db_path = str(tmp_path / "hypo.db")
+
+    df, _ = run_hypo_search(sequences, db_path=db_path)
+
+    assert df.attrs["failed_items"] == ["P1"]
+    assert set(view_cached_runs(db_path, "hypo_search")["seq_id"]) == {"P2"}

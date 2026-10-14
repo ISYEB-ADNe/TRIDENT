@@ -1,5 +1,7 @@
 """NCBI BLAST client — submit queries, parse results, filter by barcoding gap."""
 
+import contextvars
+import threading
 from collections.abc import Callable, Iterable
 from functools import wraps
 
@@ -12,6 +14,7 @@ from loguru import logger
 
 from .fasta import records_to_fasta_string
 from trident.core import config
+from trident.core.http import retry_call
 from trident.core.constants import (
     NCBI_GAP_SIZE,
     NCBI_GAP_MIN_TOP,
@@ -236,6 +239,73 @@ def fetch_standardized_taxonomy(
     return taxonomy_map
 
 
+# Waits before each retry of a failed BLAST job. NCBI asks clients to poll a
+# job at most once a minute, so retries are spaced in tens of seconds.
+BLAST_RETRY_DELAYS = (30.0, 60.0)
+
+# After this many jobs in a row have failed all their retries, the remaining
+# jobs of the run get a single attempt (see BlastCircuit).
+BLAST_CIRCUIT_THRESHOLD = 3
+
+
+def _run_qblast_once(
+    multi_fasta: str,
+    evalue: float,
+    hitlist_size: int,
+    entrez_query: str | None,
+) -> list:
+    """Submit one BLASTn job to NCBI and parse its XML result (one attempt)."""
+    handle = NCBIWWW.qblast(
+        program="blastn",
+        database="nt",
+        sequence=multi_fasta,
+        expect=evalue,
+        hitlist_size=hitlist_size,
+        entrez_query=entrez_query,
+    )
+    return list(NCBIXML.parse(handle))
+
+
+# Same job, resubmitted as a whole after each delay in BLAST_RETRY_DELAYS: a
+# failed submission, poll or truncated XML response is retried.
+_run_qblast = retry_call(delays=BLAST_RETRY_DELAYS)(_run_qblast_once)
+
+
+class BlastCircuit:
+    """Stops retrying BLAST jobs once NCBI looks down, for the rest of a run.
+
+    Retries cost about 90 s per failed job, so during an NCBI outage a run of
+    many jobs would block for hours before reporting anything. After
+    ``threshold`` jobs in a row have failed all their retries, the circuit is
+    open: later jobs get a single attempt and failed batches are not split.
+    A success closes it again. Thread-safe; create one per run and pass it to
+    every ``submit_blast_batch`` / ``run_blast_batches`` call of that run.
+    """
+
+    def __init__(self, threshold: int = BLAST_CIRCUIT_THRESHOLD):
+        self.threshold = threshold
+        self._failures = 0
+        self._lock = threading.Lock()
+
+    @property
+    def is_open(self) -> bool:
+        with self._lock:
+            return self._failures >= self.threshold
+
+    def record(self, success: bool) -> None:
+        with self._lock:
+            if success:
+                self._failures = 0
+            else:
+                self._failures += 1
+                if self._failures == self.threshold:
+                    logger.warning(
+                        f"{self.threshold} BLAST jobs in a row failed after "
+                        "retries; NCBI may be down. Remaining jobs of this run "
+                        "get a single attempt."
+                    )
+
+
 @require_ncbi_auth
 def submit_blast_batch(
     batch: list[SeqRecord],
@@ -243,12 +313,16 @@ def submit_blast_batch(
     evalue: float = 1e-10,
     hitlist_size: int = 500,
     batch_id: int | None = None,
+    retry: bool = True,
+    circuit: BlastCircuit | None = None,
 ) -> pd.DataFrame | None:
     """Submit a BLASTn query for a single batch of sequences.
 
     Builds a multi-FASTA string from the batch, submits it to NCBI BLAST via
     qblast, parses the XML response, and returns a raw results DataFrame.
-    Returns None on failure so the caller can handle partial results.
+    With ``retry``, a failed job is resubmitted after each delay in
+    ``BLAST_RETRY_DELAYS``; if it still fails, returns None so the caller can
+    handle partial results.
 
     Args:
         batch: List of SeqRecord objects to query.
@@ -257,33 +331,94 @@ def submit_blast_batch(
         evalue: E-value threshold for reporting hits.
         hitlist_size: Maximum number of hits to return per query sequence.
         batch_id: Identifier used for logging only.
+        retry: Retry a failed job (default). False makes a single attempt,
+            used when splitting a batch that already failed its retries.
+        circuit: Optional run-wide ``BlastCircuit``. While it is open, the job
+            gets a single attempt; its outcome is recorded when retries apply.
 
     Returns:
         DataFrame of raw BLAST hits, or None if the query failed.
     """
+    if circuit is not None and circuit.is_open:
+        retry = False
     try:
         logger.debug(f"Processing batch {batch_id} with {len(batch)} sequences")
 
         multi_fasta = records_to_fasta_string(batch)
-
-        handle = NCBIWWW.qblast(
-            program="blastn",
-            database="nt",
-            sequence=multi_fasta,
-            expect=evalue,
-            hitlist_size=hitlist_size,
-            entrez_query=entrez_query,
-        )
-
-        records = list(NCBIXML.parse(handle))
+        run = _run_qblast if retry else _run_qblast_once
+        records = run(multi_fasta, evalue, hitlist_size, entrez_query)
         df = parse_blast_records(records)
 
         logger.debug(f"Batch {batch_id} completed successfully")
-        return df
+        result = df
 
     except Exception as e:
         logger.error(f"Error in batch {batch_id}: {e}")
-        return None
+        result = None
+
+    # A failure counts once retries were tried; any success closes the circuit.
+    if circuit is not None and (retry or result is not None):
+        circuit.record(result is not None)
+    return result
+
+
+def _split_failed_batch(
+    batch: list[SeqRecord],
+    batch_id: int | None,
+    circuit: BlastCircuit | None = None,
+    **blast_kwargs,
+) -> tuple[list[pd.DataFrame], list[str]]:
+    """Isolate the sequences that make a failed batch fail, by halving it.
+
+    Called once a batch has failed all its retries, so the failure is likely
+    caused by one of its sequences rather than by a transient error. Each half
+    gets a single attempt: a half that succeeds is kept, a failed half is split
+    again, down to single sequences. If both halves fail, the problem is likely
+    on NCBI's side (overload, outage), so splitting stops and the whole batch is
+    reported failed. This bounds the extra jobs: about 2 per halving level for
+    one bad sequence, and 2 in total when NCBI is down.
+
+    A half that succeeds shows NCBI is up, so it is recorded as a success on
+    ``circuit``: a batch failed by a bad sequence must not count toward the
+    "NCBI is down" threshold.
+
+    Known limit: two bad sequences that land in different halves also make both
+    halves fail, so the whole batch is reported failed (as it was before
+    splitting existed). A lower batch size narrows it down on the next run.
+
+    Returns:
+        Tuple of (result DataFrames of the halves that succeeded, ids of the
+        sequences still failed).
+    """
+    if len(batch) == 1:
+        return [], [batch[0].id]
+
+    mid = len(batch) // 2
+    halves = [batch[:mid], batch[mid:]]
+    logger.warning(
+        f"Batch {batch_id} failed after retries; splitting it into "
+        f"{len(halves[0])} + {len(halves[1])} sequences to isolate the failure"
+    )
+    results = [
+        submit_blast_batch(
+            half, batch_id=batch_id, retry=False, circuit=circuit, **blast_kwargs
+        )
+        for half in halves
+    ]
+    if all(res is None for res in results):
+        return [], [rec.id for rec in batch]
+
+    dfs, failed = [], []
+    for half, res in zip(halves, results):
+        if res is not None:
+            dfs.append(res)
+        else:
+            half_dfs, half_failed = _split_failed_batch(
+                half, batch_id, circuit, **blast_kwargs
+            )
+            dfs += half_dfs
+            failed += half_failed
+    return dfs, failed
 
 
 def run_blast_batches(
@@ -293,11 +428,14 @@ def run_blast_batches(
     hitlist_size: int = 500,
     entrez_query: str | None = None,
     progress_handler: dict | object | None = None,
+    circuit: BlastCircuit | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Execute multiple NCBI BLAST batches in parallel.
 
     Runs up to n_threads batches concurrently using joblib threading. Progress
-    is reported per batch via progress_handler.
+    is reported per batch via progress_handler. Each worker runs in a copy of
+    the caller's context, so log context set by the caller (e.g. the UI log
+    sink) also applies to the workers' logs.
 
     Args:
         batches: List of sequence batches, each a list of SeqRecord objects.
@@ -310,52 +448,75 @@ def run_blast_batches(
               Streamlit or notebook use.
             - Any object with an .update(n) method (e.g. tqdm) for CLI use.
             - None for silent execution.
+        circuit: Optional ``BlastCircuit`` shared by the whole run. A new one
+            is created for this call when none is given.
 
     Returns:
         Tuple of (concatenated DataFrame of successful batch results,
-        failed_ids). ``failed_ids`` lists the record ids in batches that errored
-        (distinct from batches that simply returned no hits), so the caller can
-        retry them instead of caching them as empty.
+        failed_ids). ``failed_ids`` lists the ids of sequences whose query
+        errored (distinct from sequences that simply returned no hits), so the
+        caller can retry them instead of caching them as empty. A batch that
+        fails its retries is split by ``_split_failed_batch`` (unless the
+        circuit is open), so only the sequences that still fail are listed.
     """
     n_threads = min(n_threads, len(batches))
     n_threads_str = "thread" if n_threads == 1 else "threads"
     logger.debug(f"Starting parallel execution with {n_threads} {n_threads_str}")
 
-    def worker_wrapper(batch, i):
+    if circuit is None:
+        circuit = BlastCircuit()
+    blast_kwargs = {
+        "evalue": evalue,
+        "hitlist_size": hitlist_size,
+        "entrez_query": entrez_query,
+    }
+
+    def worker_wrapper(batch, i) -> tuple[list[pd.DataFrame], list[str]]:
+        # Read before submitting: a batch submitted while the circuit is open
+        # got a single attempt, so it is not split even if another thread
+        # closes the circuit in the meantime.
+        retried = not circuit.is_open
         result = submit_blast_batch(
-            batch,
-            evalue=evalue,
-            hitlist_size=hitlist_size,
-            entrez_query=entrez_query,
-            batch_id=i + 1,
+            batch, batch_id=i + 1, circuit=circuit, **blast_kwargs
         )
+        if result is not None:
+            outcome = [result], []
+        elif not retried or circuit.is_open:
+            outcome = [], [rec.id for rec in batch]
+        else:
+            outcome = _split_failed_batch(batch, i + 1, circuit, **blast_kwargs)
         notify_progress(progress_handler, len(batch))
-        return result
+        return outcome
 
-    batch_results = Parallel(n_jobs=n_threads, backend="threading", verbose=0)(
-        delayed(worker_wrapper)(batch, i) for i, batch in enumerate(batches)
-    )
-
-    successful = [df for df in batch_results if df is not None]
-    failed_count = len(batch_results) - len(successful)
-
-    # Record ids in errored batches, so the caller can retry them rather than
-    # cache them as empty (a failed batch is not a "no hits" result).
-    failed_ids = [
-        rec.id
-        for batch, res in zip(batches, batch_results)
-        if res is None
-        for rec in batch
+    # Build every task here, in the caller's thread: each gets a copy of the
+    # caller's context (loguru's contextualize values included). A generator
+    # would not do, since joblib consumes part of it from its own threads.
+    tasks = [
+        delayed(contextvars.copy_context().run)(worker_wrapper, batch, i)
+        for i, batch in enumerate(batches)
     ]
+    outcomes = Parallel(n_jobs=n_threads, backend="threading", verbose=0)(tasks)
+
+    successful = [df for dfs, _ in outcomes for df in dfs]
+    # Ids of sequences whose query still errored after retries and splitting,
+    # so the caller can retry them rather than cache them as empty (a failed
+    # query is not a "no hits" result).
+    failed_ids = [rec_id for _, ids in outcomes for rec_id in ids]
+    failed_count = sum(1 for _, ids in outcomes if ids)
 
     if failed_count > 0:
-        logger.warning(f"{failed_count}/{len(batch_results)} batches failed")
+        logger.warning(
+            f"{failed_count}/{len(batches)} batches had failures: "
+            f"{len(failed_ids)} sequences not searched"
+        )
 
     if not successful:
         logger.error("All NCBI batches failed — returning empty DataFrame")
         return pd.DataFrame(), failed_ids
 
-    logger.debug(f"Batch success rate: {len(successful)}/{len(batch_results)}")
+    logger.debug(
+        f"Batches without failures: {len(batches) - failed_count}/{len(batches)}"
+    )
     return pd.concat(successful, ignore_index=True), failed_ids
 
 

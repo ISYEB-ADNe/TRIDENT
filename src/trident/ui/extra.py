@@ -14,6 +14,8 @@ import trident.pipelines as pipe
 from trident.logging import get_log_level
 
 from trident.ui.ui import (
+    failed_items,
+    show_failed_items_banner,
     COL,
     get_recent_param_sets,
     param_preset_selector,
@@ -79,6 +81,7 @@ def bold_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     # Save Results to Session State
     st.session_state.bold_search_df = bold_search_df
     st.session_state.bold_search_params = bold_search_params
+    st.session_state.bold_search_failed = failed_items(bold_search_df)
 
     # Cleanup
     logger.remove(handler_id)
@@ -144,12 +147,18 @@ def bold_search_workflow():
 
     # Raw Results Preview
     if mode != "NEW" and st.session_state.bold_search_df is not None:
-        show_missing_results_banner(
-            st.session_state.bold_input_species,
-            st.session_state.bold_search_df,
-            "scientificName",
-            item_label="species",
-        )
+        # Both banners describe the last run, so only while its settings hold.
+        if mode == "IDENTICAL":
+            show_failed_items_banner(
+                st.session_state.bold_search_failed, "species", "species", source="BOLD"
+            )
+            show_missing_results_banner(
+                st.session_state.bold_input_species,
+                st.session_state.bold_search_df,
+                "scientificName",
+                item_label="species",
+                failed=st.session_state.bold_search_failed,
+            )
         with st.expander(
             f"Inspect full BOLD search results ({len(st.session_state.bold_search_df)} records)",
             expanded=False,

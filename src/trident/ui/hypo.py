@@ -17,6 +17,8 @@ from trident.logging import get_log_level
 from trident.pipelines.results_pipeline import add_below_mol
 
 from trident.ui.ui import (
+    failed_items,
+    show_failed_items_banner,
     styled_or_plain,
     COL,
     BLAST_HELP,
@@ -230,6 +232,7 @@ def hypo_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
 
     # 5. Save Results and Cleanup
     st.session_state.hypo_merge_df = hypo_merge_df
+    st.session_state.hypo_search_failed = failed_items(hypo_search_df)
     st.session_state.hypo_merge_params = hypo_merge_params
     logger.remove(handler_id)
     progress_bar.empty()
@@ -280,6 +283,13 @@ def hypo_search_workflow():
         )
 
     # Raw Results Preview
+    if mode == "IDENTICAL":
+        show_failed_items_banner(
+            st.session_state.hypo_search_failed,
+            "BOLD proxy sequence",
+            "BOLD proxy sequences",
+            source="NCBI BLAST",
+        )
     if mode != "NEW" and st.session_state.hypo_merge_df is not None:
         with st.expander(
             f"Inspect full HYPO search results ({len(st.session_state.hypo_merge_df)} records)",
@@ -556,6 +566,7 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
         on_poll=_poll,
     )
     st.session_state.hypo_check_df = hypo_check_df
+    st.session_state.hypo_check_failed = failed_items(hypo_check_df)
     st.session_state.hypo_check_params = hypo_check_params
     st.session_state.hypo_check_summary_df = pipe.build_hypo_check_summary(
         hypo_check_df
@@ -580,6 +591,14 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
 def hypo_check_display():
     res_df = st.session_state.hypo_check_df
     summary_df = st.session_state.hypo_check_summary_df
+    # Empty check results (e.g. every check query failed) come back from the
+    # cache with no columns at all.
+    if res_df.empty:
+        if st.session_state.hypo_check_failed:
+            st.info("No check results: every check query failed.")
+        else:
+            st.info("No check results to show.")
+        return
     n_found = res_df[res_df["hit_found"].astype(bool)]["scientificName"].nunique()
     n_not_found = res_df[~res_df["hit_found"].astype(bool)]["scientificName"].nunique()
 
@@ -702,6 +721,13 @@ def hypo_final_check_workflow():
         )
 
         # Results
+        if mode == "IDENTICAL":
+            show_failed_items_banner(
+                st.session_state.hypo_check_failed,
+                "sequence",
+                "sequences",
+                source="NCBI BLAST",
+            )
         if mode != "NEW" and st.session_state.hypo_check_df is not None:
             st.divider()
             st.markdown("#### Verification Results")
