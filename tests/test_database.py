@@ -61,6 +61,25 @@ def test_full_cache_different_params(db_path):
     assert call_count == 2
 
 
+def test_full_cache_whole_float_and_int_share_the_cache(db_path):
+    """The notebook passes 90.0 where the app passes 90: same cache entry,
+    also inside lists. A fractional value stays distinct."""
+    call_count = 0
+
+    @save_to_db("test_full_num", cache=FullCache(local={"t": "t", "e": "extents"}))
+    def my_step(t=90, extents=None):
+        nonlocal call_count
+        call_count += 1
+        return pd.DataFrame({"val": [t]})
+
+    my_step(t=90.0, extents=[500.0, "global"], db_path=db_path)
+    my_step(t=90, extents=[500, "global"], db_path=db_path)
+    assert call_count == 1
+
+    my_step(t=90.5, extents=[500, "global"], db_path=db_path)
+    assert call_count == 2
+
+
 def test_full_cache_force_rerun(db_path):
     """force_rerun bypasses cache."""
     call_count = 0

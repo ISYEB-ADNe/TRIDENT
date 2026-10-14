@@ -43,11 +43,27 @@ def get_connection(
         conn.close()
 
 
+def _normalize_number(value):
+    """Write whole floats as ints, recursively: 90.0 and 90 make the same key.
+
+    The notebook passes floats where the app's widgets pass ints; without this
+    the two never share a cache entry.
+    """
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, list):
+        return [_normalize_number(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _normalize_number(v) for k, v in value.items()}
+    return value
+
+
 def _params_to_sql_values(params: dict) -> dict:
     """Convert param values to SQL-safe strings (JSON for dicts/lists)."""
+    values = {k: _normalize_number(v) for k, v in params.items()}
     return {
         k: json.dumps(v, default=str) if isinstance(v, (dict, list)) else str(v)
-        for k, v in params.items()
+        for k, v in values.items()
     }
 
 
