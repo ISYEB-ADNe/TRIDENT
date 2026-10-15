@@ -625,25 +625,25 @@ def show_missing_results_banner(
         )
 
 
+# Widget key of the selected sequence, shared by every tab's selector.
+SELECTED_SEQUENCE_KEY = "selected_sequence"
+
+
 def sequence_selector(
     show_sequence: bool = True,
     format_fn: Callable[[str], str] | None = None,
 ) -> str:
+    """Select a sequence, searchable by ID, kept from one tab to the next."""
     sequences = st.session_state.sequences_id
-    if format_fn:
-        options = {seq: format_fn(seq) for seq in sequences}
-        selected_sequence = st.selectbox(
-            "Select a sequence:",
-            sequences,
-            index=0,
-            format_func=lambda s: options[s],
-        )
-    else:
-        selected_sequence = st.selectbox(
-            "Select a sequence:",
-            sequences,
-            index=0,
-        )
+    persist_value(SELECTED_SEQUENCE_KEY, sequences[0])
+    selected_sequence = st.selectbox(
+        "Select a sequence (type to search):",
+        sequences,
+        key=SELECTED_SEQUENCE_KEY,
+        format_func=format_fn or str,
+        filter_mode="contains",
+    )
+    save_widget(SELECTED_SEQUENCE_KEY)
     sequences_df = st.session_state.sequences_df
     dna_sequence = sequences_df.loc[
         sequences_df["seq_id"] == selected_sequence, "dna_sequence"
