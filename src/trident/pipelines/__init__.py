@@ -12,8 +12,10 @@ from .mol_pipeline import (
 
 from .tax_pipeline import (
     prepare_resolution_input,
+    prepare_resolution_taxids,
     run_name_resolution,
     apply_name_resolution,
+    summarize_name_resolution,
     prepare_worms_input,
     run_worms_search,
     run_worms_merge,
@@ -80,8 +82,10 @@ __all__ = [
     "build_mol_summary",
     "build_mol_sequence_report",
     "prepare_resolution_input",
+    "prepare_resolution_taxids",
     "run_name_resolution",
     "apply_name_resolution",
+    "summarize_name_resolution",
     "prepare_worms_input",
     "run_worms_search",
     "run_worms_merge",

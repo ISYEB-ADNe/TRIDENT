@@ -12,6 +12,7 @@ from trident.core.utils import (
     ensure_columns,
     top_hit_per_group,
     normalize_name,
+    to_binomial,
 )
 
 
@@ -245,3 +246,14 @@ def test_preserve_order_missing_column():
     df = pd.DataFrame({"other": [1, 2]})
     result = identity(df)
     assert list(result["other"]) == [1, 2]
+
+
+def test_to_binomial_keeps_the_species_a_qualifier_refers_to():
+    """Two different 'cf.' comparisons stay two names; 'sp.' codes and
+    subspecies are dropped."""
+    assert to_binomial("Lutjanus cf. russellii") == "Lutjanus cf. russellii"
+    assert (
+        to_binomial("Andinoacara cf. pulcher 'Venezuela'") == "Andinoacara cf. pulcher"
+    )
+    assert to_binomial("Rattus sp. NH 2147") == "Rattus sp."
+    assert to_binomial("Odobenus rosmarus rosmarus") == "Odobenus rosmarus"

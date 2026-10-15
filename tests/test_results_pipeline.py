@@ -255,7 +255,7 @@ def test_empty_mol_list_flows_to_results(monkeypatch):
     """No NCBI hit at all: every later list is empty but has its columns, and
     Results still lists each sequence, as lost at the MOL step."""
     import requests
-    from Bio import Entrez
+    from Bio import Blast
 
     import trident.pipelines as pipe
     from trident.clients.ncbi import BLAST_HIT_COLUMNS
@@ -264,7 +264,7 @@ def test_empty_mol_list_flows_to_results(monkeypatch):
         raise AssertionError("an empty list must not query any database")
 
     monkeypatch.setattr(requests.Session, "send", offline)
-    monkeypatch.setattr(Entrez, "efetch", offline)
+    monkeypatch.setattr(Blast, "qblast", offline)
 
     sequences_df = pd.DataFrame({"seq_id": ["s1", "s2"], "dna_sequence": ["A", "C"]})
     ncbi_search_df = pd.DataFrame(columns=BLAST_HIT_COLUMNS)

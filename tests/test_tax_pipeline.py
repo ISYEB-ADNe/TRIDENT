@@ -1,9 +1,10 @@
 """Tests for TAX pipeline name resolution (R3) and the accepted-name joins.
 
 Covers the pure logic: prepare_worms_input (accepted-genus expansion),
-apply_name_resolution (attach acceptedName/AphiaID), and run_worms_merge
-(in_mol credited on the accepted name, verbatim preserved). The cached
-run_name_resolution step is exercised via its client contract in test_worms.py.
+apply_name_resolution (attach acceptedName/AphiaID), run_worms_merge (in_mol
+credited on the accepted name, verbatim preserved) and summarize_name_resolution
+(what the TAX tab reports about the MOL names). The cached run_name_resolution
+step is exercised via its client contract in test_worms.py.
 """
 
 import inspect
@@ -12,8 +13,10 @@ import pandas as pd
 
 from trident.pipelines.tax_pipeline import (
     prepare_worms_input,
+    prepare_resolution_input,
     apply_name_resolution,
     run_worms_merge,
+    summarize_name_resolution,
 )
 
 # run_worms_merge is wrapped by @save_to_db + @preserve_sequence_order; unwrap to
@@ -167,3 +170,82 @@ def test_merge_without_resolution_matches_raw_name():
     assert bool(out.iloc[0]["in_mol"]) is True
     # No resolution -> raw == accepted -> not a synonym -> blank.
     assert pd.isna(out.iloc[0]["verbatimIdentification"])
+
+
+# --- summarize_name_resolution ---
+
+
+def _resolved_mol():
+    """The example's two synonyms, a name WoRMS does not know, a failed lookup."""
+    mol = pd.DataFrame(
+        {
+            "seq_id": ["s1", "s1", "s2", "s2", "s3", "s4"],
+            "scientificName": [
+                "Gadus ogac",
+                "Gadus macrocephalus",
+                "Myoxocephalus verrucosus",
+                "Myoxocephalus scorpius",
+                "Liparis sp.",
+                "Atherinomorus lacunosus",
+            ],
+        }
+    )
+    resolution = pd.DataFrame(
+        {
+            "scientificName": [
+                "Gadus ogac",
+                "Gadus macrocephalus",
+                "Myoxocephalus verrucosus",
+                "Myoxocephalus scorpius",
+                "Liparis sp.",
+            ],
+            "acceptedName": [
+                "Gadus macrocephalus",
+                "Gadus macrocephalus",
+                "Myoxocephalus scorpius",
+                "Myoxocephalus scorpius",
+                "Liparis sp.",
+            ],
+            "acceptedNameUsageID": [254538, 254538, 127203, 127203, None],
+            "is_synonym": [True, False, True, False, False],
+            "matchedBy": ["name", "name", "name", "name", None],
+        }
+    )
+    # Atherinomorus lacunosus is absent from the resolution: its lookup failed.
+    return apply_name_resolution(mol, resolution)
+
+
+def test_summary_counts_and_lists_the_synonyms_merged():
+    """MOL names are counted as NCBI gives them and species as WoRMS accepts
+    them; the synonyms WoRMS merges are listed."""
+    summary = summarize_name_resolution(_resolved_mol())
+    assert (summary.n_names, summary.n_species) == (6, 4)
+    assert summary.renamed[["scientificName", "acceptedName"]].values.tolist() == [
+        ["Gadus ogac", "Gadus macrocephalus"],
+        ["Myoxocephalus verrucosus", "Myoxocephalus scorpius"],
+    ]
+
+
+def test_not_found_names_exclude_failed_lookups_and_tell_their_genus():
+    """A failed lookup also has no AphiaID, but it is retried, not absent. A
+    name not found whose genus is in TAX lost no candidates."""
+    tax = pd.DataFrame({"genus": ["Liparis"]})
+    summary = summarize_name_resolution(
+        _resolved_mol(), tax_df=tax, failed_names=["Atherinomorus lacunosus"]
+    )
+    assert summary.not_found.values.tolist() == [["Liparis sp.", True]]
+
+
+def test_hits_without_a_name_are_neither_resolved_nor_expanded():
+    """Also when no hit has a name at all."""
+    mol = pd.DataFrame(
+        {"scientificName": [None, "Gadus morhua"], "genus": [None, "Gadus"]}
+    )
+    assert prepare_resolution_input(mol) == ["Gadus morhua"]
+    resolved = apply_name_resolution(mol, None)
+    assert prepare_worms_input(resolved) == ["Gadus"]
+    assert summarize_name_resolution(resolved).n_names == 1
+
+    nameless = apply_name_resolution(mol.iloc[:1], None)
+    assert prepare_worms_input(nameless) == []
+    assert summarize_name_resolution(nameless).n_names == 0

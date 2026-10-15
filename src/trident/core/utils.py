@@ -19,6 +19,26 @@ def normalize_name(name):
     return " ".join(name.split()).casefold()
 
 
+# Open-nomenclature qualifiers that refer to a species: 'Genus cf. epithet'.
+_SPECIES_QUALIFIERS = {"cf.", "aff."}
+
+
+def to_binomial(name) -> str:
+    """Genus and species epithet of a taxon name (its first two words).
+
+    Subspecies or strain suffixes and a subgenus in parentheses are dropped,
+    e.g. 'Octopus (Amphioctopus) minor ssp' -> 'Octopus minor'. A 'cf.' or
+    'aff.' qualifier keeps the species it refers to ('Lutjanus cf. russellii'),
+    so two different comparisons stay two names; 'Genus sp. CODE' gives
+    'Genus sp.'. A one-word name is returned as is; an empty or missing name
+    (None, NaN) gives ''.
+    """
+    words = name.split() if isinstance(name, str) else []
+    words = [w for w in words if not w.startswith("(")]
+    n_words = 3 if len(words) > 2 and words[1] in _SPECIES_QUALIFIERS else 2
+    return " ".join(words[:n_words])
+
+
 def ensure_columns(
     df: pd.DataFrame, cols: "list[str] | tuple[str, ...]", fill=pd.NA
 ) -> pd.DataFrame:

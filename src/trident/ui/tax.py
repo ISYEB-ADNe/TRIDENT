@@ -66,6 +66,7 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
         resolution_df, _ = run_with_progress(
             logsink.wrap(pipe.run_name_resolution),
             res_names,
+            ncbi_taxids=pipe.prepare_resolution_taxids(mol_df),
             db_path=st.session_state.db_path,
             retry_empty=retry_empty,
             user_agent=config.user_agent(),
@@ -75,7 +76,8 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
         )
     else:
         resolution_df = None
-    tax_failed = failed_items(resolution_df)
+    failed_names = failed_items(resolution_df)
+    tax_failed = list(failed_names)
 
     # Attach acceptedName/acceptedNameUsageID (raw scientificName kept). Stored
     # back so Results' MOL+GEO match also keys on the accepted name.
@@ -140,6 +142,7 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
     st.session_state.tax_params = final_params
     st.session_state.tax_df = tax_df
     st.session_state.tax_failed = tax_failed
+    st.session_state.tax_failed_names = failed_names
     st.session_state.tax_summary_df = summary_df
     st.session_state.tax_species = tax_df["scientificName"].unique().tolist()
 
@@ -217,13 +220,15 @@ def render_worms_metrics():
     # synonyms (e.g. Gadus ogac -> Gadus macrocephalus) are not falsely flagged
     # as missing. Falls back to the raw MOL names when resolution is off.
     mol_df = st.session_state.mol_df
-    if "acceptedName" in mol_df.columns:
+    resolved = st.session_state.tax_params.get("worms_resolve_names", False) and (
+        "acceptedName" in mol_df.columns
+    )
+    if resolved:
         mol_species = set(mol_df["acceptedName"].dropna())
     else:
         mol_species = set(st.session_state.mol_species)
     tax_species = set(st.session_state.tax_species)
     new_count = len(tax_species - mol_species)
-    missing_species = sorted(list(mol_species - tax_species))
 
     col1, col2, col3 = st.columns(3)
     col1.metric(
@@ -236,23 +241,91 @@ def render_worms_metrics():
         f"+{new_count:,}",
         help="Species added by WoRMS expansion that weren't in the MOL list",
     )
+
+    if not resolved:
+        # No WoRMS lookup of the MOL names: say only that they are not in TAX.
+        missing = sorted(mol_species - tax_species)
+        col3.metric(
+            "MOL names not in TAX",
+            len(missing),
+            help=(
+                "MOL names that are not among the species of the TAX list. "
+                "Names were not looked up in WoRMS (name resolution is off)."
+            ),
+        )
+        if missing:
+            with st.expander("View the MOL names not in TAX", expanded=False):
+                st.dataframe(
+                    [{"MOL name": name} for name in missing],
+                    width="stretch",
+                    hide_index=True,
+                )
+        return
+
+    summary = pipe.summarize_name_resolution(
+        mol_df,
+        tax_df=st.session_state.tax_df,
+        failed_names=st.session_state.tax_failed_names,
+    )
+    renamed, not_found = summary.renamed, summary.not_found
     col3.metric(
-        "Missing MOL Hits",
-        len(missing_species),
-        help="MOL species names not found/accepted in WoRMS, often due to badly formed names or synonyms",
-        delta=f"{len(missing_species)} unresolved" if missing_species else "None",
-        delta_color="inverse",
+        "Not found in WoRMS",
+        len(not_found),
+        help=(
+            "MOL names that match no WoRMS record: taxa outside WoRMS, or open "
+            "nomenclature such as 'Genus sp.'. 'Genus in TAX' in the list tells "
+            "whether their genus was expanded anyway. Names whose lookup failed "
+            "are not counted: they are retried on the next run."
+        ),
     )
 
-    if missing_species:
-        with st.expander("⚠️ View Unresolved MOL Names", expanded=False):
-            st.warning("The following names from the MOL list were not found in WoRMS:")
-
-            missing_table = [{"Species Name": name} for name in missing_species]
+    if not renamed.empty:
+        merged = summary.n_names - summary.n_species
+        merged_text = (
+            f" ({merged} {'synonym' if merged == 1 else 'synonyms'} merged)"
+            if merged
+            else ""
+        )
+        st.caption(
+            f"{summary.n_names} MOL names = {summary.n_species} WoRMS accepted "
+            f"species{merged_text}. TAX works on the WoRMS accepted names."
+        )
+        with st.expander("View the MOL names renamed by WoRMS", expanded=False):
+            found_by = {"name": "Name", "ncbi_taxid": "NCBI taxid"}
             st.dataframe(
-                missing_table,
+                renamed.assign(matchedBy=renamed["matchedBy"].map(found_by)),
                 width="stretch",
                 hide_index=True,
+                column_config={
+                    "scientificName": "MOL name (NCBI)",
+                    "acceptedName": "WoRMS accepted name",
+                    "matchedBy": st.column_config.TextColumn(
+                        "Found by",
+                        help=(
+                            "How WoRMS found the MOL name: by the name itself, "
+                            "or, when WoRMS does not know the name, through "
+                            "the NCBI taxid of its BLAST hits."
+                        ),
+                    ),
+                },
+            )
+
+    if not not_found.empty:
+        with st.expander("View the MOL names not found in WoRMS", expanded=False):
+            st.dataframe(
+                not_found,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "scientificName": "MOL name",
+                    "genusInTax": st.column_config.CheckboxColumn(
+                        "Genus in TAX",
+                        help=(
+                            "The genus of this name is in the TAX list: its "
+                            "species are candidates for the sequence anyway."
+                        ),
+                    ),
+                },
             )
 
 

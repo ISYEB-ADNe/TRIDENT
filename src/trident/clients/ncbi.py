@@ -1,13 +1,15 @@
 """NCBI BLAST client — submit queries, parse results, filter by barcoding gap."""
 
 import contextvars
+import io
+import re
 import threading
-from collections.abc import Callable, Iterable
+import zipfile
+from collections.abc import Callable
 from functools import wraps
 
 import pandas as pd
-from Bio import Entrez
-from Bio.Blast import NCBIWWW, NCBIXML
+from Bio import Blast
 from Bio.SeqRecord import SeqRecord
 from joblib import Parallel, delayed
 from loguru import logger
@@ -21,26 +23,25 @@ from trident.core.constants import (
     NCBI_QUERY_COVER,
     NCBI_METHOD,
 )
-from trident.core.utils import extract_specific_epithet, notify_progress
+from trident.core.utils import extract_specific_epithet, notify_progress, to_binomial
 
 
 ### CREDENTIALS ###
 
 
 def set_ncbi_email(email: str | None) -> None:
-    """Set ``Entrez.email`` and ``NCBIWWW.email`` (process-level globals)."""
+    """Set ``Blast.email``, sent with each BLAST job (a process-level global)."""
     if not email:
         return
-    Entrez.email = email
-    NCBIWWW.email = email
+    Blast.email = email
     logger.debug(f"NCBI contact email set: {email}")
 
 
 def setup_ncbi_credentials() -> None:
     """Configure Biopython with the contact email from ``core.config``.
 
-    Sets ``Entrez.email`` (E-utilities) and ``NCBIWWW.email`` (qblast).
-    Both are optional but recommended — NCBI may throttle anonymous requests.
+    Sets ``Blast.email``. Optional but recommended: NCBI may throttle anonymous
+    requests.
     """
     email = config.contact_email()
 
@@ -147,115 +148,59 @@ BLAST_RAW_COLUMNS = [
     "gaps",
     "query_start",
     "query_end",
+    "ncbi_taxid",
+    "sciname",
 ]
 
 
 def parse_blast_records(records: list) -> pd.DataFrame:
-    """Parse a list of BioPython BLAST records into a flat DataFrame.
+    """Parse Bio.Blast records (XML2) into a flat DataFrame, one row per HSP.
 
-    Each row corresponds to one HSP (High-scoring Segment Pair). Records with
-    no alignments produce no rows.
+    A hit that merges several identical database records is described by its
+    first record: its title (hit_def), accession, NCBI taxid and the scientific
+    name NCBI's taxonomy gives that taxid (sciname). Records with no hits
+    produce no rows.
 
     Args:
-        records: List of BioPython BLAST record objects from NCBIXML.parse().
+        records: Bio.Blast Record objects, as returned by Blast.parse().
 
     Returns:
-        DataFrame with columns: seq_id, query_length, hit_def, hit_id,
-        hit_accession, score, bits, evalue, align_length, identities,
-        gaps, query_start, query_end.
+        DataFrame with the columns of BLAST_RAW_COLUMNS.
     """
     rows = []
 
     for record in records:
-        seq_id = record.query  # Original FASTA sequence ID
-        query_length = record.query_length
+        # In XML2 the query id is NCBI's (Query_123); the FASTA id is its title.
+        seq_id = record.query.description
+        query_length = len(record.query.seq)
 
-        for alignment in record.alignments:
-            for hsp in alignment.hsps:
+        for hit in record:
+            target = hit.target
+            for hsp in hit:
+                # Bio.Blast coordinates are 0-based and end-exclusive; BLAST
+                # positions are 1-based and inclusive.
+                query_coords = hsp.coordinates[1]
                 rows.append(
                     {
                         "seq_id": seq_id,
                         "query_length": query_length,
-                        "hit_def": alignment.hit_def,
-                        "hit_id": alignment.hit_id,
-                        "hit_accession": alignment.accession,
+                        "hit_def": target.description,
+                        "hit_id": target.id,
+                        "hit_accession": target.name,
                         "score": hsp.score,
-                        "bits": hsp.bits,
-                        "evalue": hsp.expect,
-                        "align_length": hsp.align_length,
-                        "identities": hsp.identities,
-                        "gaps": hsp.gaps,
-                        "query_start": hsp.query_start,
-                        "query_end": hsp.query_end,
+                        "bits": hsp.annotations["bit score"],
+                        "evalue": hsp.annotations["evalue"],
+                        "align_length": hsp.shape[1],
+                        "identities": hsp.annotations["identity"],
+                        "gaps": hsp.annotations.get("gaps", 0),
+                        "query_start": int(min(query_coords[0], query_coords[-1])) + 1,
+                        "query_end": int(max(query_coords[0], query_coords[-1])),
+                        "ncbi_taxid": target.annotations.get("taxid"),
+                        "sciname": target.annotations.get("sciname"),
                     }
                 )
 
     return pd.DataFrame(rows, columns=BLAST_RAW_COLUMNS)
-
-
-### TAXONOMY ###
-
-
-def to_binomial(org: str) -> str:
-    """Truncate an organism name string to its binomial (genus + species epithet).
-
-    Args:
-        org: Raw organism name string, possibly with subspecies or strain suffixes.
-
-    Returns:
-        First two words of org joined by a space, or the single word if only one
-        exists, or an empty string if org is empty or None.
-    """
-    parts = (org or "").split()
-    return " ".join(parts[:2]) if len(parts) >= 2 else (parts[0] if parts else "")
-
-
-@require_ncbi_auth
-def fetch_standardized_taxonomy(
-    accessions: Iterable[str], chunk_size: int = 200
-) -> dict[str, str]:
-    """Retrieve official scientific names for nucleotide accessions via NCBI Entrez.
-
-    Fetches GenBank records in chunks and maps each accession (both with and
-    without version suffix) to its organism name truncated to binomial form.
-    Chunks that fail are skipped and logged at DEBUG level.
-
-    Args:
-        accessions: Accession strings to look up (e.g. "MT123456.1").
-        chunk_size: Maximum number of IDs per Entrez request. Lower values
-            reduce memory use and risk of request failure.
-
-    Returns:
-        Dict mapping each accession (versioned and unversioned) to its
-        binomial scientific name.
-    """
-    accession_list = list(accessions)
-    taxonomy_map = {}
-
-    logger.debug(
-        f"Fetching taxonomy for {len(accession_list)} accessions in chunks of {chunk_size}"
-    )
-
-    for i in range(0, len(accession_list), chunk_size):
-        chunk = accession_list[i : i + chunk_size]
-        try:
-            with Entrez.efetch(db="nucleotide", id=chunk, retmode="xml") as handle:
-                records = Entrez.read(handle)
-
-            for record in records:
-                acc_v = str(record.get("GBSeq_accession-version"))
-                org = str(record.get("GBSeq_organism"))
-
-                org = to_binomial(org)
-
-                if acc_v and org:
-                    taxonomy_map[acc_v] = org
-                    taxonomy_map[acc_v.split(".")[0]] = org
-
-        except Exception as e:
-            logger.debug(f"Failed to fetch chunk {i // chunk_size + 1}: {e}")
-
-    return taxonomy_map
 
 
 # Waits before each retry of a failed BLAST job. NCBI asks clients to poll a
@@ -267,26 +212,80 @@ BLAST_RETRY_DELAYS = (30.0, 60.0)
 BLAST_CIRCUIT_THRESHOLD = 3
 
 
+# Messages in XML2 query files (see read_xml2_archive).
+_XML2_MESSAGE = re.compile(rb"<message>(.*?)</message>", re.DOTALL)
+_XML2_QUERY_TITLE = re.compile(rb"<query-title>(.*?)</query-title>", re.DOTALL)
+_NO_HITS_MESSAGE = b"No hits found"
+
+
+def read_xml2_archive(data: bytes) -> list:
+    """Parse the zip archive NCBI returns for an XML2 BLAST job.
+
+    The archive holds one XML2 file per query (``<RID>_<n>.xml``) and an index
+    file (``<RID>.xml``) that only lists them, so the query files are parsed in
+    query order and the index is skipped.
+
+    A query can carry a ``<message>`` element, which the Bio.Blast XML2 parser
+    cannot read (no handler for it, up to Biopython 1.88): "No hits found", or
+    a per-query BLAST warning such as "Could not calculate ungapped
+    Karlin-Altschul parameters" on a low-complexity sequence. Messages are
+    removed before parsing, so the query comes out with whatever hits it has;
+    any message other than "No hits found" is logged as a warning.
+
+    Returns:
+        Bio.Blast Record objects, one per query.
+    """
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        numbered = {}
+        for name in archive.namelist():
+            match = re.search(r"_(\d+)\.xml$", name)
+            if match:
+                numbered[int(match.group(1))] = name
+        records = []
+        for n in sorted(numbered):
+            xml = archive.read(numbered[n])
+            for message in _XML2_MESSAGE.findall(xml):
+                if message.strip() != _NO_HITS_MESSAGE:
+                    title = _XML2_QUERY_TITLE.search(xml)
+                    query = title.group(1).decode(errors="replace") if title else n
+                    logger.warning(
+                        f"BLAST message for {query}: {message.decode(errors='replace')}"
+                    )
+            xml = _XML2_MESSAGE.sub(b"", xml)
+            records.extend(Blast.parse(io.BytesIO(xml)))
+        return records
+
+
 def _run_qblast_once(
     multi_fasta: str,
     evalue: float,
     hitlist_size: int,
     entrez_query: str | None,
 ) -> list:
-    """Submit one BLASTn job to NCBI and parse its XML result (one attempt)."""
-    handle = NCBIWWW.qblast(
+    """Submit one BLASTn job to NCBI and parse its XML2 result (one attempt).
+
+    Raises if the result does not hold one record per query, so an incomplete
+    archive is retried instead of passing for queries without hits.
+    """
+    with Blast.qblast(
         program="blastn",
         database="nt",
         sequence=multi_fasta,
         expect=evalue,
         hitlist_size=hitlist_size,
         entrez_query=entrez_query,
-    )
-    return list(NCBIXML.parse(handle))
+        format_type="XML2",
+    ) as stream:
+        data = stream.read()
+    records = read_xml2_archive(data)
+    n_queries = sum(line.startswith(">") for line in multi_fasta.splitlines())
+    if len(records) != n_queries:
+        raise ValueError(f"BLAST result holds {len(records)} of {n_queries} queries")
+    return records
 
 
 # Same job, resubmitted as a whole after each delay in BLAST_RETRY_DELAYS: a
-# failed submission, poll or truncated XML response is retried.
+# failed submission, poll or truncated response is retried.
 _run_qblast = retry_call(delays=BLAST_RETRY_DELAYS)(_run_qblast_once)
 
 
@@ -338,15 +337,16 @@ def submit_blast_batch(
     """Submit a BLASTn query for a single batch of sequences.
 
     Builds a multi-FASTA string from the batch, submits it to NCBI BLAST via
-    qblast, parses the XML response, and returns a raw results DataFrame.
+    qblast, parses the XML2 response, and returns a raw results DataFrame.
     With ``retry``, a failed job is resubmitted after each delay in
     ``BLAST_RETRY_DELAYS``; if it still fails, returns None so the caller can
     handle partial results.
 
     Args:
         batch: List of SeqRecord objects to query.
-        entrez_query: Optional Entrez query string to restrict the search space
-            (e.g. '"Gadus morhua"[orgn]').
+        entrez_query: Optional filter in Entrez search syntax (BLAST's
+            ENTREZ_QUERY parameter, applied by NCBI to the searched database),
+            e.g. '"Gadus morhua"[orgn]'.
         evalue: E-value threshold for reporting hits.
         hitlist_size: Maximum number of hits to return per query sequence.
         batch_id: Identifier used for logging only.
@@ -461,7 +461,8 @@ def run_blast_batches(
         n_threads: Maximum number of concurrent threads. Capped at len(batches).
         evalue: E-value significance threshold for BLAST hits.
         hitlist_size: Maximum number of hits per query sequence.
-        entrez_query: Optional Entrez query to restrict the BLAST search space.
+        entrez_query: Optional filter in Entrez search syntax, passed to every
+            job (see submit_blast_batch).
         progress_handler: Optional progress tracker. Accepts:
             - dict with a 'current' key (incremented by batch size) for
               Streamlit or notebook use.
@@ -551,6 +552,7 @@ BLAST_HIT_COLUMNS = [
     "genus",
     "specificEpithet",
     "scientificName",
+    "ncbi_taxid",
     "query_cover",
     "identity_percentage",
     "align_length",
@@ -571,10 +573,9 @@ def process_blast_results(
     """Compute derived metrics and standardize taxonomy for raw BLAST results.
 
     Adds identity_percentage, query_cover, scientificName, genus,
-    specificEpithet, hit_url, and dna_sequence columns. Scientific names are
-    extracted from hit_def (first two words). Accessions whose name appears
-    only once in the results are re-resolved via Entrez to correct malformed
-    hit_def entries.
+    specificEpithet, hit_url, and dna_sequence columns. scientificName is the
+    binomial of the hit's NCBI taxonomy name (sciname); the record title
+    (hit_def) is kept as is, for display only.
 
     Args:
         df: Raw BLAST DataFrame from parse_blast_records().
@@ -597,31 +598,11 @@ def process_blast_results(
         ((df["query_end"] - df["query_start"] + 1) / df["query_length"]) * 100
     ).round(round_digits)
 
-    # Most hit_def entries have the organism name at the start
-    df["scientificName"] = df["hit_def"].str.split().str[:2].str.join(" ")
-    # Names that occur exactly once are likely malformed — re-resolve via Entrez
-    counts = df["scientificName"].value_counts(dropna=False)
-    unique_names = counts[counts == 1].index
-    accessions_with_unique_names = (
-        df.loc[df["scientificName"].isin(unique_names), "hit_accession"]
-        .dropna()
-        .unique()
-        .tolist()
-    )
+    # A hit without a taxonomy name gets no name (NaN), not an empty one.
+    df["scientificName"] = df["sciname"].map(to_binomial).replace("", pd.NA)
 
-    if accessions_with_unique_names:
-        logger.debug(
-            f"Fetching standardized taxonomy for {len(accessions_with_unique_names)} "
-            "accessions with unique organism names"
-        )
-        scientific_names_map = fetch_standardized_taxonomy(accessions_with_unique_names)
-
-        df["scientificName"] = (
-            df["hit_accession"].map(scientific_names_map).fillna(df["scientificName"])
-        )
-
-    # First token of the name. Vectorised and tolerant of an empty/NaN name
-    # (a malformed hit_def): genus becomes NaN rather than raising IndexError.
+    # First token of the name. Vectorised and tolerant of a missing name: genus
+    # becomes NaN rather than raising IndexError.
     df["genus"] = df["scientificName"].str.split().str[0]
     df["specificEpithet"] = df.apply(
         lambda row: extract_specific_epithet(row["scientificName"], row["genus"]),

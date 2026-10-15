@@ -218,6 +218,7 @@ class AppState:
     tax_species: list[str] = field(default_factory=list)
     tax_summary_df: "pd.DataFrame | None" = None
     tax_failed: list[str] = field(default_factory=list)
+    tax_failed_names: list[str] = field(default_factory=list)
     tax_df: "pd.DataFrame | None" = None
 
     gbif_logs: list[str] = field(default_factory=list)

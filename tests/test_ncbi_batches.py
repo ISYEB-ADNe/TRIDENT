@@ -1,11 +1,14 @@
 """Failure handling of NCBI BLAST batches (``run_blast_batches``).
 
-NCBI is faked at its boundary (``NCBIWWW.qblast`` and the XML parser): each
-query sequence gets one hit, a job holding a "bad" sequence is rejected, and
-``down`` makes every job fail. Waits between retries are skipped.
+NCBI is faked at its boundary (``Blast.qblast`` and the XML2 archive reader):
+each query sequence gets one real hit (from the XML2 test fixture), a job
+holding a "bad" sequence is rejected, and ``down`` makes every job fail. Waits
+between retries are skipped.
 """
 
 import contextvars
+import copy
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -20,20 +23,32 @@ def _batch(start: int, n: int) -> list[SeqRecord]:
     return [SeqRecord(Seq("ACGT"), id=f"s{i}") for i in range(start, start + n)]
 
 
-def _record(seq_id: str) -> SimpleNamespace:
-    """A BLAST record with a single hit, as NCBIXML.parse yields it."""
-    hsp = SimpleNamespace(
-        score=1,
-        bits=1.0,
-        expect=0.0,
-        align_length=4,
-        identities=4,
-        gaps=0,
-        query_start=1,
-        query_end=4,
-    )
-    hit = SimpleNamespace(hit_def="hit", hit_id="hit", accession="A1", hsps=[hsp])
-    return SimpleNamespace(query=seq_id, query_length=4, alignments=[hit])
+_FIXTURE = Path(__file__).parent / "fixtures" / "blast_xml2_one_query.zip"
+_TEMPLATE = ncbi.read_xml2_archive(_FIXTURE.read_bytes())[0]
+
+
+class _Stream:
+    """What Blast.qblast returns: a response to read, usable with ``with``."""
+
+    def __init__(self, data):
+        self.data = data
+
+    def read(self):
+        return self.data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _record(seq_id: str):
+    """A Bio.Blast record for ``seq_id`` with a single hit."""
+    record = copy.deepcopy(_TEMPLATE)
+    record.query.description = seq_id
+    del record[1:]
+    return record
 
 
 @pytest.fixture
@@ -51,10 +66,10 @@ def ncbi_fake(monkeypatch):
         ]
         if fake.bad & set(ids):
             raise ValueError("NCBI rejected the query")
-        return ids  # the "handle" handed to the parser
+        return _Stream(ids)  # the archive "bytes"
 
-    monkeypatch.setattr(ncbi.NCBIWWW, "qblast", qblast)
-    monkeypatch.setattr(ncbi.NCBIXML, "parse", lambda ids: map(_record, ids))
+    monkeypatch.setattr(ncbi.Blast, "qblast", qblast)
+    monkeypatch.setattr(ncbi, "read_xml2_archive", lambda ids: list(map(_record, ids)))
     monkeypatch.setattr(http.time, "sleep", lambda s: None)
     return fake
 
@@ -113,15 +128,24 @@ def test_every_worker_runs_in_the_callers_context(ncbi_fake, monkeypatch):
         "caller", default=None
     )
     seen = []
-    fake_qblast = ncbi.NCBIWWW.qblast
+    fake_qblast = ncbi.Blast.qblast
 
     def qblast(**kwargs):
         seen.append(var.get())
         return fake_qblast(**kwargs)
 
-    monkeypatch.setattr(ncbi.NCBIWWW, "qblast", qblast)
+    monkeypatch.setattr(ncbi.Blast, "qblast", qblast)
     var.set("ui-run")
 
     ncbi.run_blast_batches([_batch(i, 1) for i in range(12)], n_threads=3)
 
     assert seen == ["ui-run"] * 12
+
+
+def test_archive_missing_a_query_fails_the_job(monkeypatch):
+    """A result without one record per query is an error (retried), not
+    queries without hits."""
+    monkeypatch.setattr(ncbi.Blast, "qblast", lambda **k: _Stream(["s0"]))
+    monkeypatch.setattr(ncbi, "read_xml2_archive", lambda ids: list(map(_record, ids)))
+    with pytest.raises(ValueError, match="1 of 2 queries"):
+        ncbi._run_qblast_once(">s0\nACGT\n>s1\nACGT\n", 1e-10, 10, None)

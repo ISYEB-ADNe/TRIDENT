@@ -10,6 +10,8 @@ Exploration:
     build_tax_summary(tax_df)
 """
 
+from typing import NamedTuple
+
 import pandas as pd
 import numpy as np
 
@@ -45,10 +47,13 @@ def prepare_worms_input(df: pd.DataFrame) -> list[str]:
         List of unique genera (non-null) to query in WoRMS.
     """
     if "acceptedName" in df.columns:
-        accepted_genus = df["acceptedName"].dropna().str.split().str[0]
-        genera = accepted_genus[accepted_genus != ""].unique().tolist()
+        genera = df["acceptedName"].map(
+            lambda name: name.split()[0] if isinstance(name, str) and name else None
+        )
     else:
-        genera = df["genus"].dropna().unique().tolist()
+        genera = df["genus"]
+    # A hit without a name has no genus to expand.
+    genera = genera.dropna().unique().tolist()
     genus_word = "genus" if len(genera) == 1 else "genera"
     logger.debug(f"Prepared WoRMS input: {len(genera)} unique {genus_word}")
     return genera
@@ -62,12 +67,28 @@ def prepare_resolution_input(mol_df: pd.DataFrame) -> list[str]:
     return mol_df["scientificName"].dropna().unique().tolist()
 
 
+def prepare_resolution_taxids(mol_df: pd.DataFrame) -> dict[str, int]:
+    """NCBI taxid of each MOL name, for names WoRMS does not find by name.
+
+    A binomial can come from hits with several taxids (e.g. subspecies); the
+    most frequent one is kept.
+    """
+    if "ncbi_taxid" not in mol_df.columns:
+        return {}
+    hits = mol_df[["scientificName", "ncbi_taxid"]].dropna()
+    return {
+        name: int(taxids.mode().iloc[0])
+        for name, taxids in hits.groupby("scientificName")["ncbi_taxid"]
+    }
+
+
 @save_to_db(
     table_name="name_resolution",
     cache=PartialCache(items_kwarg="names", item_key="scientificName"),
 )
 def run_name_resolution(
     names: list[str],
+    ncbi_taxids: dict[str, int] | None = None,
     user_agent: str | None = None,
     progress_handler: dict | object | None = None,
     failure_sink: list | None = None,
@@ -75,12 +96,14 @@ def run_name_resolution(
     """Resolve MOL (NCBI) names to their WoRMS accepted name + AphiaID (R3).
 
     One AphiaRecordsByName lookup per unique name (cached per item, so only new
-    names cost a call). Names not in WoRMS are returned unchanged (acceptedName
-    == input, no AphiaID). Only genuine network/HTTP errors reach failure_sink;
-    a 404 is a valid not-found, not a failure.
+    names cost a call). A name WoRMS does not know is looked up a second time
+    through its NCBI taxid, when given. Names found neither way are returned
+    unchanged (acceptedName == input, no AphiaID). Only genuine network/HTTP
+    errors reach failure_sink; a 404 is a valid not-found, not a failure.
 
     Args:
         names: Unique MOL scientific names to resolve.
+        ncbi_taxids: Optional NCBI taxid per name (prepare_resolution_taxids).
         user_agent: User-Agent header for the WoRMS requests.
         progress_handler: Optional progress tracker (dict 'current' / .update()).
         failure_sink: If provided, names whose query errored are appended so the
@@ -88,16 +111,20 @@ def run_name_resolution(
 
     Returns:
         DataFrame with columns scientificName, acceptedName, acceptedNameUsageID,
-        is_synonym (one row per input name).
+        is_synonym, matchedBy ('name', 'ncbi_taxid', or empty when not found),
+        one row per input name.
     """
     logger.info(f"Resolving {len(names)} MOL names against WoRMS")
     session = create_session(user_agent=user_agent)
+    ncbi_taxids = ncbi_taxids or {}
     rows: list[dict] = []
     failed: list[str] = []
     try:
         for name in names:
             try:
-                resolved = resolve_accepted_name(name, session=session)
+                resolved = resolve_accepted_name(
+                    name, ncbi_taxid=ncbi_taxids.get(name), session=session
+                )
             except Exception as exc:
                 logger.warning(f"WoRMS resolution failed for '{name}': {exc}")
                 failed.append(name)
@@ -110,6 +137,7 @@ def run_name_resolution(
                     "acceptedName": resolved["accepted_name"],
                     "acceptedNameUsageID": resolved["aphia_id"],
                     "is_synonym": resolved["is_synonym"],
+                    "matchedBy": resolved["matched_by"],
                 }
             )
     finally:
@@ -121,23 +149,34 @@ def run_name_resolution(
             failure_sink.extend(failed)
 
     n_syn = sum(1 for r in rows if r["is_synonym"])
-    logger.info(f"Resolved {len(rows)} names ({n_syn} synonyms canonicalised)")
+    n_taxid = sum(1 for r in rows if r["matchedBy"] == "ncbi_taxid")
+    logger.info(
+        f"Resolved {len(rows)} names ({n_syn} synonyms canonicalised, "
+        f"{n_taxid} found through their NCBI taxid)"
+    )
     return pd.DataFrame(
         rows,
-        columns=["scientificName", "acceptedName", "acceptedNameUsageID", "is_synonym"],
+        columns=[
+            "scientificName",
+            "acceptedName",
+            "acceptedNameUsageID",
+            "is_synonym",
+            "matchedBy",
+        ],
     )
 
 
 def apply_name_resolution(
     mol_df: pd.DataFrame, resolution_df: pd.DataFrame | None
 ) -> pd.DataFrame:
-    """Attach acceptedName / acceptedNameUsageID to mol_df; raw names are kept.
+    """Attach acceptedName / acceptedNameUsageID / matchedBy to mol_df.
 
     scientificName stays the raw NCBI name (the MOL tab shows it verbatim);
     acceptedName holds the WoRMS accepted name (== the raw name when it is not a
     synonym or is absent from WoRMS). The boundary joins (genus expansion,
     in_mol, MOL+GEO) key on acceptedName, so synonyms reconcile to the accepted
-    taxon while the original identification is preserved.
+    taxon while the original identification is preserved. matchedBy says how
+    WoRMS found the name: 'name', 'ncbi_taxid', or empty.
 
     Args:
         mol_df: MOL DataFrame with a 'scientificName' column.
@@ -145,30 +184,108 @@ def apply_name_resolution(
             falls back to the raw name).
 
     Returns:
-        mol_df copy with acceptedName and acceptedNameUsageID columns.
+        mol_df copy with acceptedName, acceptedNameUsageID and matchedBy columns.
     """
     out = mol_df.copy()
     if resolution_df is None or resolution_df.empty:
         out["acceptedName"] = out["scientificName"]
         out["acceptedNameUsageID"] = pd.NA
+        out["matchedBy"] = pd.NA
         return out
 
+    columns = ["acceptedName", "acceptedNameUsageID", "matchedBy"]
+    lookup = (
+        resolution_df.assign(_key=resolution_df["scientificName"].map(normalize_name))
+        .reindex(columns=["_key", *columns])
+        .drop_duplicates("_key")
+        .set_index("_key")
+    )
     norm_key = out["scientificName"].map(normalize_name)
-    accepted_by_key = dict(
-        zip(
-            resolution_df["scientificName"].map(normalize_name),
-            resolution_df["acceptedName"],
-        )
-    )
-    aphia_by_key = dict(
-        zip(
-            resolution_df["scientificName"].map(normalize_name),
-            resolution_df["acceptedNameUsageID"],
-        )
-    )
-    out["acceptedName"] = norm_key.map(accepted_by_key).fillna(out["scientificName"])
-    out["acceptedNameUsageID"] = norm_key.map(aphia_by_key)
+    for col in columns:
+        out[col] = norm_key.map(lookup[col])
+    out["acceptedName"] = out["acceptedName"].fillna(out["scientificName"])
     return out
+
+
+class NameResolutionSummary(NamedTuple):
+    """What the TAX tab reports about the names of the MOL list."""
+
+    n_names: int  # distinct MOL (NCBI) names
+    n_species: int  # distinct WoRMS accepted names they resolve to
+    renamed: pd.DataFrame  # scientificName, acceptedName, matchedBy
+    not_found: pd.DataFrame  # scientificName, genusInTax: names with no record
+
+
+def summarize_name_resolution(
+    mol_df: pd.DataFrame,
+    tax_df: pd.DataFrame | None = None,
+    failed_names: list[str] | None = None,
+) -> NameResolutionSummary:
+    """Relate the NCBI names of the MOL list to the WoRMS names TAX works on.
+
+    TAX compares and expands the WoRMS accepted names, so two NCBI names that
+    WoRMS treats as one species count once there (e.g. Gadus ogac and Gadus
+    macrocephalus). Names are compared case- and whitespace-insensitively, and
+    hits without a name are left out.
+
+    Args:
+        mol_df: MOL DataFrame after apply_name_resolution (scientificName,
+            acceptedName, acceptedNameUsageID, matchedBy).
+        tax_df: TAX list, used to tell whether the genus of a name not found in
+            WoRMS was still expanded (so its sequence lost no candidates).
+        failed_names: Names whose WoRMS lookup errored. They are retried on the
+            next run, so they are not reported as not found.
+
+    Returns:
+        A NameResolutionSummary. renamed has one row per MOL name whose WoRMS
+        accepted name differs; not_found one row per MOL name with no WoRMS
+        record, sorted, with genusInTax True when its genus is in the TAX list.
+    """
+    names = mol_df.loc[
+        mol_df["scientificName"].notna(),
+        ["scientificName", "acceptedName", "acceptedNameUsageID", "matchedBy"],
+    ]
+    names = names.assign(
+        _name=names["scientificName"].map(normalize_name),
+        _accepted=names["acceptedName"].map(normalize_name),
+    ).drop_duplicates("_name")
+
+    is_renamed = names["_name"] != names["_accepted"]
+    renamed = (
+        names.loc[is_renamed, ["scientificName", "acceptedName", "matchedBy"]]
+        .sort_values("scientificName")
+        .reset_index(drop=True)
+    )
+
+    failed = set(failed_names or [])
+    is_not_found = names["acceptedNameUsageID"].isna() & ~names["scientificName"].isin(
+        failed
+    )
+    tax_genera = (
+        set(tax_df["genus"].dropna().map(normalize_name))
+        if tax_df is not None and "genus" in tax_df.columns
+        else set()
+    )
+    not_found = (
+        names.loc[is_not_found, ["scientificName"]]
+        .assign(
+            genusInTax=lambda d: (
+                d["scientificName"]
+                .str.split()
+                .str[0]
+                .map(normalize_name)
+                .isin(tax_genera)
+            )
+        )
+        .sort_values("scientificName")
+        .reset_index(drop=True)
+    )
+    return NameResolutionSummary(
+        n_names=len(names),
+        n_species=names["_accepted"].nunique(),
+        renamed=renamed,
+        not_found=not_found,
+    )
 
 
 ### WORMS SEARCH ###

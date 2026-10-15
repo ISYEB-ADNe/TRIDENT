@@ -12,9 +12,6 @@ Two retry levels exist, and a client needs exactly one of them:
   long job rather than one request: NCBI BLAST (``qblast`` submits a job, then
   polls it for minutes through ``urllib``). Retries are slow (tens of seconds).
 
-NCBI Entrez calls need neither: Biopython retries them itself
-(``Entrez.max_tries``, ``Entrez.sleep_between_tries``).
-
 A call that still fails after its retries raises to the client, which reports
 the item to the cache's ``failure_sink`` so it is retried on the next run
 rather than cached as empty (see ``trident.core.database.save_to_db``).
