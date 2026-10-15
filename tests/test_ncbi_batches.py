@@ -100,6 +100,12 @@ def test_ncbi_down_fails_everything_at_bounded_cost(ncbi_fake):
     assert ncbi_fake.jobs <= max_jobs
 
 
+def test_no_batch_returns_empty_hits_with_columns():
+    df, failed = ncbi.run_blast_batches([])
+    assert df.empty and failed == []
+    assert list(df.columns) == ncbi.BLAST_RAW_COLUMNS
+
+
 def test_every_worker_runs_in_the_callers_context(ncbi_fake, monkeypatch):
     """Log context set by the caller (the UI log sink tag) reaches every
     BLAST worker thread."""

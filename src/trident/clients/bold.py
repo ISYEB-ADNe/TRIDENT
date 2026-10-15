@@ -112,6 +112,25 @@ def _parse_jsonl(response_text: str) -> list[dict]:
     return data
 
 
+# Output columns of _clean_records, also present when there are no records.
+BOLD_RECORD_COLUMNS = [
+    "seq_id",
+    "dna_sequence",
+    "kingdom",
+    "phylum",
+    "class",
+    "order",
+    "family",
+    "genus",
+    "specificEpithet",
+    "scientificName",
+    "taxonRank",
+    "taxonID",
+    "taxonID_db",
+    "seq_url",
+]
+
+
 def _clean_records(
     records: list[dict], keep_only_COI5P: bool = True, keep_ncbi: bool = False
 ) -> pd.DataFrame:
@@ -152,7 +171,7 @@ def _clean_records(
             "seq_url": f"{BOLD_BASE_URL}/record/{processid}",
         }
         cleaned_data.append(cleaned_record)
-    return pd.DataFrame(cleaned_data)
+    return pd.DataFrame(cleaned_data, columns=BOLD_RECORD_COLUMNS)
 
 
 def query_species(
@@ -269,7 +288,9 @@ def get_records_from_species_list(
         active_session.close()
 
     bold_df = (
-        pd.concat(all_records, ignore_index=True) if all_records else pd.DataFrame()
+        pd.concat(all_records, ignore_index=True)
+        if all_records
+        else pd.DataFrame(columns=BOLD_RECORD_COLUMNS)
     )
     record_word = "record" if len(bold_df) == 1 else "records"
     logger.info(

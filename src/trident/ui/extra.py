@@ -5,7 +5,6 @@ This module handles only UI rendering and user interaction.
 """
 
 import streamlit as st
-import pandas as pd
 
 from loguru import logger
 
@@ -14,6 +13,7 @@ import trident.pipelines as pipe
 from trident.logging import get_log_level
 
 from trident.ui.ui import (
+    record_empty_step,
     failed_items,
     show_failed_items_banner,
     COL,
@@ -98,10 +98,22 @@ def bold_search_workflow():
         # Early exit: no species to query
         species_to_query = len(st.session_state.bold_input_species)
         if species_to_query == 0:
-            st.success("No species to query BOLD for, all previously validated")
-            st.session_state.extra_df = pd.DataFrame()
-            st.session_state.extra_params = {}
-            reset_state_after("extra_df")
+            if st.session_state.geo_df.empty:
+                st.info("The GEO list is empty: no species to query in BOLD.")
+            else:
+                st.success(
+                    "No species to query in BOLD: every GEO species was already "
+                    "found by the NCBI search."
+                )
+            record_empty_step(
+                "extra_df",
+                "extra_params",
+                lambda: pipe.empty_extra_results(st.session_state.geo_df),
+                # GBIF failures matter only if they may have emptied GEO.
+                failed_key=(
+                    "gbif_search_failed" if st.session_state.geo_df.empty else None
+                ),
+            )
             return
 
         # Advanced settings
@@ -342,9 +354,14 @@ def bold_filter_workflow():
 
         if st.session_state.bold_search_df.empty:
             st.info("No BOLD records to filter.")
-            st.session_state.extra_df = pd.DataFrame()
-            st.session_state.extra_params = {}
-            reset_state_after("extra_df")
+            record_empty_step(
+                "extra_df",
+                "extra_params",
+                lambda: pipe.empty_extra_results(st.session_state.geo_df),
+                failed_key="bold_search_failed",
+                # BOLD was queried: record its settings, not "skipped".
+                params=st.session_state.bold_search_params,
+            )
             return
 
         # Parameter Inputs

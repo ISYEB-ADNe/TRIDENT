@@ -249,3 +249,39 @@ class TestBelowMol:
         df = pd.DataFrame({"seq_id": ["s1"], "ncbi_top_identity_percentage": [pd.NA]})
         out = add_below_mol(df.copy(), _mol_kept(), _ncbi_all())
         assert out["below_mol"].tolist() == [False]
+
+
+def test_empty_mol_list_flows_to_results(monkeypatch):
+    """No NCBI hit at all: every later list is empty but has its columns, and
+    Results still lists each sequence, as lost at the MOL step."""
+    import requests
+    from Bio import Entrez
+
+    import trident.pipelines as pipe
+    from trident.clients.ncbi import BLAST_HIT_COLUMNS
+
+    def offline(*args, **kwargs):
+        raise AssertionError("an empty list must not query any database")
+
+    monkeypatch.setattr(requests.Session, "send", offline)
+    monkeypatch.setattr(Entrez, "efetch", offline)
+
+    sequences_df = pd.DataFrame({"seq_id": ["s1", "s2"], "dna_sequence": ["A", "C"]})
+    ncbi_search_df = pd.DataFrame(columns=BLAST_HIT_COLUMNS)
+    filter_df, _ = pipe.run_ncbi_filter(ncbi_search_df, db_path=None)
+    mol_df, _ = pipe.finalize_mol_results(filter_df, db_path=None)
+
+    tax_df = pipe.empty_tax_results(mol_df)
+    geo_df = pipe.empty_geo_results(tax_df)
+    extra_df = pipe.empty_extra_results(geo_df)
+    hypo_df = pipe.empty_hypo_results(extra_df)
+
+    for df in (tax_df, geo_df, extra_df, hypo_df):
+        assert df.empty
+        assert {"seq_id", "scientificName"} <= set(df.columns)
+    results = build_results_df(sequences_df, geo_df, mol_df, hypo_df, ncbi_search_df)
+    assert sorted(results["seq_id"]) == ["s1", "s2"]
+    lost = find_sequence_exclusion_step(
+        ["s1", "s2"], ncbi_search_df, mol_df, tax_df, geo_df
+    )
+    assert set(lost["pipeline_step"]) == {"MOL Search"}

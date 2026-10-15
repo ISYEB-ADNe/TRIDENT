@@ -31,6 +31,8 @@ def test_no_children_is_not_a_failure(monkeypatch):
     monkeypatch.setattr(worms, "get_children_by_aphia_id", lambda *a, **k: [])
     df, failed = get_species_from_genus_list(["Gadus"], delay=0)
     assert failed == []
+    # The taxonomy columns are present even when no species is found.
+    assert list(df.columns) == worms.WORMS_TAXON_COLUMNS
 
 
 def test_marine_only_threaded_to_children(monkeypatch):

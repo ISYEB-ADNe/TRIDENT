@@ -20,6 +20,7 @@ import trident.pipelines.hypo_pipeline as hypo_pipeline
 from trident.core.database import view_cached_runs
 from trident.pipelines.hypo_pipeline import (
     prepare_hypo_input,
+    run_hypo_check,
     run_hypo_search,
     run_hypo_merge,
     run_hypo_filter,
@@ -174,18 +175,61 @@ def test_finalize_check_absent_leaves_ncbi_stats_na():
     assert pd.isna(out.iloc[0]["ncbi_top_identity_percentage"])
 
 
-def test_finalize_tolerates_columnless_check_results():
-    """Every check query failed: the cache returns a frame with no columns.
-    Finalize must keep the HYPO species, with no check stats, not crash."""
+def test_check_hits_stay_numeric_after_a_first_check_without_hit(tmp_path, monkeypatch):
+    """The first check results saved have no hit; hits saved later must still
+    read back as numbers (the database must not type the columns as text)."""
+    hit = pd.DataFrame(
+        {
+            "scientificName": ["Gadus morhua"],
+            "query_cover": [100.0],
+            "identity_percentage": [99.5],
+            "hit_def": ["Gadus morhua"],
+            "hit_url": ["https://www.ncbi.nlm.nih.gov/nucleotide/X1"],
+        }
+    )
+
+    def blast(batch, entrez_query, **kwargs):
+        found = "Gadus" in entrez_query
+        return pd.DataFrame({"seq_id": [batch[0].id]}) if found else pd.DataFrame()
+
+    monkeypatch.setattr(hypo_pipeline, "submit_blast_batch", blast)
+    monkeypatch.setattr(hypo_pipeline, "process_blast_results", lambda df, **k: hit)
+    db_path = str(tmp_path / "check.db")
+
+    def check(species):
+        filter_df = pd.DataFrame(
+            {"seq_id": ["t1"], "scientificName": [species], "dna_sequence": ["ACGT"]}
+        )
+        return run_hypo_check(filter_df, db_path=db_path)[0]
+
+    check("Salmo salar")  # saved first, no hit
+    check("Gadus morhua")  # saved second, with a hit
+    cached = check("Gadus morhua")  # read back from the database
+
+    assert pd.api.types.is_numeric_dtype(cached["identity_percentage"])
+
+
+def test_finalize_after_a_check_that_found_nothing(monkeypatch):
+    """When the check finds none of the species, their rows have no hit stats
+    but every column is present, so finalize keeps the species without check
+    stats."""
+    monkeypatch.setattr(
+        hypo_pipeline, "submit_blast_batch", lambda *a, **k: pd.DataFrame()
+    )
     hypo_filter_df = pd.DataFrame(
         {
             "seq_id": ["t1"],
             "scientificName": ["Gadus morhua"],
+            "dna_sequence": ["ACGT"],
             "identity_percentage": [95.0],
             "query_cover": [100.0],
         }
     )
-    out = _finalize(hypo_filter_df, pd.DataFrame())
+
+    hypo_check_df = inspect.unwrap(run_hypo_check)(hypo_filter_df)
+    out = _finalize(hypo_filter_df, hypo_check_df)
+
+    assert set(hypo_pipeline.HYPO_CHECK_COLUMNS) <= set(hypo_check_df.columns)
     assert list(out["scientificName"]) == ["Gadus morhua"]
     assert pd.isna(out.iloc[0]["ncbi_top_identity_percentage"])
 

@@ -27,6 +27,7 @@ from trident.clients.gbif import (
 from trident.core.constants import GBIF_MIN_OCCURRENCES
 from trident.core.database import save_to_db, FullCache, CustomCache, warn_empty_params
 from trident.core.utils import (
+    ensure_columns,
     reorder_taxonomy_columns,
     preserve_sequence_order,
     top_hit_per_group,
@@ -182,9 +183,11 @@ def run_gbif_search(
 
     if not results:
         logger.warning(
-            "No extent results to merge — returning empty GEO search DataFrame"
+            "No extent results to merge: returning empty GEO search DataFrame"
         )
-        return pd.DataFrame()
+        return ensure_columns(
+            good_matches.iloc[:0].copy(), ["occurrences", "gbif_extent"]
+        )
 
     counts_df = pd.concat(results, ignore_index=True)
 
@@ -288,14 +291,6 @@ def run_gbif_merge(
         gbif_search_params = {}
 
     # Validate inputs
-    if gbif_search_df.empty:
-        logger.warning("Empty GBIF DataFrame")
-        return pd.DataFrame()
-
-    if tax_df.empty:
-        logger.warning("Empty TAX DataFrame")
-        return gbif_search_df.copy()
-
     required_cols_gbif = {"scientificName"}
     required_cols_tax = {"scientificName", "seq_id"}
 
@@ -348,7 +343,10 @@ def run_gbif_merge(
         f"Merged GBIF+TAX: {n_tax} species ({n_gbif} matched, {n_unmatched} without GBIF data)"
     )
 
-    return merged_df
+    # TAX species without GBIF data have no extent, so no cache entry can hold
+    # them. Drop them here, so the result is the same with or without a
+    # database.
+    return merged_df.dropna(subset=["gbif_extent"])
 
 
 ### FILTER PIPELINE ###
@@ -735,3 +733,26 @@ def classify_gbif_extents(
         "has_identity": has_identity,
         "buckets": buckets,
     }
+
+
+### EMPTY INPUT ###
+
+
+def empty_geo_results(tax_df: pd.DataFrame) -> pd.DataFrame:
+    """Return the GEO list of an empty TAX list, with its usual columns.
+
+    The GEO steps run on no species and without the database, so nothing is
+    queried or cached.
+    """
+    search_df, _ = run_gbif_search([], extents=[], db_path=None)
+    merge_df, _ = run_gbif_merge(
+        search_df, tax_df, tax_params={}, gbif_search_params={}, db_path=None
+    )
+    filter_df, _ = run_gbif_filter(
+        merge_df,
+        extent="global",
+        min_occurrences=GBIF_MIN_OCCURRENCES,
+        db_path=None,
+    )
+    geo_df, _ = finalize_geo_results(filter_df, db_path=None)
+    return geo_df

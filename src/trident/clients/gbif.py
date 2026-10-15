@@ -265,6 +265,11 @@ def _match_single_taxon_name(
             session.close()
 
 
+# Columns of match_taxon_names for an empty names list. Every match result,
+# success or error, already carries them; matched names carry more API fields.
+GBIF_MATCH_COLUMNS = ["query", "confidence", "matchType", "needs_review", "taxonID"]
+
+
 def match_taxon_names(
     names: list[str], n_jobs: int = 10, user_agent: str | None = None
 ) -> pd.DataFrame:
@@ -280,7 +285,7 @@ def match_taxon_names(
     """
     if len(names) == 0:
         logger.warning("Empty names list")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=GBIF_MATCH_COLUMNS)
 
     # Each worker creates its own session: requests.Session is not thread-safe,
     # so sharing one across the threading backend can corrupt the pool state.

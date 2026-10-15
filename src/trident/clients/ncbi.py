@@ -107,6 +107,8 @@ def create_sequence_batches(
         raise ValueError("Provide either batch_size or n_batches, not both")
 
     total = len(sequences)
+    if total == 0:
+        return []
 
     if n_batches is None:
         if batch_size is None:
@@ -129,6 +131,23 @@ def create_sequence_batches(
 
 
 ### BLAST SUBMISSION ###
+
+# Output columns of parse_blast_records, also present when there are no hits.
+BLAST_RAW_COLUMNS = [
+    "seq_id",
+    "query_length",
+    "hit_def",
+    "hit_id",
+    "hit_accession",
+    "score",
+    "bits",
+    "evalue",
+    "align_length",
+    "identities",
+    "gaps",
+    "query_start",
+    "query_end",
+]
 
 
 def parse_blast_records(records: list) -> pd.DataFrame:
@@ -171,7 +190,7 @@ def parse_blast_records(records: list) -> pd.DataFrame:
                     }
                 )
 
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=BLAST_RAW_COLUMNS)
 
 
 ### TAXONOMY ###
@@ -459,6 +478,8 @@ def run_blast_batches(
         fails its retries is split by ``_split_failed_batch`` (unless the
         circuit is open), so only the sequences that still fail are listed.
     """
+    if not batches:
+        return pd.DataFrame(columns=BLAST_RAW_COLUMNS), []
     n_threads = min(n_threads, len(batches))
     n_threads_str = "thread" if n_threads == 1 else "threads"
     logger.debug(f"Starting parallel execution with {n_threads} {n_threads_str}")
@@ -511,8 +532,9 @@ def run_blast_batches(
         )
 
     if not successful:
-        logger.error("All NCBI batches failed — returning empty DataFrame")
-        return pd.DataFrame(), failed_ids
+        if failed_ids:
+            logger.error("All NCBI batches failed: returning empty DataFrame")
+        return pd.DataFrame(columns=BLAST_RAW_COLUMNS), failed_ids
 
     logger.debug(
         f"Batches without failures: {len(batches) - failed_count}/{len(batches)}"
@@ -521,6 +543,24 @@ def run_blast_batches(
 
 
 ### RESULT PROCESSING ###
+
+# Output columns of process_blast_results, also present when there are no hits.
+BLAST_HIT_COLUMNS = [
+    "seq_id",
+    "dna_sequence",
+    "genus",
+    "specificEpithet",
+    "scientificName",
+    "query_cover",
+    "identity_percentage",
+    "align_length",
+    "identities",
+    "gaps",
+    "query_start",
+    "query_end",
+    "hit_def",
+    "hit_url",
+]
 
 
 def process_blast_results(
@@ -546,9 +586,9 @@ def process_blast_results(
         Processed DataFrame with standardized columns, sorted by descending
         identity within each seq_id.
     """
-    # No hits (e.g. every batch failed) — nothing to process.
+    # No hits (e.g. every batch failed): nothing to process.
     if df.empty:
-        return df
+        return pd.DataFrame(columns=BLAST_HIT_COLUMNS)
 
     df["identity_percentage"] = ((df["identities"] / df["align_length"]) * 100).round(
         round_digits
@@ -612,24 +652,7 @@ def process_blast_results(
     else:
         df["dna_sequence"] = None
 
-    column_order = [
-        "seq_id",
-        "dna_sequence",
-        "genus",
-        "specificEpithet",
-        "scientificName",
-        "query_cover",
-        "identity_percentage",
-        "align_length",
-        "identities",
-        "gaps",
-        "query_start",
-        "query_end",
-        "hit_def",
-        "hit_url",
-    ]
-
-    return df[column_order]
+    return df[BLAST_HIT_COLUMNS]
 
 
 ### FILTERING ###
@@ -701,12 +724,12 @@ def filter_by_barcoding_gap(
     gap_filtered_df = (
         pd.concat(queries_with_gaps).reset_index(drop=True)
         if queries_with_gaps
-        else pd.DataFrame()
+        else df.iloc[:0]
     )
     no_gap_df = (
         pd.concat(queries_without_gaps).reset_index(drop=True)
         if queries_without_gaps
-        else pd.DataFrame()
+        else df.iloc[:0]
     )
 
     return gap_filtered_df, no_gap_df, query_filter_method
@@ -780,7 +803,7 @@ def filter_blast_results(
         df = (
             pd.concat(dfs_to_concat).reset_index(drop=True)
             if dfs_to_concat
-            else pd.DataFrame()
+            else df_gap.iloc[:0]
         )
 
         logger.info(

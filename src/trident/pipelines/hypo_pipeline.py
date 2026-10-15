@@ -14,6 +14,7 @@ Steps:
     6. finalize_hypo_results    — label, merge check results, final df    [FullCache]
 """
 
+import numpy as np
 import pandas as pd
 
 from loguru import logger
@@ -39,6 +40,7 @@ from trident.core.utils import (
     top_hit_per_group,
 )
 from trident.clients.ncbi import (
+    BLAST_HIT_COLUMNS,
     BlastCircuit,
     create_sequence_batches,
     run_blast_batches,
@@ -217,7 +219,7 @@ def run_hypo_search(
                 n=ntop,
             )
     else:
-        search_df = pd.DataFrame()
+        search_df = pd.DataFrame(columns=[*BLAST_HIT_COLUMNS, "entrez_query"])
 
     logger.success(f"HYPO search completed: {len(search_df)} hits")
     return search_df
@@ -350,10 +352,6 @@ def build_hypo_filter_summary(hypo_filter_df: pd.DataFrame) -> pd.DataFrame:
         "query_cover",
     ]
 
-    # Empty filter results come back from the cache with no columns at all.
-    if hypo_filter_df.empty:
-        return pd.DataFrame(columns=out_cols)
-
     best_hits = (
         hypo_filter_df.sort_values(
             ["identity_percentage", "query_cover"], ascending=[False, False]
@@ -374,6 +372,20 @@ def build_hypo_filter_summary(hypo_filter_df: pd.DataFrame) -> pd.DataFrame:
 
 
 ### CHECK ###
+
+# Output columns of run_hypo_check, also present when there are no results.
+# Species without a hit leave the hit columns empty.
+HYPO_CHECK_COLUMNS = [
+    "seq_id",
+    "scientificName",
+    "dna_sequence",
+    "scientificName_NCBI",
+    "query_cover",
+    "identity_percentage",
+    "hit_found",
+    "hit_def",
+    "hit_url",
+]
 
 
 def _hypo_check_params(
@@ -443,22 +455,6 @@ def run_hypo_check(
     Returns:
         DataFrame with NCBI check results per species.
     """
-    out_cols = [
-        "seq_id",
-        "scientificName",
-        "dna_sequence",
-        "scientificName_NCBI",
-        "query_cover",
-        "identity_percentage",
-        "hit_found",
-        "hit_def",
-        "hit_url",
-    ]
-
-    # Empty filter results come back from the cache with no columns at all.
-    if hypo_filter_df.empty:
-        return pd.DataFrame(columns=out_cols)
-
     sequences_df = (
         hypo_filter_df[["seq_id", "scientificName", "dna_sequence"]]
         .drop_duplicates()
@@ -526,9 +522,14 @@ def run_hypo_check(
 
     # Every sequence may have errored (all reported to failure_sink).
     if not all_results:
-        return pd.DataFrame(columns=out_cols)
+        return pd.DataFrame(columns=HYPO_CHECK_COLUMNS)
 
-    check_df = pd.concat(all_results, ignore_index=True)
+    # Missing hit columns are filled with NaN (float), not pd.NA (object): if
+    # the first rows saved have no hit, SQLite would otherwise type the columns
+    # TEXT and later hit values would come back as strings.
+    check_df = ensure_columns(
+        pd.concat(all_results, ignore_index=True), HYPO_CHECK_COLUMNS, fill=np.nan
+    )
 
     n_with_hits = check_df.loc[check_df["hit_found"], "scientificName"].nunique()
     logger.info(
@@ -573,21 +574,6 @@ def finalize_hypo_results(
         hypo_filter_params = {}
     if hypo_check_params is None:
         hypo_check_params = {}
-
-    # Empty check results (e.g. every check query failed) come back from the
-    # cache with no columns at all; treat them as "no check hit".
-    if hypo_check_df.empty:
-        hypo_check_df = ensure_columns(
-            hypo_check_df.copy(),
-            (
-                "seq_id",
-                "scientificName",
-                "identity_percentage",
-                "query_cover",
-                "hit_url",
-                "hit_found",
-            ),
-        )
 
     # Best check hit per (seq_id, scientificName)
     check_hits = top_hit_per_group(
@@ -649,13 +635,6 @@ def build_hypo_check_summary(hypo_check_df: pd.DataFrame) -> pd.DataFrame:
         "hit_url",
     ]
 
-    # Empty check results come back from the cache with no columns at all.
-    if hypo_check_df.empty:
-        return pd.DataFrame(columns=out_cols)
-
-    # Ensure expected columns exist (may be absent when all results are no-hit)
-    ensure_columns(hypo_check_df, ("identity_percentage", "query_cover", "hit_url"))
-
     best_hits = (
         hypo_check_df.sort_values(
             ["identity_percentage", "query_cover"], ascending=[False, False]
@@ -675,3 +654,20 @@ def build_hypo_check_summary(hypo_check_df: pd.DataFrame) -> pd.DataFrame:
     summary["hit_count"] = summary["hit_count"].fillna(0).astype(int)
 
     return summary[out_cols]
+
+
+### EMPTY INPUT ###
+
+
+def empty_hypo_results(extra_df: pd.DataFrame) -> pd.DataFrame:
+    """Return the HYPO list of an empty EXTRA list, with its usual columns.
+
+    The HYPO steps run on no sequence and without the database, so nothing is
+    queried or cached.
+    """
+    search_df, _ = run_hypo_search({}, db_path=None)
+    merge_df, _ = run_hypo_merge(search_df, extra_df, extra_params={}, db_path=None)
+    filter_df, _ = run_hypo_filter(merge_df, db_path=None)
+    check_df, _ = run_hypo_check(filter_df, db_path=None)
+    hypo_df, _ = finalize_hypo_results(filter_df, check_df, db_path=None)
+    return hypo_df

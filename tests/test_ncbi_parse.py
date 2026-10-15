@@ -50,6 +50,18 @@ def test_record_with_no_alignments_yields_no_rows():
     assert df.empty
 
 
+def test_no_hits_keep_the_columns_of_hits():
+    """With no hits, the raw and processed frames have the same columns as
+    with hits."""
+    hit = _record("s1", [_alignment("Gadus morhua", [_hsp()])])
+    raw = parse_blast_records([hit])
+    raw_empty = parse_blast_records([_record("s1", [])])
+    assert list(raw_empty.columns) == list(raw.columns)
+    assert list(process_blast_results(raw_empty).columns) == list(
+        process_blast_results(pd.concat([raw, raw])).columns
+    )
+
+
 def test_multiple_records():
     recs = [
         _record("s1", [_alignment("A", [_hsp()])]),

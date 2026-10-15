@@ -214,6 +214,50 @@ def test_empty_result_cached_then_hit(db_path):
     assert calls == [1]  # executed once, second call served from cache
 
 
+def test_empty_result_keeps_its_columns(db_path):
+    """An empty result stores no rows but keeps its columns, whether computed
+    or read from the cache."""
+
+    @save_to_db("test_empty_cols", cache=FullCache(local={"t": "t"}))
+    def my_step(t=1):
+        return pd.DataFrame({"x": [], "y": []})
+
+    df1, _ = my_step(t=1, db_path=db_path)
+    df2, _ = my_step(t=1, db_path=db_path)  # cache hit
+    assert list(df1.columns) == list(df2.columns) == ["x", "y"]
+
+
+def test_empty_result_gets_every_column_seen_for_the_step(db_path):
+    """An empty result gets every column the step has returned before,
+    optional ones included."""
+
+    @save_to_db("test_union", cache=PartialCache(items_kwarg="names", item_key="name"))
+    def step(names):
+        rows = [{"name": n, "extra": 1} for n in names if n == "full"]
+        return pd.DataFrame(rows, columns=["name", *(["extra"] if rows else [])])
+
+    step(["full"], db_path=db_path)
+    step(["empty"], db_path=db_path)
+    df, _ = step(["empty"], db_path=db_path)  # cache hit, no rows
+    assert df.empty
+    assert set(df.columns) == {"name", "extra"}
+
+
+def test_no_items_runs_the_function_for_its_columns(db_path):
+    """With an empty input, the function is called directly and its empty
+    result keeps its columns."""
+
+    @save_to_db(
+        "test_no_items", cache=PartialCache(items_kwarg="names", item_key="name")
+    )
+    def step(names):
+        return pd.DataFrame({"name": names, "v": [1] * len(names)})
+
+    df, _ = step([], db_path=db_path)
+    assert df.empty
+    assert list(df.columns) == ["name", "v"]
+
+
 def test_empty_result_force_rerun(db_path):
     """force_rerun replaces an empty cached run without crashing on the missing table."""
 

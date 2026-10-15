@@ -453,3 +453,18 @@ def build_tax_summary(
         )
 
     return pd.DataFrame(summary_data)
+
+
+### EMPTY INPUT ###
+
+
+def empty_tax_results(mol_df: pd.DataFrame) -> pd.DataFrame:
+    """Return the TAX list of an empty MOL list, with its usual columns.
+
+    The TAX steps run on no genus and without the database, so nothing is
+    queried or cached.
+    """
+    worms_df, _ = run_worms_search([], db_path=None)
+    merge_df, _ = run_worms_merge(worms_df, mol_df, mol_params={}, db_path=None)
+    tax_df, _ = finalize_tax_results(merge_df, db_path=None)
+    return tax_df

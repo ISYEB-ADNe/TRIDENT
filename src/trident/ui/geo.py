@@ -20,6 +20,7 @@ from trident.clients.gbif import (
 )
 
 from trident.ui.ui import (
+    record_empty_step,
     failed_items,
     show_failed_items_banner,
     styled_or_plain,
@@ -945,6 +946,16 @@ def geo_analysis():
         "👈 **TAX list not found.** Please complete **Step 2 · TAX** "
         "to provide a species list for GBIF validation.",
     ):
+        return
+
+    if st.session_state.tax_df.empty:
+        st.info("The TAX list is empty: no species to look up in GBIF.")
+        record_empty_step(
+            "geo_df",
+            "geo_params",
+            lambda: pipe.empty_geo_results(st.session_state.tax_df),
+            failed_key="tax_failed",
+        )
         return
 
     # GBIF Data Acquisition

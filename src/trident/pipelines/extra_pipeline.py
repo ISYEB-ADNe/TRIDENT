@@ -462,3 +462,23 @@ def build_extra_seq_summary(pair_summary: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
     )
+
+
+### EMPTY INPUT ###
+
+
+def empty_extra_results(geo_df: pd.DataFrame) -> pd.DataFrame:
+    """Return the empty EXTRA list, with its usual columns, for no BOLD query.
+
+    The EXTRA steps run on no species and without the database, so nothing is
+    queried or cached.
+    """
+    search_df, _ = run_bold_search([], db_path=None)
+    filter_df, _ = run_bold_filter(search_df, db_path=None)
+    # No species is sent to BOLD, so none of the GEO species is merged; the
+    # empty GEO frame only brings its columns.
+    merge_df, _ = run_bold_merge(
+        filter_df, geo_df.iloc[:0], geo_params={}, db_path=None
+    )
+    extra_df, _ = finalize_extra_results(merge_df, db_path=None)
+    return extra_df

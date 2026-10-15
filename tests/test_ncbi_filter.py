@@ -116,6 +116,14 @@ def test_filter_blast_results_query_cover_threshold():
     assert "filter_method" in out.columns
 
 
+@pytest.mark.parametrize("method", ["barcoding_gap", "similarity"])
+def test_filter_blast_results_rejecting_every_hit_keeps_columns(method):
+    df = _hits([("s1", 99.0, 10.0, "A a"), ("s2", 98.0, 10.0, "B b")])
+    out = filter_blast_results(df, query_cover=90, method=method)
+    assert out.empty
+    assert {"seq_id", "identity_percentage", "scientificName"} <= set(out.columns)
+
+
 def test_filter_blast_results_unknown_method_raises():
     df = _hits([("s1", 99.0, 100, "A")])
     with pytest.raises(ValueError, match="Unknown filtering method"):

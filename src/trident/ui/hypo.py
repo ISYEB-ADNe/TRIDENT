@@ -17,6 +17,7 @@ from trident.logging import get_log_level
 from trident.pipelines.results_pipeline import add_below_mol
 
 from trident.ui.ui import (
+    record_empty_step,
     failed_items,
     show_failed_items_banner,
     styled_or_plain,
@@ -406,8 +407,7 @@ def _filter_success_message():
         f"✅ Filtering complete: {len(hypo_filter_df):,}/{total:,} sequences retained"
     )
 
-    # Empty filter results come back from the cache with no columns at all.
-    if "scientificName" in hypo_filter_df.columns and not hypo_filter_df.empty:
+    if not hypo_filter_df.empty:
         n_species = hypo_filter_df["scientificName"].nunique()
         st.success(f"{base} ({n_species:,} unique species).")
     else:
@@ -591,8 +591,6 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
 def hypo_check_display():
     res_df = st.session_state.hypo_check_df
     summary_df = st.session_state.hypo_check_summary_df
-    # Empty check results (e.g. every check query failed) come back from the
-    # cache with no columns at all.
     if res_df.empty:
         if st.session_state.hypo_check_failed:
             st.info("No check results: every check query failed.")
@@ -996,13 +994,13 @@ def hypo_analysis():
 
     # Early exit: no BOLD sequences to validate
     if st.session_state.extra_df.empty:
-        st.info(
-            "ℹ️ **No BOLD sequences to validate.**\n\n"
-            "All species were previously validated via NCBI and GBIF in steps 1 to 3."
+        st.info("The EXTRA list is empty: no BOLD sequence to validate.")
+        record_empty_step(
+            "hypo_df",
+            "hypo_params",
+            lambda: pipe.empty_hypo_results(st.session_state.extra_df),
+            failed_key="bold_search_failed",
         )
-        st.session_state.hypo_df = pd.DataFrame()
-        st.session_state.hypo_params = None
-        reset_state_after("hypo_df")
         return
 
     # HYPO Data Acquisition

@@ -13,6 +13,7 @@ import trident.pipelines as pipe
 from trident.logging import get_log_level
 
 from trident.ui.ui import (
+    record_empty_step,
     failed_items,
     show_failed_items_banner,
     styled_or_plain,
@@ -208,11 +209,6 @@ def worms_search_workflow():
                 "names or genera",
                 source="WoRMS",
             )
-
-
-# --------------------------------------------------------------------
-# DISPLAY FUNCTIONS
-# -------------------------------------------------------------------
 
 
 def render_worms_metrics():
@@ -467,6 +463,16 @@ def tax_analysis():
         "👈 **MOL list not found.** Please complete **Step 1 · MOL** "
         "before running the WoRMS genus expansion.",
     ):
+        return
+
+    if st.session_state.mol_df.empty:
+        st.info("The MOL list is empty: no genus to expand in WoRMS.")
+        record_empty_step(
+            "tax_df",
+            "tax_params",
+            lambda: pipe.empty_tax_results(st.session_state.mol_df),
+            failed_key="ncbi_search_failed",
+        )
         return
 
     # Search Card (No extra filtering step for WoRMS)

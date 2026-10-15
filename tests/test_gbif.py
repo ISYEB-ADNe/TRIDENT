@@ -1,5 +1,7 @@
 """Tests for pure GBIF helpers (coordinate parsing, extent naming). No network."""
 
+import inspect
+
 import pandas as pd
 import pytest
 
@@ -13,6 +15,7 @@ from trident.clients.gbif import (
     _GBIF_TAXON_COLS,
     _match_single_taxon_name,
 )
+from trident.core.utils import ensure_columns
 from trident.pipelines import geo_pipeline
 
 
@@ -299,3 +302,24 @@ def test_run_gbif_search_no_matches_returns_empty(monkeypatch):
         db_path=None,
     )
     assert df.empty
+    # The columns read by the GBIF merge and filter are present.
+    assert {"scientificName", "occurrences", "gbif_extent"} <= set(df.columns)
+
+
+def test_merge_drops_species_without_gbif_data(monkeypatch):
+    """Species without GBIF data have no extent row, so the merge leaves them
+    out (as the cache layer would); the empty result keeps its columns."""
+    no_match = gbif.filter_taxon_matches(pd.DataFrame(columns=gbif.GBIF_MATCH_COLUMNS))
+    gbif_search_df = ensure_columns(no_match, ["occurrences", "gbif_extent"])
+    tax_df = pd.DataFrame(
+        {"seq_id": ["s1"], "scientificName": ["Gadus morhua"], "in_mol": [True]}
+    )
+
+    merged = inspect.unwrap(geo_pipeline.run_gbif_merge)(gbif_search_df, tax_df)
+
+    assert merged.empty
+    assert {"seq_id", "scientificName", "in_mol", "gbif_extent"} <= set(merged.columns)
+
+
+def test_match_no_names_keeps_match_columns():
+    assert list(gbif.match_taxon_names([]).columns) == gbif.GBIF_MATCH_COLUMNS

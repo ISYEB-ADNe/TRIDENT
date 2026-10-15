@@ -527,6 +527,42 @@ def require_prerequisite(key: str, message: str) -> bool:
     return True
 
 
+def record_empty_step(
+    df_key: str,
+    params_key: str,
+    build_empty: Callable[[], pd.DataFrame],
+    *,
+    failed_key: str | None,
+    params: dict | None = None,
+) -> None:
+    """Record the empty result of a step that has nothing to process.
+
+    *build_empty* returns the step's empty result with its usual columns (the
+    pipelines' ``empty_*_results``). Once recorded, later tabs and Results see
+    a finished, empty step rather than one not run yet. *params* are the
+    settings recorded for the step; None (the default) shows it as skipped in
+    the dashboard. Recorded once; a change upstream resets it.
+
+    If queries of the previous step failed (*failed_key*), the empty input may
+    come from those failures: nothing is recorded, and the user is asked to
+    re-run that step. Pass None when the previous list is not empty.
+    """
+    failed = (st.session_state.get(failed_key) or []) if failed_key else []
+    if failed:
+        query_word = "query" if len(failed) == 1 else "queries"
+        st.warning(
+            f"⚠️ {len(failed)} {query_word} of the previous step failed, so its "
+            "list may be empty only because of them. Re-run that step to retry "
+            "them before going on."
+        )
+        return
+    if st.session_state.get(df_key) is not None:
+        return
+    st.session_state[df_key] = build_empty()
+    st.session_state[params_key] = params
+    reset_state_after(df_key)
+
+
 def failed_items(df) -> list[str]:
     """Items whose query failed in the call that returned *df*.
 

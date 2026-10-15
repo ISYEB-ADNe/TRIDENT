@@ -226,6 +226,25 @@ def clean_authorships(authorships: pd.Series) -> pd.Series:
     )
 
 
+# Output columns of the accepted-species taxonomy, also present when no species
+# is found.
+WORMS_TAXON_COLUMNS = [
+    "kingdom",
+    "phylum",
+    "class",
+    "order",
+    "family",
+    "genus",
+    "specificEpithet",
+    "scientificName",
+    "scientificNameAuthorship",
+    "taxonRank",
+    "taxonID",
+    "taxonID_db",
+    "taxonURL",
+]
+
+
 def _build_taxonomy_dataframe(
     raw_records: list[dict], accepted_only: bool
 ) -> tuple[pd.DataFrame, int, int]:
@@ -303,24 +322,10 @@ def _build_taxonomy_dataframe(
         )
         df["taxonID_db"] = "WORMS"
 
-        desired_cols = [
-            "kingdom",
-            "phylum",
-            "class",
-            "order",
-            "family",
-            "genus",
-            "specificEpithet",
-            "scientificName",
-            "scientificNameAuthorship",
-            "taxonRank",
-            "taxonID",
-            "taxonID_db",
-            "taxonURL",
-        ]
-        existing_cols = [col for col in desired_cols if col in df.columns]
-        df = df[existing_cols]
+        df = df.reindex(columns=WORMS_TAXON_COLUMNS)
         df = df.drop_duplicates(subset=["scientificName"], keep="first")
+    elif accepted_only:
+        df = pd.DataFrame(columns=WORMS_TAXON_COLUMNS)
 
     if "taxonID" in df.columns:
         df["taxonID"] = df["taxonID"].astype(str)

@@ -14,6 +14,7 @@ import pandas as pd
 from loguru import logger
 
 from trident.core import config
+from trident.core.utils import ensure_columns
 
 
 # ---------------------------------------------------------------------------
@@ -72,8 +73,9 @@ def _params_to_sql_values(params: dict) -> dict:
 #
 # Stored in SQLite's built-in PRAGMA user_version (a header int, no table).
 # Bump SCHEMA_VERSION when a change breaks reading an older database. So far
-# all changes have been additive (new columns added lazily, new provenance
-# table read-tolerantly), so older databases stay readable.
+# all changes have been additive (new columns added lazily, new tables such as
+# provenance and step_columns optional when reading), so older databases stay
+# readable.
 # ---------------------------------------------------------------------------
 
 SCHEMA_VERSION = 1
@@ -189,6 +191,44 @@ def load_provenance(db_path: str | Path, table_name: str | None = None) -> pd.Da
         return pd.read_sql_query(
             f"SELECT * FROM {_PROVENANCE_TABLE} ORDER BY step, run_id", conn
         )
+
+
+# ---------------------------------------------------------------------------
+# Step columns
+#
+# An empty result stores no rows, so on a cache hit it would come back without
+# columns, and any consumer reading a column would fail. Each step records
+# every column its function has returned, and an empty result is given those
+# columns.
+# ---------------------------------------------------------------------------
+
+_COLUMNS_TABLE = "step_columns"
+
+
+def _load_step_columns(conn: sqlite3.Connection, step: str) -> list[str]:
+    """Return the columns recorded for *step*, or [] (older databases)."""
+    if not _table_exists(conn, _COLUMNS_TABLE):
+        return []
+    row = conn.execute(
+        f"SELECT columns FROM {_COLUMNS_TABLE} WHERE step = ?", (step,)
+    ).fetchone()
+    return json.loads(row[0]) if row else []
+
+
+def _record_step_columns(conn: sqlite3.Connection, step: str, df: pd.DataFrame) -> None:
+    """Record the columns of *df* not yet known for *step*."""
+    known = _load_step_columns(conn, step)
+    new = [col for col in df.columns if col not in known]
+    if not new:
+        return
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS {_COLUMNS_TABLE} "
+        "(step TEXT PRIMARY KEY, columns TEXT NOT NULL)"
+    )
+    conn.execute(
+        f"INSERT OR REPLACE INTO {_COLUMNS_TABLE} (step, columns) VALUES (?, ?)",
+        (step, json.dumps(known + new)),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +554,11 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
     failed in an earlier call are re-executed, so they appear again only if
     they fail again. pandas may copy ``attrs`` onto frames derived from the
     result; only read it on the frame returned here.
+
+    An empty result keeps its columns: each step records the columns its
+    function returns, and they are restored on a cache hit. With no items to
+    look up (empty input), the function is called directly and nothing is
+    cached.
     """
     match_map = cache.match_map
 
@@ -528,8 +573,10 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
             bound_kwargs = dict(bound.arguments)
             cache_items, params = cache.prepare(**bound_kwargs)
 
-            # No db_path: bypass caching entirely
-            if db_path is None:
+            # Nothing to cache without a db_path or without items (empty
+            # input). The function is still called, so the caller gets its
+            # empty result with its columns.
+            if db_path is None or not cache_items:
                 return func(*args, **kwargs), params
 
             with get_connection(db_path) as conn:
@@ -580,6 +627,8 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
                 # 3. Save new results and cache entries
                 if uncached_items:
                     _set_schema_version(conn)
+                    if isinstance(new_df, pd.DataFrame):
+                        _record_step_columns(conn, table_name, new_df)
                     base_run_id = _next_run_id(conn, table_name)
 
                     # Items the function reported as failed get neither result
@@ -697,6 +746,8 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
                     if non_empty
                     else pd.DataFrame()
                 )
+                if result_df.empty:
+                    ensure_columns(result_df, _load_step_columns(conn, table_name))
                 result_df.attrs["failed_items"] = list(failure_sink)
                 return result_df, params
 

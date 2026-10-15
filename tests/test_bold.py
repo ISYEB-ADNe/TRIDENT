@@ -70,6 +70,10 @@ def test_empty_records_returns_empty_frame():
     assert isinstance(_clean_records([]), pd.DataFrame)
 
 
+def test_no_records_keep_the_columns_of_records():
+    assert list(_clean_records([]).columns) == list(_clean_records([_rec()]).columns)
+
+
 # --- query_species failure contract (None = error, [] = genuine empty) ---
 # failure_sink in the pipeline relies on this distinction.
 
