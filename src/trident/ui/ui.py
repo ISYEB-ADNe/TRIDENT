@@ -510,6 +510,22 @@ def run_step_workflow(
     return mode
 
 
+def reset_for_new_analysis(key_name: str):
+    """Reset the app for a newly loaded analysis.
+
+    Clears the pipeline state after *key_name*, as ``reset_state_after`` does,
+    and also the settings remembered across tabs (``_widget_overrides``), so
+    nothing from the previous analysis (coordinates, thresholds, selected
+    sequence) carries over to the new one.
+    """
+    reset_state_after(key_name)
+    st.session_state._widget_overrides = {}
+    # Forget which preset each selector last applied, or a preset equal to the
+    # last one would not be applied again to the now empty settings.
+    for key in [k for k in st.session_state if str(k).startswith(PRESET_MARKER)]:
+        del st.session_state[key]
+
+
 def next_step_button(label: str, tab_id: str):
     """Render a right-aligned navigation button."""
     cols = st.columns([5, 1])
@@ -894,6 +910,10 @@ def get_recent_param_sets(db_path, table_name, columns, limit=5):
         return []
 
 
+# Prefix of the session keys recording the preset each selector last applied.
+PRESET_MARKER = "_prev_"
+
+
 def param_preset_selector(presets, format_fn, key):
     """Selectbox of previous parameter sets. Updates widget overrides on change.
 
@@ -929,7 +949,7 @@ def param_preset_selector(presets, format_fn, key):
         preset = presets[labels.index(choice)]
 
     # Only apply preset when the selection actually changed
-    prev_key = f"_prev_{key}"
+    prev_key = f"{PRESET_MARKER}{key}"
     preset_id = tuple(str(preset.get(c, "")) for c in cols)
     if st.session_state.get(prev_key) != preset_id:
         st.session_state[prev_key] = preset_id

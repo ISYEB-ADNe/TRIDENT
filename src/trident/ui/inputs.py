@@ -13,7 +13,7 @@ from loguru import logger
 import trident.pipelines as pipe
 from trident.core.config import is_streamlit_cloud
 from trident.core.database import check_schema_version
-from trident.ui.ui import reset_state_after, COL
+from trident.ui.ui import reset_for_new_analysis, COL
 
 FASTA_EXTENSIONS = {"fasta", "fa", "txt", "fas"}
 DB_EXTENSIONS = {"db", "sqlite", "sqlite3"}
@@ -81,10 +81,10 @@ def _restore_db(uploaded_file):
         st.error(message)
         return
 
+    reset_for_new_analysis("analysis_name")
     st.session_state.analysis_name = name
     st.session_state.db_path = db
     st.session_state.sequences_df = None  # Will trigger auto-restore on rerun
-    reset_state_after("analysis_name")
     st.session_state.requested_tab = "start"
     st.rerun()
 
@@ -164,7 +164,7 @@ def handle_file_upload():
                     st.session_state.analysis_name = base_name
                     st.session_state.db_path = _db_path(base_name)
 
-                    reset_state_after("sequences_df")
+                    reset_for_new_analysis("sequences_df")
                     st.session_state.fasta_uploader_key += 1
                     st.session_state.requested_tab = "start"
                     st.rerun()
