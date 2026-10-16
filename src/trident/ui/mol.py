@@ -23,6 +23,7 @@ from trident.ui.ui import (
     BLAST_HELP,
     get_recent_param_sets,
     param_preset_selector,
+    coerce_stored_value,
     persist_value,
     save_widget,
     reset_state_after,
@@ -294,12 +295,23 @@ def ncbi_filter_controls():
         "ncbi_enforce_low_identity",
     ]
     presets = get_recent_param_sets(
-        st.session_state.db_path, "ncbi_filter_inputs", db_cols
+        st.session_state.db_path, "results_mol_inputs", db_cols
     )
     param_preset_selector(
         presets,
         format_fn=lambda p: (
             f"{p['ncbi_method']}, QC: {p['ncbi_query_cover']}%, gap: {p['ncbi_gap_size']}"
+            + (
+                f", top: {p['ncbi_gap_min_top']}%"
+                if p["ncbi_method"] == "barcoding_gap"
+                else ""
+            )
+            + f", low identity: {p['ncbi_low_identity_threshold']}%"
+            + (
+                " (enforced)"
+                if coerce_stored_value(p["ncbi_enforce_low_identity"], False)
+                else ""
+            )
         ),
         key="ncbi_filter_preset",
     )

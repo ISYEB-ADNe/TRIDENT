@@ -71,7 +71,8 @@ def display_hypo_parameters():
     param_preset_selector(
         presets,
         format_fn=lambda p: (
-            f"E-value: 1e-{p['hypo_ev_exponent']}, Max hits: {p['hypo_max_hits']}, Top: {p['hypo_ntop']}"
+            f"E-value: 1e-{p['hypo_ev_exponent']}, Max hits: {p['hypo_max_hits']}, "
+            f"Top: {p['hypo_ntop']}, identity cutoff: {p['hypo_identity_cutoff']}%"
         ),
         key="hypo_search_preset",
     )

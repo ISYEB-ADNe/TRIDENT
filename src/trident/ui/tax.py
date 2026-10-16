@@ -291,20 +291,17 @@ def render_worms_metrics():
             f"species{merged_text}. TAX works on the WoRMS accepted names."
         )
         with st.expander("View the MOL names renamed by WoRMS", expanded=False):
-            found_by = {"name": "Name", "ncbi_taxid": "NCBI taxid"}
             st.dataframe(
-                renamed.assign(matchedBy=renamed["matchedBy"].map(found_by)),
+                renamed[["scientificName", "acceptedName"]],
                 width="stretch",
                 hide_index=True,
                 column_config={
                     "scientificName": "MOL name (NCBI)",
-                    "acceptedName": "WoRMS accepted name",
-                    "matchedBy": st.column_config.TextColumn(
-                        "Found by",
+                    "acceptedName": st.column_config.TextColumn(
+                        "WoRMS accepted name",
                         help=(
-                            "How WoRMS found the MOL name: by the name itself, "
-                            "or, when WoRMS does not know the name, through "
-                            "the NCBI taxid of its BLAST hits."
+                            "WoRMS lists the MOL name as a synonym of this "
+                            "name, or links them through the NCBI taxid."
                         ),
                     ),
                 },

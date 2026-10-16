@@ -624,8 +624,9 @@ def display_missing_species():
     missing = sorted(list(set(st.session_state.tax_species) - gbif_species))
     if missing:
         with st.expander(f"⚠️ {len(missing)} TAX species not found in GBIF"):
-            st.warning("Species from the TAX list with no GBIF match:")
-            st.dataframe([{"Species Name": n} for n in missing], hide_index=True)
+            st.dataframe(
+                [{"Species Name": n} for n in missing], hide_index=True, width="stretch"
+            )
 
 
 def display_rejected_species():
