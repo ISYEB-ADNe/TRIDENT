@@ -618,15 +618,49 @@ def display_gbif_summary():
 
 
 def display_missing_species():
-    if st.session_state.gbif_search_df.empty:
-        return
+    # Failed lookups have their own banner and are retried on the next run.
     gbif_species = set(st.session_state.gbif_search_df["scientificName"].unique())
-    missing = sorted(list(set(st.session_state.tax_species) - gbif_species))
-    if missing:
-        with st.expander(f"⚠️ {len(missing)} TAX species not found in GBIF"):
-            st.dataframe(
-                [{"Species Name": n} for n in missing], hide_index=True, width="stretch"
-            )
+    missing = (
+        set(st.session_state.tax_species)
+        - gbif_species
+        - set(st.session_state.gbif_search_failed or [])
+    )
+    if not missing:
+        return
+
+    # A missing species that was a direct MOL hit takes a sequence's best match
+    # out of GEO, so list it first with the sequences it was a hit for.
+    tax_df = st.session_state.tax_df
+    mol_rows = tax_df[
+        tax_df["scientificName"].isin(missing) & tax_df["in_mol"].astype(bool)
+    ]
+    mol_seqs = mol_rows.groupby("scientificName")["seq_id"].agg(
+        lambda s: ", ".join(dict.fromkeys(s.astype(str)))
+    )
+    df = pd.DataFrame({"scientificName": list(missing)})
+    df["seq_id"] = df["scientificName"].map(mol_seqs).fillna("")
+    df["in_mol"] = df["seq_id"] != ""
+    df = df.sort_values(["in_mol", "scientificName"], ascending=[False, True])
+
+    n_mol = len(mol_seqs)
+    title = f"⚠️ {len(missing)} TAX species not found in GBIF"
+    if n_mol:
+        title += f" ({n_mol} direct MOL {'hit' if n_mol == 1 else 'hits'})"
+    with st.expander(title):
+        st.caption(
+            "No confident GBIF match for these names, so they are absent from GEO."
+        )
+        st.caption(":green[■] Direct MOL hit: the listed sequences lost this match.")
+        st.dataframe(
+            styled_or_plain(df, highlight_in_mol),
+            hide_index=True,
+            width="stretch",
+            column_order=["scientificName", "seq_id"],
+            column_config={
+                "scientificName": COL["scientificName"],
+                "seq_id": "Sequences (MOL hit)",
+            },
+        )
 
 
 def display_rejected_species():
