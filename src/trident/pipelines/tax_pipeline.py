@@ -341,6 +341,80 @@ def run_worms_search(
     return worms_search_df
 
 
+### GENUS HOMONYMS ###
+
+
+def _ids(values: pd.Series) -> pd.Series:
+    """AphiaIDs as nullable integers (they come back from SQLite as int, float
+    or text)."""
+    return pd.to_numeric(values, errors="coerce").astype("Int64")
+
+
+def genus_homonyms(worms_search_df: pd.DataFrame, tax_df: pd.DataFrame) -> pd.DataFrame:
+    """Report the genus names expanded as several homonyms, and what TAX kept.
+
+    run_worms_search expands every accepted genus of a name (e.g. Liparis, a
+    fish and a plant), and run_worms_merge keeps per sequence the ones its MOL
+    species belong to (all of them when none does).
+
+    Args:
+        worms_search_df: WoRMS species from run_worms_search(), with genusID.
+        tax_df: TAX list from run_worms_merge(), with genusID and in_mol.
+
+    Returns:
+        One row per homonym of the genus names with several: genus, genusID,
+        kingdom, class, n_species, molSpecies (the MOL species found in it),
+        sequences ("kept/all": the sequences with this genus name whose TAX
+        list keeps it). Empty when there is no homonym.
+    """
+    columns = [
+        "genus",
+        "genusID",
+        "kingdom",
+        "class",
+        "n_species",
+        "molSpecies",
+        "sequences",
+    ]
+    if any("genusID" not in df.columns for df in (worms_search_df, tax_df)):
+        return pd.DataFrame(columns=columns)
+
+    species = worms_search_df.assign(
+        genusID=_ids(worms_search_df["genusID"]),
+        _genus=worms_search_df["genus"].map(normalize_name),
+    ).dropna(subset=["genusID"])
+    groups = (
+        species.groupby(["_genus", "genusID"], observed=True)
+        .agg(
+            genus=("genus", "first"),
+            kingdom=("kingdom", "first"),
+            **{"class": ("class", "first")},
+            n_species=("scientificName", "nunique"),
+        )
+        .reset_index()
+    )
+    groups = groups[groups.groupby("_genus")["genusID"].transform("size") > 1]
+    if groups.empty:
+        return pd.DataFrame(columns=columns)
+
+    tax = tax_df.assign(
+        _gid=_ids(tax_df["genusID"]), _genus=tax_df["genus"].map(normalize_name)
+    )
+    kept = tax.groupby("_gid")["seq_id"].nunique()
+    total = tax.groupby("_genus")["seq_id"].nunique()
+    mol_species = (
+        tax[tax["in_mol"].astype(bool)]
+        .groupby("_gid")["scientificName"]
+        .agg(lambda names: ", ".join(sorted(set(names))))
+    )
+    groups["molSpecies"] = groups["genusID"].map(mol_species).fillna("")
+    groups["sequences"] = [
+        f"{int(kept.get(gid, 0))}/{int(total.get(genus, 0))}"
+        for gid, genus in zip(groups["genusID"], groups["_genus"])
+    ]
+    return groups[columns].sort_values(["genus", "genusID"]).reset_index(drop=True)
+
+
 ### WORMS MERGE ###
 
 
@@ -434,7 +508,7 @@ def run_worms_merge(
     )
     merged_df = worms_search_df.merge(
         mol_subset, on="_join_key", how="left", suffixes=("", "_mol")
-    ).drop(columns="_join_key")
+    )
 
     # 3. Define the Match (Vectorized): the WoRMS species equals the MOL hit's
     # accepted name, so synonyms (e.g. Gadus ogac) credit the accepted species.
@@ -443,13 +517,28 @@ def run_worms_merge(
         == merged_df["acceptedName"].str.lower().str.strip()
     )
 
-    # 4. Protect MOL-only fields: scores and the verbatim name are meaningful
+    # 4. Genus homonyms (run_worms_search expands each accepted genus of a
+    # name): a sequence keeps the ones its MOL species belong to, all of them
+    # when none of its species is in any.
+    if "genusID" in merged_df.columns:
+        merged_df["_gid"] = _ids(merged_df["genusID"])
+        groups = ["seq_id", "_join_key"]
+        merged_df["_hit"] = merged_df.groupby([*groups, "_gid"], dropna=False)[
+            "in_mol"
+        ].transform("any")
+        any_hit = merged_df.groupby(groups, dropna=False)["_hit"].transform("any")
+        merged_df = merged_df[~any_hit | merged_df["_hit"]].drop(
+            columns=["_gid", "_hit"]
+        )
+    merged_df = merged_df.drop(columns="_join_key")
+
+    # 5. Protect MOL-only fields: scores and the verbatim name are meaningful
     # only where a direct MOL hit matched (in_mol).
     score_cols = ["identity_percentage", "query_cover"]
     merged_df.loc[~merged_df["in_mol"], score_cols] = np.nan
     merged_df.loc[~merged_df["in_mol"], "verbatimIdentification"] = np.nan
 
-    # 5. Deduplicate, Clean and Rename
+    # 6. Deduplicate, Clean and Rename
     merged_df = (
         merged_df.sort_values(
             ["scientificName", "in_mol", "identity_percentage"],

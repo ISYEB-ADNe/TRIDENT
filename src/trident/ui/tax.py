@@ -143,6 +143,7 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
     st.session_state.tax_df = tax_df
     st.session_state.tax_failed = tax_failed
     st.session_state.tax_failed_names = failed_names
+    st.session_state.tax_homonyms = pipe.genus_homonyms(worms_search_df, tax_df)
     st.session_state.tax_summary_df = summary_df
     st.session_state.tax_species = tax_df["scientificName"].unique().tolist()
 
@@ -326,6 +327,45 @@ def render_worms_metrics():
             )
 
 
+def display_genus_homonyms():
+    """List the genus names that are an accepted genus in several groups."""
+    homonyms = st.session_state.tax_homonyms
+    if homonyms is None or homonyms.empty:
+        return
+    n_genera = homonyms["genus"].nunique()
+    with st.expander(
+        f"⚠️ {n_genera} {'genus' if n_genera == 1 else 'genera'} with homonyms in WoRMS",
+        expanded=False,
+    ):
+        st.caption(
+            "These names are an accepted genus in several groups. For each "
+            "sequence, TAX keeps the ones its MOL species belong to, or all of "
+            "them when none of its MOL species is in any: check that the "
+            "species kept make sense."
+        )
+        st.dataframe(
+            homonyms,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "genus": "Genus",
+                "genusID": st.column_config.NumberColumn("WoRMS genus ID", format="%d"),
+                "kingdom": "Kingdom",
+                "class": "Class",
+                "n_species": "Species",
+                "molSpecies": st.column_config.TextColumn(
+                    "MOL species in it",
+                    help="The MOL species that belong to this genus.",
+                ),
+                "sequences": st.column_config.TextColumn(
+                    "Kept for sequences",
+                    help="Sequences whose TAX list keeps this genus, out of "
+                    "the sequences with this genus name.",
+                ),
+            },
+        )
+
+
 def display_worms_summary():
     st.dataframe(
         st.session_state.tax_summary_df,
@@ -501,6 +541,7 @@ def display_worms_results():
     with st.container(border=True):
         st.markdown("### 📊 TAX List Overview")
         render_worms_metrics()
+        display_genus_homonyms()
         display_worms_summary()
 
         with st.expander(

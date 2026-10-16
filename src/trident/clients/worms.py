@@ -63,61 +63,93 @@ def get_aphia_records(
     return records or []
 
 
+def rank_records(
+    records: list[dict], rank: str | None = None, group: dict | None = None
+) -> list[dict]:
+    """The records of a name to choose from, in WoRMS order (see pick_record).
+
+    The records are narrowed in three steps:
+
+    1. rank: the records of that rank (any case), when given; none left
+       means the name has no record of that rank;
+    2. group: the records in the same group as the taxon meant, trying each
+       of its ranks in turn (e.g. class, then kingdom), when given; skipped
+       when no record is in the group;
+    3. status: the accepted records; skipped when none is accepted.
+    """
+    if rank is not None:
+        records = [r for r in records if (r.get("rank") or "").lower() == rank.lower()]
+    for col, value in (group or {}).items():
+        same_group = [r for r in records if pd.notna(value) and r.get(col) == value]
+        if same_group:
+            records = same_group
+            break
+    accepted = [r for r in records if r.get("status") == "accepted"]
+    return accepted or records
+
+
+def pick_record(
+    records: list[dict], rank: str | None = None, group: dict | None = None
+) -> dict | None:
+    """Choose the taxon a name means among its WoRMS records.
+
+    The accepted record is preferred, because WoRMS can list first an
+    unaccepted record of the same name that belongs to another taxon, and
+    following it leads to the wrong taxon. For example, the first record of
+    the species Epinephelus undulosus points to Mycteroperca acutirostris,
+    and the first record of the genus Delphinapterus is an unaccepted
+    homonym that does not hold the beluga.
+
+    A name can also be a taxon in several groups (e.g. the genus Liparis, a
+    fish and a plant). When the group of the taxon meant is known, it is
+    applied before the status, so a record of that group wins even if an
+    accepted record of another group exists. Otherwise WoRMS order decides
+    (see rank_records for the exact steps).
+
+    Args:
+        records: Records of one name, from get_aphia_records().
+        rank: If given, only records of this rank are considered (any case).
+        group: Optional ranks of the taxon meant, most specific first (e.g.
+            {"class": ..., "kingdom": ...}); missing values are ignored.
+
+    Returns:
+        The chosen record, or None if there is no record (of that rank).
+    """
+    candidates = rank_records(records, rank, group)
+    return candidates[0] if candidates else None
+
+
 def get_aphia_record(
     taxon_name: str,
     session: requests.Session | None = None,
 ) -> dict | None:
-    """Retrieve the first WoRMS record for a taxon name, or None if unknown."""
-    records = get_aphia_records(taxon_name, session=session)
-    if not records:
-        return None
-    logger.debug(f"Found AphiaID {records[0]['AphiaID']} for taxon '{taxon_name}'")
-    return records[0]
+    """Retrieve the WoRMS record of a taxon name (see pick_record), or None."""
+    record = pick_record(get_aphia_records(taxon_name, session=session))
+    if record:
+        logger.debug(f"Found AphiaID {record['AphiaID']} for taxon '{taxon_name}'")
+    return record
 
 
-def pick_genus_record(records: list[dict], marine_only: bool = True) -> dict | None:
-    """Choose the genus to expand among the WoRMS records of a genus name.
-
-    The accepted genus record is preferred: WoRMS can list an unaccepted
-    homonym first (e.g. Delphinapterus, Myersina), whose children are not the
-    genus meant. Among several accepted homonyms (e.g. Liparis, a fish and a
-    plant), a marine one is preferred when marine_only is set; otherwise WoRMS
-    order decides.
-
-    Args:
-        records: Records of one name, from get_aphia_records().
-        marine_only: Whether the expansion is restricted to marine taxa.
-
-    Returns:
-        The chosen record, or None if no record has rank Genus.
-    """
-    genera = [r for r in records if r.get("rank") == "Genus"]
-    accepted = [r for r in genera if r.get("status") == "accepted"]
-    if marine_only:
-        accepted = [r for r in accepted if r.get("isMarine")] or accepted
-    if accepted:
-        return accepted[0]
-    return genera[0] if genera else None
-
-
-def get_genus_aphia_id(
+def get_genus_aphia_ids(
     genus: str,
     session: requests.Session | None = None,
-    marine_only: bool = True,
-) -> int | None:
-    """Retrieve the AphiaID of the genus to expand (see pick_genus_record).
+) -> list[int]:
+    """Retrieve the AphiaIDs of the genus records to expand for a genus name.
 
-    The chosen record is expanded itself, even when unaccepted: WoRMS can list
-    accepted species under a genus record marked unaccepted (e.g. Aphaniops,
-    Turrum), and its accepted genus does not hold them.
+    Every accepted genus record is expanded: a name can be an accepted genus
+    in several groups (e.g. Liparis, a fish and a plant), and the MOL species
+    tell them apart later (see run_worms_merge in the TAX pipeline). Without an
+    accepted record, the first genus record is expanded, even unaccepted:
+    WoRMS can list accepted species under a genus record marked unaccepted
+    (e.g. Aphaniops, Turrum), and its accepted genus does not hold them.
 
     Returns:
-        AphiaID integer if found, otherwise None.
+        AphiaIDs in WoRMS order, empty if the name has no genus record.
     """
-    record = pick_genus_record(
-        get_aphia_records(genus, session=session), marine_only=marine_only
-    )
-    return record["AphiaID"] if record else None
+    genera = rank_records(get_aphia_records(genus, session=session), "Genus")
+    if not any(r.get("status") == "accepted" for r in genera):
+        genera = genera[:1]
+    return [r["AphiaID"] for r in genera]
 
 
 @with_optional_session(retries=5, backoff_factor=0.5)
@@ -336,6 +368,7 @@ WORMS_TAXON_COLUMNS = [
     "taxonID",
     "taxonID_db",
     "taxonURL",
+    "genusID",  # AphiaID of the genus record the species was expanded from
 ]
 
 
@@ -382,6 +415,7 @@ def _build_taxonomy_dataframe(
                     "rank",
                     "valid_AphiaID",
                     "url",
+                    "genusID",
                 ]
                 if key in sp
             }
@@ -437,9 +471,11 @@ def get_species_from_genus_list(
 ) -> tuple[pd.DataFrame, list[str]]:
     """Retrieve and consolidate WoRMS species for a list of genera.
 
-    For each genus, resolves the AphiaID then fetches all child taxa with
-    pagination. Results are filtered to accepted species by default and
-    normalised into a standardised taxonomy DataFrame.
+    For each genus, resolves the AphiaIDs to expand (every accepted homonym,
+    see get_genus_aphia_ids) then fetches all their child taxa with
+    pagination; each species records its genus record as genusID. Results
+    are filtered to accepted species by default and normalised into a
+    standardised taxonomy DataFrame.
 
     Args:
         genus_list: List of genus names to query.
@@ -463,19 +499,23 @@ def get_species_from_genus_list(
 
     for genus in genus_list:
         try:
-            # 1. Resolve AphiaID for the genus
-            aphia_id = get_genus_aphia_id(
-                genus, session=session, marine_only=marine_only
-            )
-            if aphia_id is None:
+            # 1. Resolve the AphiaIDs of the genus (several for homonyms)
+            aphia_ids = get_genus_aphia_ids(genus, session=session)
+            if not aphia_ids:
                 logger.warning(f"No AphiaID found for genus '{genus}'")
                 continue
 
-            # 2. Retrieve all children with internal pagination
-            children = get_children_by_aphia_id(
-                aphia_id, session=session, marine_only=marine_only
-            )
-            time.sleep(delay)
+            # 2. Retrieve all children with internal pagination. An error on
+            # any homonym fails the whole genus, so no partial list is cached.
+            children = []
+            for aphia_id in aphia_ids:
+                children += [
+                    {**child, "genusID": aphia_id}
+                    for child in get_children_by_aphia_id(
+                        aphia_id, session=session, marine_only=marine_only
+                    )
+                ]
+                time.sleep(delay)
 
             if not children:
                 logger.warning(f"No children found for genus '{genus}'")

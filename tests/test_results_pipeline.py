@@ -3,6 +3,7 @@
 import pandas as pd
 import pytest
 
+from trident.pipelines import results_pipeline
 from trident.pipelines.results_pipeline import (
     EXPORT_COLS,
     build_results_df,
@@ -10,6 +11,7 @@ from trident.pipelines.results_pipeline import (
     filter_excluded_results,
     add_below_mol,
     get_rejected_max_identity,
+    build_gbif_export_df,
 )
 
 
@@ -285,3 +287,87 @@ def test_empty_mol_list_flows_to_results(monkeypatch):
         ["s1", "s2"], ncbi_search_df, mol_df, tax_df, geo_df
     )
     assert set(lost["pipeline_step"]) == {"MOL Search"}
+
+
+# --- GBIF export of genus homonyms (Liparis: a fish and a plant) ---
+
+_FISH = {
+    "kingdom": "Animalia",
+    "phylum": "Chordata",
+    "class": "Teleostei",
+    "order": "Perciformes",
+    "family": "Liparidae",
+}
+_PLANT = {
+    "kingdom": "Plantae",
+    "phylum": "Tracheophyta",
+    "class": "Magnoliopsida",
+    "order": "Asparagales",
+    "family": "Orchidaceae",
+}
+
+
+def _liparis(seq_id, taxonomy, name):
+    """A results row of a Liparis species (name without the genus)."""
+    return {
+        "seq_id": seq_id,
+        "dna_sequence": "ACGT",
+        **taxonomy,
+        "genus": "Liparis",
+        "specificEpithet": name.split()[0],
+        "scientificName": f"Liparis {name}",
+    }
+
+
+def _worms_genus(aphia_id, kingdom, class_, status="accepted"):
+    return {
+        "AphiaID": aphia_id,
+        "valid_AphiaID": aphia_id,
+        "rank": "Genus",
+        "status": status,
+        "kingdom": kingdom,
+        "class": class_,
+        "authority": "Author, 1800",
+    }
+
+
+def test_gbif_export_takes_the_worms_record_of_the_rows_group(monkeypatch):
+    """A sequence resolved to a genus that is also a genus in another group
+    gets the WoRMS record of its own class, even when the other is listed
+    first and accepted while its own is not."""
+    monkeypatch.setattr(
+        results_pipeline,
+        "get_aphia_records",
+        lambda name: [
+            _worms_genus(425907, "Plantae", "Magnoliopsida"),
+            _worms_genus(126160, "Animalia", "Teleostei", status="unaccepted"),
+        ],
+    )
+    results = pd.DataFrame(
+        [_liparis("s1", _FISH, "liparis"), _liparis("s1", _FISH, "fabricii")]
+    )
+    row = build_gbif_export_df(results).iloc[0]
+    assert row["scientificName"] == "Liparis"
+    assert row["taxonID"] == "126160"
+
+
+def test_gbif_export_common_taxon_is_a_real_taxon(monkeypatch):
+    """The lowest common taxon of a sequence's species is shared at every rank
+    above it, so homonym genera of two kingdoms have none; a common species
+    is named by its binomial."""
+    monkeypatch.setattr(results_pipeline, "get_aphia_records", lambda name: [])
+    results = pd.DataFrame(
+        [
+            _liparis("both", _FISH, "liparis"),
+            _liparis("both", _PLANT, "loeselii"),
+            _liparis("subspecies", _FISH, "fabricii"),
+            _liparis("subspecies", _FISH, "fabricii fabricii"),
+        ]
+    )
+    rows = build_gbif_export_df(results).set_index("seq_id")
+    assert pd.isna(rows.loc["both", "scientificName"])
+    assert rows.loc["both", "identificationRemarks"] == (
+        "Liparis liparis, Liparis loeselii"
+    )
+    assert rows.loc["subspecies", "scientificName"] == "Liparis fabricii"
+    assert rows.loc["subspecies", "taxonRank"] == "Species"

@@ -13,7 +13,7 @@ def test_errored_genus_is_a_failure(monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("network error")
 
-    monkeypatch.setattr(worms, "get_genus_aphia_id", boom)
+    monkeypatch.setattr(worms, "get_genus_aphia_ids", boom)
     df, failed = get_species_from_genus_list(["Gadus"], delay=0)
     assert failed == ["Gadus"]
     assert df.empty
@@ -21,13 +21,13 @@ def test_errored_genus_is_a_failure(monkeypatch):
 
 def test_no_aphia_id_is_not_a_failure(monkeypatch):
     # Genus not in WoRMS -> valid empty, not a failure (won't be retried).
-    monkeypatch.setattr(worms, "get_genus_aphia_id", lambda *a, **k: None)
+    monkeypatch.setattr(worms, "get_genus_aphia_ids", lambda *a, **k: [])
     df, failed = get_species_from_genus_list(["Gadus"], delay=0)
     assert failed == []
 
 
 def test_no_children_is_not_a_failure(monkeypatch):
-    monkeypatch.setattr(worms, "get_genus_aphia_id", lambda *a, **k: 12345)
+    monkeypatch.setattr(worms, "get_genus_aphia_ids", lambda *a, **k: [12345])
     monkeypatch.setattr(worms, "get_children_by_aphia_id", lambda *a, **k: [])
     df, failed = get_species_from_genus_list(["Gadus"], delay=0)
     assert failed == []
@@ -38,7 +38,7 @@ def test_no_children_is_not_a_failure(monkeypatch):
 def test_marine_only_threaded_to_children(monkeypatch):
     """The marine_only flag (default True) reaches the children query."""
     captured = {}
-    monkeypatch.setattr(worms, "get_genus_aphia_id", lambda *a, **k: 42)
+    monkeypatch.setattr(worms, "get_genus_aphia_ids", lambda *a, **k: [42])
 
     def fake_children(aphia_id, session=None, marine_only=True, **k):
         captured["marine_only"] = marine_only
@@ -115,38 +115,88 @@ def test_resolve_not_found_keeps_input(monkeypatch):
     assert r["is_synonym"] is False
 
 
+def test_resolve_follows_the_accepted_record_not_the_first(monkeypatch):
+    """A name with an accepted record keeps it, even when WoRMS lists first an
+    unaccepted homonym pointing to another species."""
+    records = [
+        {
+            "AphiaID": 218229,
+            "scientificname": "Epinephelus undulosus",
+            "status": "unaccepted",
+            "rank": "Species",
+            "valid_AphiaID": 273876,
+            "valid_name": "Mycteroperca acutirostris",
+        },
+        {
+            "AphiaID": 367207,
+            "scientificname": "Epinephelus undulosus",
+            "status": "accepted",
+            "rank": "Species",
+            "valid_AphiaID": 367207,
+            "valid_name": "Epinephelus undulosus",
+        },
+    ]
+    monkeypatch.setattr(worms, "get_aphia_records", lambda name, session=None: records)
+    r = worms.resolve_accepted_name("Epinephelus undulosus")
+    assert r["accepted_name"] == "Epinephelus undulosus"
+    assert r["aphia_id"] == 367207
+    assert r["is_synonym"] is False
+
+
 # --- genus to expand ---
 
 
-def _genus(aphia_id, status, kingdom="Animalia", is_marine=1):
+def _genus(aphia_id, status, kingdom="Animalia"):
     return {
         "AphiaID": aphia_id,
         "status": status,
         "rank": "Genus",
         "kingdom": kingdom,
-        "isMarine": is_marine,
         "valid_AphiaID": aphia_id,
     }
 
 
-def test_genus_to_expand_is_the_accepted_one_marine_first(monkeypatch):
-    """The accepted genus is expanded, not an unaccepted homonym WoRMS lists
-    first (Delphinapterus); among accepted homonyms, the marine one is chosen
-    when Marine only is on (Liparis: a fish and a plant). A name with only an
-    unaccepted genus record expands that record, which holds the accepted
-    species (Aphaniops)."""
-    delphinapterus = [_genus(383420, "unaccepted"), _genus(137029, "accepted")]
-    assert worms.pick_genus_record(delphinapterus)["AphiaID"] == 137029
-
-    liparis = [_genus(425907, "accepted", "Plantae", None), _genus(126160, "accepted")]
-    assert worms.pick_genus_record(liparis)["AphiaID"] == 126160
-    assert worms.pick_genus_record(liparis, marine_only=False)["AphiaID"] == 425907
-
-    aphaniops = [{**_genus(296017, "unaccepted"), "valid_AphiaID": 125725}]
+def test_every_accepted_genus_homonym_is_expanded(monkeypatch):
+    """Each accepted genus record of a name is expanded, and its species carry
+    the genus record they come from (Liparis: a fish and a plant). An
+    unaccepted homonym is not expanded (Delphinapterus), unless the name has
+    only unaccepted genus records: the first one holds the accepted species
+    (Aphaniops)."""
+    records = {
+        "Liparis": [
+            _genus(126160, "accepted"),
+            _genus(503293, "unaccepted"),
+            _genus(425907, "accepted", "Plantae"),
+        ],
+        "Delphinapterus": [_genus(383420, "unaccepted"), _genus(137029, "accepted")],
+        "Aphaniops": [{**_genus(296017, "unaccepted"), "valid_AphiaID": 125725}],
+    }
     monkeypatch.setattr(
-        worms, "get_aphia_records", lambda name, session=None: aphaniops
+        worms, "get_aphia_records", lambda name, session=None: records[name]
     )
-    assert worms.get_genus_aphia_id("Aphaniops") == 296017
+    assert worms.get_genus_aphia_ids("Delphinapterus") == [137029]
+    assert worms.get_genus_aphia_ids("Aphaniops") == [296017]
+
+    species = {126160: "Liparis liparis", 425907: "Liparis loeselii"}
+    monkeypatch.setattr(
+        worms,
+        "get_children_by_aphia_id",
+        lambda aphia_id, **k: [
+            {
+                "valid_name": species[aphia_id],
+                "valid_authority": "(Linnaeus)",
+                "status": "accepted",
+                "rank": "Species",
+                "genus": "Liparis",
+            }
+        ],
+    )
+    df, failed = get_species_from_genus_list(["Liparis"], delay=0)
+    assert failed == []
+    assert dict(zip(df["scientificName"], df["genusID"])) == {
+        "Liparis liparis": 126160,
+        "Liparis loeselii": 425907,
+    }
 
 
 # --- species list of a genus ---
@@ -193,7 +243,7 @@ def test_failed_page_fails_the_genus_instead_of_a_partial_list(monkeypatch):
         _Page(200, first_page), worms.requests.exceptions.ConnectionError("reset")
     )
     monkeypatch.setattr(worms, "create_session", lambda **k: session)
-    monkeypatch.setattr(worms, "get_genus_aphia_id", lambda *a, **k: 42)
+    monkeypatch.setattr(worms, "get_genus_aphia_ids", lambda *a, **k: [42])
     df, failed = get_species_from_genus_list(["Gadus"], delay=0)
     assert failed == ["Gadus"]
     assert df.empty

@@ -14,7 +14,7 @@ which does WoRMS lookups for higher-level taxa).
 import pandas as pd
 from loguru import logger
 
-from trident.clients.worms import clean_authorships, get_aphia_record
+from trident.clients.worms import clean_authorships, get_aphia_records, pick_record
 from trident.core.utils import (
     ensure_columns,
     find_exclusion_pipeline_step,
@@ -361,23 +361,22 @@ def _find_common_taxonomy(group: pd.DataFrame) -> dict:
         result["identificationRemarks"] = pd.NA
         return result
 
-    # Walk hierarchy bottom-up to find lowest common level
-    result = {}
+    # Walk the hierarchy top-down: a level is common only when every level
+    # above it is too, so homonyms (e.g. the genus Liparis, a fish and a plant)
+    # do not make a common taxon. A level missing for every species is skipped.
+    result = {col: pd.NA for col in TAXONOMY_HIERARCHY}
     resolved_rank = None
     resolved_name = None
 
-    for col in reversed(TAXONOMY_HIERARCHY):
+    for col in TAXONOMY_HIERARCHY:
         values = group[col].dropna().unique()
+        # An epithet names a species only within a known genus.
+        if len(values) > 1 or (col == "specificEpithet" and resolved_rank != "genus"):
+            break
         if len(values) == 1:
+            result[col] = values[0]
             resolved_rank = col
             resolved_name = values[0]
-            # Fill taxonomy up to this level
-            for c in TAXONOMY_HIERARCHY:
-                vals = group[c].dropna().unique()
-                result[c] = vals[0] if len(vals) == 1 else pd.NA
-            break
-        else:
-            result[col] = pd.NA
 
     if resolved_rank is None:
         # No common level found — clear all taxonomy
@@ -386,6 +385,9 @@ def _find_common_taxonomy(group: pd.DataFrame) -> dict:
         result["scientificName"] = pd.NA
         result["taxonRank"] = pd.NA
     else:
+        # A species is named by its binomial, not by its epithet alone.
+        if resolved_rank == "specificEpithet" and pd.notna(result["genus"]):
+            resolved_name = f"{result['genus']} {resolved_name}"
         result["scientificName"] = resolved_name
         result["taxonRank"] = TAXONOMY_RANKS.get(resolved_rank, resolved_rank)
 
@@ -480,26 +482,40 @@ def build_gbif_export_df(results_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _fill_worms_records(df: pd.DataFrame, mask: pd.Series) -> None:
-    """Look up WoRMS records for higher-level taxa and fill taxonID/authorship in-place."""
-    lookups = (
-        df.loc[mask, ["scientificName", "taxonRank"]].drop_duplicates().values.tolist()
+    """Look up WoRMS records for higher-level taxa and fill taxonID/authorship in-place.
+
+    A name can be a taxon of that rank in several groups (e.g. the genus
+    Liparis, a fish and a plant): the record in the row's class, else its
+    kingdom, is taken (see pick_record). Each name is requested once.
+    """
+    keys = ["scientificName", "taxonRank", "class", "kingdom"]
+
+    def key_of(values) -> tuple:
+        # None for missing values, which (unlike NaN) compare equal as keys.
+        return tuple(None if pd.isna(v) else v for v in values)
+
+    lookups = sorted(
+        {key_of(row) for row in df.loc[mask, keys].values.tolist()}, key=str
     )
     logger.info(f"Looking up {len(lookups)} higher-level taxa in WoRMS")
 
+    records_of: dict[str, list[dict]] = {}
     cache = {}
-    for name, rank in lookups:
-        record = get_aphia_record(name)
-        if record and record.get("rank", "").lower() == rank.lower():
-            cache[name] = {
-                "taxonID": str(record.get("valid_AphiaID", record["AphiaID"])),
+    for name, rank, class_, kingdom in lookups:
+        if name not in records_of:
+            records_of[name] = get_aphia_records(name)
+        records = records_of[name]
+        record = pick_record(records, rank, {"class": class_, "kingdom": kingdom})
+        if record:
+            cache[(name, rank, class_, kingdom)] = {
+                "taxonID": str(record.get("valid_AphiaID") or record["AphiaID"]),
                 "scientificNameAuthorship": record.get("valid_authority")
                 or record.get("authority"),
                 "taxonID_db": "WORMS",
             }
-        elif record:
-            logger.warning(
-                f"WoRMS rank mismatch for '{name}': expected {rank}, got {record.get('rank')}"
-            )
+        elif records:
+            found = sorted({r.get("rank") or "?" for r in records})
+            logger.warning(f"No WoRMS {rank} record for '{name}' (found: {found})")
 
     # Clean authorships
     if cache:
@@ -510,7 +526,7 @@ def _fill_worms_records(df: pd.DataFrame, mask: pd.Series) -> None:
             rec["scientificNameAuthorship"] = auth
 
     for idx in df.index[mask]:
-        name = df.at[idx, "scientificName"]
-        if name in cache:
-            for col, val in cache[name].items():
+        key = key_of(df.loc[idx, keys])
+        if key in cache:
+            for col, val in cache[key].items():
                 df.at[idx, col] = val

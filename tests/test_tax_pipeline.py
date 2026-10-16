@@ -2,7 +2,8 @@
 
 Covers the pure logic: prepare_worms_input (accepted-genus expansion),
 apply_name_resolution (attach acceptedName/AphiaID), run_worms_merge (in_mol
-credited on the accepted name, verbatim preserved) and summarize_name_resolution
+credited on the accepted name, verbatim preserved), genus_homonyms (which
+genus homonym is kept) and summarize_name_resolution
 (what the TAX tab reports about the MOL names). The cached run_name_resolution
 step is exercised via its client contract in test_worms.py.
 """
@@ -15,6 +16,7 @@ from trident.pipelines.tax_pipeline import (
     prepare_worms_input,
     prepare_resolution_input,
     apply_name_resolution,
+    genus_homonyms,
     run_worms_merge,
     summarize_name_resolution,
 )
@@ -170,6 +172,64 @@ def test_merge_without_resolution_matches_raw_name():
     assert bool(out.iloc[0]["in_mol"]) is True
     # No resolution -> raw == accepted -> not a synonym -> blank.
     assert pd.isna(out.iloc[0]["verbatimIdentification"])
+
+
+# --- genus homonyms (Liparis: a fish and a plant) ---
+
+
+def _liparis_worms():
+    """WoRMS species of the two accepted Liparis genera."""
+    return pd.DataFrame(
+        {
+            "scientificName": [
+                "Liparis liparis",
+                "Liparis fabricii",
+                "Liparis loeselii",
+            ],
+            "genus": ["Liparis"] * 3,
+            "genusID": [126160, 126160, 425907],
+            "kingdom": ["Animalia", "Animalia", "Plantae"],
+            "class": ["Teleostei", "Teleostei", "Magnoliopsida"],
+        }
+    )
+
+
+def _liparis_mol():
+    """One sequence per case: a plant hit, a fish synonym, open nomenclature."""
+    return pd.DataFrame(
+        {
+            "seq_id": ["plant", "fish", "open"],
+            "dna_sequence": ["A", "C", "G"],
+            "scientificName": ["Liparis loeselii", "Liparis oldname", "Liparis sp."],
+            "acceptedName": ["Liparis loeselii", "Liparis fabricii", "Liparis sp."],
+            "identity_percentage": [99.0, 99.0, 99.0],
+            "query_cover": [100.0, 100.0, 100.0],
+        }
+    )
+
+
+def test_each_sequence_keeps_the_genus_homonym_its_mol_species_belong_to():
+    """Each sequence keeps the homonym its MOL species belong to, by accepted
+    name (so a synonym counts too), and all of them when none of its species
+    is in any (open nomenclature)."""
+    tax = _merge(_liparis_worms(), _liparis_mol())
+    kept = tax.groupby("seq_id")["scientificName"].agg(sorted).to_dict()
+    assert kept == {
+        "plant": ["Liparis loeselii"],
+        "fish": ["Liparis fabricii", "Liparis liparis"],
+        "open": ["Liparis fabricii", "Liparis liparis", "Liparis loeselii"],
+    }
+
+
+def test_homonym_report_says_which_mol_species_and_sequences_keep_each():
+    """The TAX tab report lists each homonym with the MOL species found in it
+    and how many of the sequences with that genus name keep it: the fish and
+    the plant are each kept by their own sequence and by the open one."""
+    worms = _liparis_worms()
+    report = genus_homonyms(worms, _merge(worms, _liparis_mol()))
+    assert report["genusID"].tolist() == [126160, 425907]
+    assert report["molSpecies"].tolist() == ["Liparis fabricii", "Liparis loeselii"]
+    assert report["sequences"].tolist() == ["2/3", "2/3"]
 
 
 # --- summarize_name_resolution ---
