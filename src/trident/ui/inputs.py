@@ -2,8 +2,8 @@
 Input handling UI: FASTA upload, DB restore, and sequence preview.
 """
 
+import io
 import sqlite3
-import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -13,10 +13,21 @@ from loguru import logger
 import trident.pipelines as pipe
 from trident.core.config import is_streamlit_cloud
 from trident.core.database import check_schema_version
-from trident.ui.ui import reset_for_new_analysis, COL
+from trident.ui.ui import prefill_settings, reset_for_new_analysis, COL
 
 FASTA_EXTENSIONS = {"fasta", "fa", "txt", "fas"}
 DB_EXTENSIONS = {"db", "sqlite", "sqlite3"}
+
+# The example ships at the repository root (example/), next to src/, in every
+# documented install (git clone or downloaded archive).
+EXAMPLE_FASTA = Path(__file__).resolve().parents[3] / "example" / "example.fasta"
+# The example's sequences come from Svalbard: pre-fill the GEO window of the
+# paper's worked example, or GBIF would be searched around 0°, 0°.
+EXAMPLE_SETTINGS = {
+    "gbif_latitude": "78.5",
+    "gbif_longitude": "14.5",
+    "gbif_extent": "250, 500",
+}
 
 
 def _db_path(base_name: str) -> str:
@@ -50,21 +61,36 @@ def display_fasta_sequence_table():
         )
 
 
-def _process_fasta(uploaded_file) -> tuple[pd.DataFrame, str]:
-    """Saves upload to temp, parses sequences via trident.fasta, and cleans up."""
-    base_name = Path(uploaded_file.name).stem
-    temp_path = Path(tempfile.gettempdir()) / f"{base_name}.fasta"
+def _start_fasta_analysis(file_name: str, data: bytes, settings: dict | None = None):
+    """Load a FASTA as the active analysis, named after the file.
 
-    temp_path.write_bytes(uploaded_file.getvalue())
+    *settings* pre-fill widgets of the later steps (widget key -> value).
+    """
+    base_name = Path(file_name).stem
+    # Parsed from memory: a shared temp file would race between sessions on
+    # Cloud. The cache keys the FASTA by this name.
+    # newline=None translates \r and \r\n line endings, as open() does.
+    handle = io.StringIO(data.decode(), newline=None)
+    handle.name = file_name
 
-    try:
-        sequences_df, _ = pipe.run_fasta_workflow(
-            str(temp_path), db_path=_db_path(base_name)
-        )
-    finally:
-        temp_path.unlink(missing_ok=True)
+    with st.spinner(f"Processing {file_name}...", show_time=True):
+        seqs_df, _ = pipe.run_fasta_workflow(handle, db_path=_db_path(base_name))
 
-    return sequences_df, base_name
+    if seqs_df.empty:
+        st.error("❌ No valid sequences found.")
+        return
+
+    st.session_state.sequences_df = seqs_df
+    st.session_state.sequences_id = seqs_df["seq_id"].unique().tolist()
+    st.session_state.analysis_name = base_name
+    st.session_state.db_path = _db_path(base_name)
+
+    reset_for_new_analysis("sequences_df")
+    if settings:
+        prefill_settings(settings)
+    st.session_state.fasta_uploader_key += 1
+    st.session_state.requested_tab = "start"
+    st.rerun()
 
 
 def _restore_db(uploaded_file):
@@ -155,21 +181,31 @@ def handle_file_upload():
             type="primary",
             use_container_width=True,
         ):
-            with st.spinner(f"Processing {uploaded_file.name}...", show_time=True):
-                seqs_df, base_name = _process_fasta(uploaded_file)
+            _start_fasta_analysis(uploaded_file.name, uploaded_file.getvalue())
 
-                if not seqs_df.empty:
-                    st.session_state.sequences_df = seqs_df
-                    st.session_state.sequences_id = seqs_df["seq_id"].unique().tolist()
-                    st.session_state.analysis_name = base_name
-                    st.session_state.db_path = _db_path(base_name)
 
-                    reset_for_new_analysis("sequences_df")
-                    st.session_state.fasta_uploader_key += 1
-                    st.session_state.requested_tab = "start"
-                    st.rerun()
-                else:
-                    st.error("❌ No valid sequences found.")
+def load_example_button():
+    """Offer the bundled example FASTA, for users without a file at hand."""
+    if not EXAMPLE_FASTA.exists():
+        return
+
+    active = (
+        st.session_state.get("sequences_df") is not None
+        and st.session_state.get("analysis_name") == EXAMPLE_FASTA.stem
+    )
+    if st.button(
+        f"Load the example ({EXAMPLE_FASTA.name})",
+        icon=":material/science:",
+        disabled=active,
+        help=(
+            "The four Svalbard 16S sequences of the paper's worked example. "
+            "The GEO window is set to the sampling area (78.5° N, 14.5° E; 250 and 500 km)."
+        ),
+        use_container_width=True,
+    ):
+        _start_fasta_analysis(
+            EXAMPLE_FASTA.name, EXAMPLE_FASTA.read_bytes(), EXAMPLE_SETTINGS
+        )
 
 
 def display_analysis_status():
@@ -202,10 +238,11 @@ def upload_and_start_analysis():
     _auto_restore_from_db()
 
     handle_file_upload()
+    load_example_button()
 
     st.divider()
 
     if st.session_state.get("sequences_df") is not None:
         display_analysis_status()
     else:
-        st.info("👆 **Get started** by uploading a file above.")
+        st.info("👆 **Get started** by uploading a file above, or load the example.")

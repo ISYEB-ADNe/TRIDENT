@@ -6,11 +6,9 @@ This module handles only UI rendering and user interaction.
 
 import streamlit as st
 
-from loguru import logger
 
 from trident.core import config
 import trident.pipelines as pipe
-from trident.logging import get_log_level
 
 from trident.ui.ui import (
     record_empty_step,
@@ -43,9 +41,6 @@ def bold_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     """Run BOLD search for species missing from NCBI."""
     # Setup Logging
     logsink = StreamlitLogSink(status, prefix="bold_")
-    handler_id = logger.add(
-        logsink.write, filter=logsink.thread_filter, level=get_log_level()
-    )
 
     # Prepare Inputs and Progress Tracker
     geo_df = st.session_state.geo_df
@@ -75,6 +70,7 @@ def bold_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
         progress_handler=progress_info,
         user_agent=config.user_agent(),
         logsink=logsink,
+        progress=progress_info,
         on_poll=_poll,
     )
 
@@ -84,7 +80,7 @@ def bold_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     st.session_state.bold_search_failed = failed_items(bold_search_df)
 
     # Cleanup
-    logger.remove(handler_id)
+    logsink.close()
     progress_bar.empty()
     reset_state_after("bold_search_df")
 
@@ -266,9 +262,6 @@ def bold_filter_job(*, force_rerun, retry_empty=False, status, progress_bar, par
 
     # Setup Logging
     logsink = StreamlitLogSink(status, prefix="bold_filter_")
-    handler_id = logger.add(
-        logsink.write, filter=logsink.thread_filter, level=get_log_level()
-    )
 
     # Prepare Inputs and Progress Tracker
     bold_search_df = st.session_state.bold_search_df
@@ -296,6 +289,7 @@ def bold_filter_job(*, force_rerun, retry_empty=False, status, progress_bar, par
         force_rerun=force_rerun,
         progress_handler=progress_info,
         logsink=logsink,
+        progress=progress_info,
         on_poll=_poll,
     )
     bold_merge_df, bold_merge_params = pipe.run_bold_merge(
@@ -335,7 +329,7 @@ def bold_filter_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     st.session_state.extra_df = extra_df
     st.session_state.extra_params = extra_params
     reset_state_after("extra_df")
-    logger.remove(handler_id)
+    logsink.close()
 
 
 def _filter_success_message():

@@ -5,6 +5,7 @@ Contains all Streamlit-specific UI functions that are reusable across the app.
 
 import concurrent.futures
 import functools
+import json
 import logging
 import os
 import queue
@@ -19,6 +20,8 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 from loguru import logger
+
+from trident.logging import get_log_level
 
 
 # Suppress Streamlit's thread context warnings (Streamlit uses standard logging internally)
@@ -363,6 +366,8 @@ def reset_state_after(key_name: str):
         if name in no_reset:
             continue
         st.session_state[name] = default[name]
+        if name.endswith("_flag"):
+            drop_jobs(name)
 
 
 # --------------------------------------------------------------------
@@ -482,6 +487,9 @@ def run_step_workflow(
         # items are re-executed (important for PartialCache steps).
         force = mode == "CHANGED" or "Erase" in cache_mode
         retry = "Retry" in cache_mode
+        # The job's settings: a rerun with other ones must not re-attach to it.
+        settings = json.dumps([current_params, cache_mode], sort_keys=True, default=str)
+        st.session_state[_JOB_STEP] = (flag_key, settings)
         if threaded:
             progress_bar = st.progress(0, text="Initializing...")
             with st.status(status_label, expanded=False) as status:
@@ -507,6 +515,7 @@ def run_step_workflow(
         mode, new_string, btn_key=btn_key, logs_prefix=logs_prefix
     )
     if clicked:
+        drop_jobs(flag_key)
         st.session_state[flag_key] = True
         st.rerun()
 
@@ -700,8 +709,36 @@ class StreamlitLogSink:
         self._tag = uuid.uuid4().hex
 
         # Initialize session state logs
-        log_key = f"{self.prefix}logs"
-        st.session_state[log_key] = []
+        self.lines: list[str] = []
+        st.session_state[f"{self.prefix}logs"] = self.lines
+
+        self._taken_over = False
+        self._handler_id = logger.add(
+            self.write, filter=self.thread_filter, level=get_log_level()
+        )
+
+    def close(self):
+        """Stop receiving log messages (call when the job is over)."""
+        if self._handler_id is not None:
+            logger.remove(self._handler_id)
+            self._handler_id = None
+
+    def take_over(self, old: "StreamlitLogSink"):
+        """Continue the log of a job started by an interrupted script run.
+
+        The log becomes the job's log so far (the lines this sink got before
+        repeat steps the job already logged), then this sink receives the job's
+        next lines in place of *old*, which is closed.
+        """
+        # Accept the job's records before closing old, so none falls between.
+        self._tag = old._tag
+        self._allowed_threads |= old._allowed_threads
+        # The abandoned run may still be polling old: stop it draining.
+        old._taken_over = True
+        old.close()
+        self.lines[:] = old.lines + old._drain()
+        for line in self.lines:
+            self._show(line)
 
     def allow_current_thread(self):
         """Register the calling thread so this sink accepts its log messages."""
@@ -746,29 +783,29 @@ class StreamlitLogSink:
         # Put in queue (thread-safe)
         self.log_queue.put(line)
 
-    def flush_to_ui(self):
-        """Called from main thread to display queued logs"""
-        log_key = f"{self.prefix}logs"
-        displayed_count = 0
+    def _show(self, line) -> bool:
+        try:
+            self.container.write(line)
+            return True
+        except Exception:
+            return False
 
-        if log_key not in st.session_state or st.session_state[log_key] is None:
-            st.session_state[log_key] = []
-
-        # Process all queued logs
+    def _drain(self) -> list[str]:
+        """Return and remove the queued lines."""
+        lines = []
         while True:
             try:
-                line = self.log_queue.get_nowait()
+                lines.append(self.log_queue.get_nowait())
             except queue.Empty:
-                break
+                return lines
 
-            st.session_state[log_key].append(line)
-            try:
-                self.container.write(line)
-                displayed_count += 1
-            except Exception:
-                pass
-
-        return displayed_count
+    def flush_to_ui(self):
+        """Called from main thread to display queued logs"""
+        if self._taken_over:
+            return 0
+        lines = self._drain()
+        self.lines.extend(lines)
+        return sum(self._show(line) for line in lines)
 
 
 # Streamlit's default Styler cap is 262144 cells; above it st.dataframe raises.
@@ -815,6 +852,7 @@ def run_with_progress(
     fn,
     *args,
     logsink: "StreamlitLogSink | None" = None,
+    progress: dict | None = None,
     on_poll: Callable[[], None] | None = None,
     poll_interval: float = 0.5,
     **kwargs,
@@ -830,6 +868,7 @@ def run_with_progress(
         fn: The callable to run in the background (e.g. a ``logsink.wrap(...)``).
         *args, **kwargs: Passed straight through to ``fn``.
         logsink: Log sink to flush each tick and once at the end, if provided.
+        progress: The dict the job updates and ``on_poll`` reads, if any.
         on_poll: Zero-arg callback invoked each tick (typically updates the
             progress bar from a shared ``progress_info`` dict).
         poll_interval: Seconds to sleep between ticks.
@@ -837,18 +876,86 @@ def run_with_progress(
     Returns:
         Whatever ``fn`` returns.
     """
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    # A rerun requested while the job runs (e.g. a widget event) abandons this
+    # script run but not the job's thread. The next run calls here again with
+    # the step's run flag still set: wait on the same job instead of starting
+    # a second one, and take over its log and progress. A step runs one job at
+    # a time: a job of other settings, or dropped, is waited for, then replaced.
+    jobs = st.session_state.setdefault(RUNNING_JOBS, {})
+    step, settings = st.session_state.get(_JOB_STEP, (None, None))
+    key = (step, fn.__name__)
+    job = jobs.get(key)
+    if job is not None and (job["dropped"] or job["settings"] != settings):
+        if not job["future"].done():
+            waiting = st.empty()
+            waiting.info(
+                "Finishing the previous run of this step first "
+                "(restart TRIDENT to stop it)..."
+            )
+            concurrent.futures.wait([job["future"]])
+            waiting.empty()
+        job = None
+    if job is None:
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         future = executor.submit(fn, *args, **kwargs)
-        while not future.done():
-            if on_poll is not None:
-                on_poll()
-            if logsink is not None:
-                logsink.flush_to_ui()
-            time.sleep(poll_interval)
-        result = future.result()
+        executor.shutdown(wait=False)
+        job = jobs[key] = {
+            "future": future,
+            "progress": progress,
+            "settings": settings,
+            "dropped": False,
+        }
+    elif logsink is not None and job["logsink"] is not None:
+        logsink.take_over(job["logsink"])
+    job["logsink"] = logsink
+
+    future = job["future"]
+    while not future.done():
+        if progress is not None and job["progress"] is not progress:
+            progress.update(job["progress"])
+        if on_poll is not None:
+            on_poll()
         if logsink is not None:
             logsink.flush_to_ui()
+        time.sleep(poll_interval)
+    # A finished job stays until its step is run again or reset (drop_jobs):
+    # the abandoned run may still be polling it, and either run may finish first.
+    try:
+        result = future.result()
+    except Exception:
+        # Not kept: the next run of the step tries again.
+        if jobs.get(key) is job:
+            del jobs[key]
+        if logsink is not None:
+            logsink.close()
+        raise
+    if logsink is not None:
+        logsink.flush_to_ui()
     return result
+
+
+# Session key of the jobs of each step, by (step run flag, job function).
+RUNNING_JOBS = "_running_jobs"
+# Session key of the step whose job is being run: (its run flag, its settings).
+_JOB_STEP = "_job_step"
+
+
+def drop_jobs(flag_key: str | None = None):
+    """Forget the jobs of one step (by its run flag), or of all steps.
+
+    The next run of the step starts a new job instead of re-attaching. A job
+    still running cannot be stopped: it is kept, marked dropped, so the next
+    run waits for it rather than run beside it.
+    """
+    jobs = st.session_state.get(RUNNING_JOBS, {})
+    for key in [k for k in jobs if flag_key is None or k[0] == flag_key]:
+        job = jobs[key]
+        if job["logsink"] is not None:
+            job["logsink"].close()
+        if job["future"].done():
+            del jobs[key]
+        else:
+            job["dropped"] = True
 
 
 def highlight_low_identity(row):
@@ -885,7 +992,10 @@ def highlight_in_mol(row):
 
 
 def get_recent_param_sets(db_path, table_name, columns, limit=5):
-    """Return distinct recent parameter combinations from cache history."""
+    """Return distinct recent parameter combinations from cache history.
+
+    *limit* None returns them all.
+    """
     if not os.path.exists(db_path):
         return []
     try:
@@ -900,7 +1010,7 @@ def get_recent_param_sets(db_path, table_name, columns, limit=5):
             WHERE {where_clauses}
             GROUP BY {cols_sql} ORDER BY MAX(run_id) DESC LIMIT ?
         """
-        cursor.execute(query, (limit,))
+        cursor.execute(query, (-1 if limit is None else limit,))
         rows = cursor.fetchall()
         conn.close()
         return [dict(zip(columns, row)) for row in rows]
@@ -918,6 +1028,16 @@ def get_recent_param_sets(db_path, table_name, columns, limit=5):
 
 # Prefix of the session keys recording the preset each selector last applied.
 PRESET_MARKER = "_prev_"
+
+
+def prefill_settings(values: dict):
+    """Pre-fill widgets of the later steps (widget key -> value).
+
+    Call after reset_for_new_analysis. A preset selector covering these
+    widgets keeps the values on its first render instead of applying the
+    latest history preset; picking a preset in its menu applies it as usual.
+    """
+    st.session_state._widget_overrides.update(values)
 
 
 def param_preset_selector(presets, format_fn, key):
@@ -957,7 +1077,13 @@ def param_preset_selector(presets, format_fn, key):
     # Only apply preset when the selection actually changed
     prev_key = f"{PRESET_MARKER}{key}"
     preset_id = tuple(str(preset.get(c, "")) for c in cols)
-    if st.session_state.get(prev_key) != preset_id:
+    overrides = st.session_state._widget_overrides
+    if prev_key not in st.session_state and any(c in overrides for c in cols):
+        # First render since the analysis was loaded, and the fields already
+        # hold values (pre-filled, or typed before any history existed): keep
+        # them, and record the preset as seen.
+        st.session_state[prev_key] = preset_id
+    elif st.session_state.get(prev_key) != preset_id:
         st.session_state[prev_key] = preset_id
         for col in cols:
             st.session_state._widget_overrides[col] = preset[col]

@@ -8,11 +8,8 @@ All logic is delegated to the trident.pipelines.geo_pipeline module.
 import pandas as pd
 import streamlit as st
 
-from loguru import logger
-
 from trident.core import config
 import trident.pipelines as pipe
-from trident.logging import get_log_level
 from trident.clients.gbif import (
     get_extent_column_name,
     parse_coordinate,
@@ -63,10 +60,7 @@ def display_gbif_parameters():
     )
 
     # Previous parameter sets selector
-    db_cols = ["gbif_latitude", "gbif_longitude", "gbif_extent"]
-    presets = get_recent_param_sets(
-        st.session_state.db_path, "gbif_search_inputs", db_cols
-    )
+    presets = _recent_gbif_search_presets(st.session_state.db_path)
     param_preset_selector(
         presets,
         format_fn=lambda p: (
@@ -143,6 +137,35 @@ def display_gbif_parameters():
             return None
 
     return latitude, longitude, extents
+
+
+def _recent_gbif_search_presets(db_path: str, limit: int = 5) -> list[dict]:
+    """Previous GEO search windows, one per site with all its extents ("250, 500").
+
+    The cache stores one row per extent, so a run with several extents would
+    otherwise give one preset per extent, none matching the field. Global is
+    left out: the search always adds it.
+    """
+    rows = get_recent_param_sets(
+        db_path,
+        "gbif_search_inputs",
+        ["gbif_latitude", "gbif_longitude", "gbif_extent"],
+        limit=None,
+    )
+    extents_by_site = {}  # most recent site first
+    for row in rows:
+        if row["gbif_extent"] == "global":
+            continue
+        site = (row["gbif_latitude"], row["gbif_longitude"])
+        extents_by_site.setdefault(site, set()).add(int(float(row["gbif_extent"])))
+    return [
+        {
+            "gbif_latitude": lat,
+            "gbif_longitude": lon,
+            "gbif_extent": ", ".join(map(str, sorted(extents))),
+        }
+        for (lat, lon), extents in list(extents_by_site.items())[:limit]
+    ]
 
 
 def display_gbif_map(latitude: float, longitude: float, extents: list[int]) -> None:
@@ -276,9 +299,6 @@ def gbif_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
 
     # 1. Setup Logging
     logsink = StreamlitLogSink(status, prefix="gbif_")
-    handler_id = logger.add(
-        logsink.write, filter=logsink.thread_filter, level=get_log_level()
-    )
 
     # 2. Prepare Inputs
     species_list = pipe.prepare_gbif_input(tax_df)
@@ -300,6 +320,7 @@ def gbif_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
         user_agent=config.user_agent(),
         progress_info=progress_info,
         logsink=logsink,
+        progress=progress_info,
         on_poll=_poll,
     )
 
@@ -309,7 +330,7 @@ def gbif_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     st.session_state.gbif_search_failed = gbif_failed
 
     logsink.flush_to_ui()
-    logger.remove(handler_id)
+    logsink.close()
     progress_bar.empty()
     reset_state_after("gbif_search_df")
 

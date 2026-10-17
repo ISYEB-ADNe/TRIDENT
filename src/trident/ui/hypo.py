@@ -8,12 +8,10 @@ validation pipeline (BOLD sequences validated via NCBI BLAST).
 import pandas as pd
 import streamlit as st
 
-from loguru import logger
 
 from trident.clients.ncbi import set_ncbi_email
 from trident.core import config
 import trident.pipelines as pipe
-from trident.logging import get_log_level
 from trident.pipelines.results_pipeline import add_below_mol
 
 from trident.ui.ui import (
@@ -181,9 +179,6 @@ def hypo_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
 
     # 1. Setup Logging
     logsink = StreamlitLogSink(status, prefix="hypo_")
-    handler_id = logger.add(
-        logsink.write, filter=logsink.thread_filter, level=get_log_level()
-    )
 
     # 2. Get Data
     extra_df = st.session_state.extra_df
@@ -218,6 +213,7 @@ def hypo_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
         db_path=st.session_state.db_path,
         progress_handler=progress_info,
         logsink=logsink,
+        progress=progress_info,
         on_poll=_poll,
     )
 
@@ -236,7 +232,7 @@ def hypo_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     st.session_state.hypo_merge_df = hypo_merge_df
     st.session_state.hypo_search_failed = failed_items(hypo_search_df)
     st.session_state.hypo_merge_params = hypo_merge_params
-    logger.remove(handler_id)
+    logsink.close()
     progress_bar.empty()
     reset_state_after("hypo_merge_df")
 
@@ -528,9 +524,6 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
 
     # Setup Logging
     logsink = StreamlitLogSink(status, prefix="hypo_check_")
-    handler_id = logger.add(
-        logsink.write, filter=logsink.thread_filter, level=get_log_level()
-    )
 
     # Get Data
     hypo_filter_df = st.session_state.hypo_filter_df
@@ -564,6 +557,7 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
         retry_empty=retry_empty,
         progress_handler=progress_info,
         logsink=logsink,
+        progress=progress_info,
         on_poll=_poll,
     )
     st.session_state.hypo_check_df = hypo_check_df
@@ -586,7 +580,7 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
     st.session_state.hypo_params = hypo_params
 
     progress_bar.empty()
-    logger.remove(handler_id)
+    logsink.close()
 
 
 def hypo_check_display():

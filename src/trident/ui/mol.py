@@ -6,13 +6,11 @@ This module handles only UI rendering and user interaction.
 
 import streamlit as st
 
-from loguru import logger
 
 from trident.clients import ncbi
 from trident.clients.ncbi import set_ncbi_email
 from trident.core import config
 import trident.pipelines as pipe
-from trident.logging import get_log_level
 
 
 from trident.ui.ui import (
@@ -147,9 +145,6 @@ def ncbi_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
 
     # 1. Setup Logging
     logsink = StreamlitLogSink(container=status, prefix="ncbi_")
-    handler_id = logger.add(
-        logsink.write, filter=logsink.thread_filter, level=get_log_level()
-    )
 
     # 2. Prepare Inputs and Progress Tracker
     sequences = pipe.prepare_ncbi_input(st.session_state.sequences_df)
@@ -181,6 +176,7 @@ def ncbi_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
         db_path=st.session_state.db_path,
         progress_handler=progress_info,
         logsink=logsink,
+        progress=progress_info,
         on_poll=_poll,
     )
 
@@ -193,7 +189,7 @@ def ncbi_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     st.session_state.ncbi_search_failed = failed_items(ncbi_search_df)
 
     reset_state_after("ncbi_search_df")
-    logger.remove(handler_id)
+    logsink.close()
 
 
 def ncbi_search_workflow():

@@ -138,7 +138,7 @@ A hosted demo is live on Streamlit Cloud: <https://trident-nxanjv7pk4z2fnkyulzvw
 
 ## Example
 
-`example/example.fasta` is a small bundled set of 4 MOTU/ASV sequences. Upload it in the app for a quick end-to-end demo of the pipeline.
+`example/example.fasta` holds the 4 Svalbard MOTUs of the paper's worked example (16S, Vert16S primers). Click "Load the example" on the Start tab for a quick end-to-end demo of the pipeline: it also sets the GEO window to the sampling area (latitude 78.5, longitude 14.5, extents 250 and 500 km). If you upload the file instead, enter these values in the GEO step.
 
 <details>
 <summary><strong>Run the example as a notebook (advanced)</strong></summary>

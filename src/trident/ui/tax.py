@@ -6,11 +6,9 @@ This module handles only UI rendering and user interaction.
 
 import streamlit as st
 
-from loguru import logger
 
 from trident.core import config
 import trident.pipelines as pipe
-from trident.logging import get_log_level
 
 from trident.ui.ui import (
     record_empty_step,
@@ -42,9 +40,6 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
 
     # 1. Setup Logging
     logsink = StreamlitLogSink(status, prefix="worms_")
-    handler_id = logger.add(
-        logsink.write, filter=logsink.thread_filter, level=get_log_level()
-    )
 
     # 2a. Name resolution (R3): canonicalise MOL names to WoRMS accepted names.
     # Cached per name (marine-independent), so re-runs reuse it. When the toggle
@@ -72,6 +67,7 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
             user_agent=config.user_agent(),
             progress_handler=res_info,
             logsink=logsink,
+            progress=res_info,
             on_poll=_res_poll,
         )
     else:
@@ -110,6 +106,7 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
         user_agent=config.user_agent(),
         marine_only=params["worms_marine_only"],
         logsink=logsink,
+        progress=progress_info,
         on_poll=_poll,
     )
     tax_failed += failed_items(worms_search_df)
@@ -154,7 +151,7 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
     st.session_state.tax_summary_df = summary_df
     st.session_state.tax_species = tax_df["scientificName"].unique().tolist()
 
-    logger.remove(handler_id)
+    logsink.close()
     # Final UI cleanup
     progress_bar.empty()
     reset_state_after("tax_df")
