@@ -655,11 +655,14 @@ def sequence_selector(
     """Select a sequence, searchable by ID, kept from one tab to the next."""
     sequences = st.session_state.sequences_id
     persist_value(SELECTED_SEQUENCE_KEY, sequences[0])
+    # Labels are computed here because the selectbox may call format_func
+    # outside the script run (e.g. in tests), where session state is empty.
+    labels = {seq: (format_fn or str)(seq) for seq in sequences}
     selected_sequence = st.selectbox(
         "Select a sequence (type to search):",
         sequences,
         key=SELECTED_SEQUENCE_KEY,
-        format_func=format_fn or str,
+        format_func=lambda seq: labels.get(seq, str(seq)),
         filter_mode="contains",
     )
     save_widget(SELECTED_SEQUENCE_KEY)
