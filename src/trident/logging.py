@@ -3,7 +3,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from trident.core import config
+from trident.core import config, stop
 
 LOG_FORMAT = (
     "<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | "
@@ -61,6 +61,7 @@ def setup_logging(level: str | None = None, log_file: str | Path | None = None) 
         sys.stderr,
         level=level,
         format=LOG_FORMAT,
+        filter=stop.log_filter,
     )
 
     if log_file is not None:

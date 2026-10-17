@@ -1,12 +1,12 @@
 """Client for the WoRMS (World Register of Marine Species) REST API."""
 
 import json
-import time
 
 import pandas as pd
 import requests
 from loguru import logger
 
+from trident.core import stop
 from trident.core.http import create_session, with_optional_session
 from trident.core.utils import (
     extract_specific_epithet,
@@ -515,7 +515,7 @@ def get_species_from_genus_list(
                         aphia_id, session=session, marine_only=marine_only
                     )
                 ]
-                time.sleep(delay)
+                stop.wait(delay)
 
             if not children:
                 logger.warning(f"No children found for genus '{genus}'")

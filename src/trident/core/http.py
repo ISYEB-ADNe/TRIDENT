@@ -17,7 +17,6 @@ the item to the cache's ``failure_sink`` so it is retried on the next run
 rather than cached as empty (see ``trident.core.database.save_to_db``).
 """
 
-import time
 from functools import wraps
 from typing import Callable
 
@@ -26,7 +25,33 @@ from loguru import logger
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from trident.core import config
+from trident.core import config, stop
+
+
+class _StoppableRetry(Retry):
+    """urllib3 retries whose wait (backoff or Retry-After) is cut short by a
+    stop, which then ends the request instead of retrying it. urllib3 calls
+    ``sleep`` once the failed response is released, so no connection is left
+    checked out."""
+
+    def sleep(self, response=None) -> None:
+        seconds = 0.0
+        if self.respect_retry_after_header and response:
+            seconds = self.get_retry_after(response) or 0.0
+        if not seconds:
+            seconds = self.get_backoff_time()
+        if seconds > 0:
+            stop.wait(seconds)
+        stop.check_stop()
+
+
+class _StoppableAdapter(HTTPAdapter):
+    """HTTP adapter that sends nothing once the step is stopped (raises
+    ``StepStopped``, see ``trident.core.stop``)."""
+
+    def send(self, request, *args, **kwargs):
+        stop.check_stop()
+        return super().send(request, *args, **kwargs)
 
 
 def create_session(
@@ -51,14 +76,15 @@ def create_session(
         pool_maxsize: Max connections in the pool.
 
     Returns:
-        Configured Session with retry adapter mounted on http(s).
+        Configured Session with retry adapter mounted on http(s). Once the
+        step is stopped, its requests raise ``StepStopped``.
     """
     if allowed_methods is None:
         allowed_methods = {"GET"}
 
     session = requests.Session()
 
-    retry = Retry(
+    retry = _StoppableRetry(
         total=retries,
         connect=retries,
         read=retries,
@@ -70,7 +96,7 @@ def create_session(
         respect_retry_after_header=True,
     )
 
-    adapter = HTTPAdapter(
+    adapter = _StoppableAdapter(
         max_retries=retry,
         pool_connections=pool_connections,
         pool_maxsize=pool_maxsize,
@@ -148,6 +174,8 @@ def retry_call(
     in ``delays``, so ``delays=(30, 60)`` means up to 3 attempts: wait 30 s
     after the first failure, 60 s after the second. Each failure is logged as
     a warning. If the last attempt raises, its exception propagates unchanged.
+    A stopped step (``StepStopped``) is not retried, and a stop cuts the wait
+    between attempts short.
 
     Only use it on functions that are safe to repeat (queries, not writes).
 
@@ -165,16 +193,21 @@ def retry_call(
         @wraps(func)
         def wrapper(*args, **kwargs):
             attempts = len(delays) + 1
-            for attempt, delay in enumerate(delays, start=1):
+            for attempt, delay in enumerate((*delays, None), start=1):
+                # Also for functions without a stop check of their own (qblast).
+                stop.check_stop()
                 try:
                     return func(*args, **kwargs)
+                except stop.StepStopped:
+                    raise
                 except exceptions as e:
+                    if delay is None:
+                        raise
                     logger.warning(
                         f"{func.__name__} failed (attempt {attempt}/{attempts}): "
                         f"{e}. Retrying in {delay:g} s."
                     )
-                    time.sleep(delay)
-            return func(*args, **kwargs)
+                    stop.wait(delay)
 
         return wrapper
 

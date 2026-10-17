@@ -5,7 +5,6 @@ Contains all Streamlit-specific UI functions that are reusable across the app.
 
 import concurrent.futures
 import functools
-import json
 import logging
 import os
 import queue
@@ -21,6 +20,7 @@ import pandas as pd
 import streamlit as st
 from loguru import logger
 
+from trident.core import stop
 from trident.logging import get_log_level
 
 
@@ -475,34 +475,49 @@ def run_step_workflow(
     threaded: bool = False,
     status_label: str = "",
     before_button: Callable[[], None] | None = None,
+    stoppable: bool = True,
 ) -> str:
-    """Handle execution + button for a pipeline step. Returns mode."""
+    """Handle execution + button for a pipeline step. Returns mode.
+
+    A threaded step gets a stop button while it runs, unless not *stoppable*
+    (a local computation, which has no queries to keep).
+    """
     mode = get_analysis_status(df_key, params_key, current_params, keys=compare_keys)
 
     if st.session_state.get(flag_key):
-        cache_mode = st.session_state.get(f"{btn_key}_cache_mode", "Use cached results")
-
-        # Force re-run when settings changed or user explicitly ignores cache.
-        # IDENTICAL re-runs reuse cached items by default — only failed/missing
-        # items are re-executed (important for PartialCache steps).
-        force = mode == "CHANGED" or "Erase" in cache_mode
-        retry = "Retry" in cache_mode
-        # The job's settings: a rerun with other ones must not re-attach to it.
-        settings = json.dumps([current_params, cache_mode], sort_keys=True, default=str)
-        st.session_state[_JOB_STEP] = (flag_key, settings)
-        if threaded:
-            progress_bar = st.progress(0, text="Initializing...")
-            with st.status(status_label, expanded=False) as status:
-                job_fn(
-                    force_rerun=force,
-                    retry_empty=retry,
-                    status=status,
-                    progress_bar=progress_bar,
-                    **(job_kwargs or {}),
-                )
+        # The run uses the settings of the click, not the widgets' current
+        # values: a setting edited while it runs (a rerun) leaves it going, and
+        # shows as "Settings have changed" once it is done.
+        run = st.session_state[STEP_RUNS][flag_key]
+        st.session_state[_JOB_STEP] = flag_key
+        # A stopped step keeps no result (run_with_progress raises StepStopped):
+        # its finished queries are cached, and running it again with the same
+        # settings continues from there.
+        try:
+            if threaded:
+                if stoppable:
+                    _stop_button(flag_key, btn_key)
+                progress_bar = st.progress(0, text="Initializing...")
+                with st.status(status_label, expanded=False) as status:
+                    job_fn(
+                        force_rerun=run["force"],
+                        retry_empty=run["retry"],
+                        status=status,
+                        progress_bar=progress_bar,
+                        **run["job_kwargs"],
+                    )
+            else:
+                with st.status(status_label, expanded=False):
+                    job_fn(
+                        force_rerun=run["force"],
+                        retry_empty=run["retry"],
+                        **run["job_kwargs"],
+                    )
+        except stop.StepStopped:
+            pass
         else:
-            with st.status(status_label, expanded=False):
-                job_fn(force_rerun=force, retry_empty=retry, **(job_kwargs or {}))
+            # A stop clicked once the jobs had all finished came too late.
+            st.session_state.get(STOPPED_STEPS, set()).discard(flag_key)
 
         st.session_state[flag_key] = False
         st.session_state["requested_tab"] = tab_id
@@ -511,10 +526,39 @@ def run_step_workflow(
     if before_button:
         before_button()
 
-    clicked, _ = display_run_button(
+    if flag_key in st.session_state.get(STOPPED_STEPS, ()):
+        st.info(
+            "⏹️ Search stopped. The results already received are kept: run the "
+            "step again to continue where it stopped."
+        )
+    clicked, cache_mode = display_run_button(
         mode, new_string, btn_key=btn_key, logs_prefix=logs_prefix
     )
     if clicked:
+        # Force a fresh run when the settings changed or the cache is erased.
+        # IDENTICAL re-runs reuse cached items: only failed or missing items
+        # are re-executed (important for PartialCache steps). Continuing a
+        # stopped run with the same settings does not force: it already
+        # applied them, and the items it cached are the ones to keep.
+        runs = st.session_state.setdefault(STEP_RUNS, {})
+        # The settings that make the results (as for "Settings have changed"):
+        # others, such as threads or batch size, do not stop a run continuing.
+        result_settings = (
+            {k: current_params.get(k) for k in compare_keys}
+            if compare_keys
+            else current_params
+        )
+        resuming = (
+            flag_key in st.session_state.get(STOPPED_STEPS, ())
+            and runs[flag_key]["result_settings"] == result_settings
+            and "Erase" not in cache_mode
+        )
+        runs[flag_key] = {
+            "result_settings": result_settings,
+            "force": (mode == "CHANGED" or "Erase" in cache_mode) and not resuming,
+            "retry": "Retry" in cache_mode,
+            "job_kwargs": job_kwargs or {},
+        }
         drop_jobs(flag_key)
         st.session_state[flag_key] = True
         st.rerun()
@@ -747,7 +791,7 @@ class StreamlitLogSink:
     def thread_filter(self, record):
         """Loguru filter: accept only 'trident' messages from registered
         threads, or tagged with this sink by ``wrap()``."""
-        if not record["name"].startswith("trident"):
+        if not record["name"].startswith("trident") or not stop.log_filter(record):
             return False
         if record["extra"].get("log_sink") == self._tag:
             return True
@@ -875,35 +919,46 @@ def run_with_progress(
 
     Returns:
         Whatever ``fn`` returns.
+
+    Raises:
+        StepStopped: the step was stopped (``_stop_button``). The job's
+            finished items are cached, but its result is dropped.
     """
     # A rerun requested while the job runs (e.g. a widget event) abandons this
     # script run but not the job's thread. The next run calls here again with
     # the step's run flag still set: wait on the same job instead of starting
     # a second one, and take over its log and progress. A step runs one job at
-    # a time: a job of other settings, or dropped, is waited for, then replaced.
+    # a time: a dropped job (its step reset) is waited for first. It is only
+    # stopped by the user (the stop button, which covers it too).
     jobs = st.session_state.setdefault(RUNNING_JOBS, {})
-    step, settings = st.session_state.get(_JOB_STEP, (None, None))
+    step = st.session_state.get(_JOB_STEP)
     key = (step, fn.__name__)
     job = jobs.get(key)
-    if job is not None and (job["dropped"] or job["settings"] != settings):
+    if job is not None and job["dropped"]:
         if not job["future"].done():
             waiting = st.empty()
-            waiting.info(
-                "Finishing the previous run of this step first "
-                "(restart TRIDENT to stop it)..."
-            )
-            concurrent.futures.wait([job["future"]])
+            # Polled with a Streamlit call each tick, so a click on the stop
+            # button (a rerun) takes effect instead of waiting for the job.
+            while not job["future"].done():
+                waiting.info("Finishing the previous search first...")
+                time.sleep(poll_interval)
             waiting.empty()
         job = None
     if job is None:
+        if step in st.session_state.get(STOPPED_STEPS, ()):
+            # Stopped between two jobs of the step: start no further one.
+            if logsink is not None:
+                logsink.close()
+            raise stop.StepStopped()
+        event = threading.Event()
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(fn, *args, **kwargs)
+        future = executor.submit(_run_stoppable, event, fn, args, kwargs)
         executor.shutdown(wait=False)
         job = jobs[key] = {
             "future": future,
             "progress": progress,
-            "settings": settings,
             "dropped": False,
+            "stop": event,
         }
     elif logsink is not None and job["logsink"] is not None:
         logsink.take_over(job["logsink"])
@@ -920,32 +975,77 @@ def run_with_progress(
         time.sleep(poll_interval)
     # A finished job stays until its step is run again or reset (drop_jobs):
     # the abandoned run may still be polling it, and either run may finish first.
-    try:
-        result = future.result()
-    except Exception:
-        # Not kept: the next run of the step tries again.
-        if jobs.get(key) is job:
-            del jobs[key]
+    error = future.exception()
+    stopped = job["stop"].is_set()
+    if error is None and not stopped:
         if logsink is not None:
-            logsink.close()
-        raise
+            logsink.flush_to_ui()
+        return future.result()
+    # Not kept (a stopped job's result lacks the items it skipped): the next
+    # run of the step tries again.
+    if jobs.get(key) is job:
+        del jobs[key]
     if logsink is not None:
         logsink.flush_to_ui()
-    return result
+        logsink.close()
+    if not stopped:
+        raise error
+    if error is not None and not isinstance(error, stop.StepStopped):
+        # Most likely caused by the stop (its items all failed), but kept in
+        # the console and log file (this thread is not stopped).
+        logger.opt(exception=error).warning("The stopped search ended with an error")
+    raise stop.StepStopped() from error
+
+
+def _run_stoppable(event: threading.Event, fn, args, kwargs):
+    """Run a job with *event* as its stop signal (see ``trident.core.stop``)."""
+    with stop.stoppable(event):
+        return fn(*args, **kwargs)
+
+
+def _stop_button(flag_key: str, btn_key: str):
+    """Stop button of a running step. Its running jobs send no further request
+    (the next one raises StepStopped, see ``trident.core.stop``); a request
+    already sent finishes, and a BLAST job being polled is dropped."""
+    stopped = st.session_state.setdefault(STOPPED_STEPS, set())
+    # Not a bare "Stop": Streamlit's own Stop (top right) ends the script run,
+    # not the job, which goes on and is re-attached to by the next run.
+    if flag_key not in stopped and st.button(
+        "Stop the search",
+        key=f"{btn_key}_stop",
+        icon=":material/stop_circle:",
+        help=(
+            "Stops the search now: queries still running are dropped. Results "
+            "already received are kept: run the step again to continue where "
+            "it stopped."
+        ),
+    ):
+        stopped.add(flag_key)
+        # A finished job keeps its result (the post-processing may still use it).
+        for (step, _), job in st.session_state.get(RUNNING_JOBS, {}).items():
+            if step == flag_key and not job["future"].done():
+                job["stop"].set()
+    if flag_key in stopped:
+        st.info("Stopping the search...")
 
 
 # Session key of the jobs of each step, by (step run flag, job function).
 RUNNING_JOBS = "_running_jobs"
-# Session key of the step whose job is being run: (its run flag, its settings).
+# Session key of the step whose job is being run (its run flag).
 _JOB_STEP = "_job_step"
+# Session key of each step's run settings, fixed at the click (by run flag).
+STEP_RUNS = "_step_runs"
+# Session key of the steps stopped by the user (run flags), until run again.
+STOPPED_STEPS = "_stopped_steps"
 
 
 def drop_jobs(flag_key: str | None = None):
-    """Forget the jobs of one step (by its run flag), or of all steps.
+    """Forget the jobs of one step (by its run flag), or of all steps, and
+    whether they were stopped.
 
     The next run of the step starts a new job instead of re-attaching. A job
-    still running cannot be stopped: it is kept, marked dropped, so the next
-    run waits for it rather than run beside it.
+    still running is kept, marked dropped, so the next run waits for it to end
+    rather than run beside it (or the user stops it).
     """
     jobs = st.session_state.get(RUNNING_JOBS, {})
     for key in [k for k in jobs if flag_key is None or k[0] == flag_key]:
@@ -956,6 +1056,11 @@ def drop_jobs(flag_key: str | None = None):
             del jobs[key]
         else:
             job["dropped"] = True
+    stopped = st.session_state.get(STOPPED_STEPS, set())
+    if flag_key is None:
+        stopped.clear()
+    else:
+        stopped.discard(flag_key)
 
 
 def highlight_low_identity(row):

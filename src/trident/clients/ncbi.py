@@ -1,6 +1,5 @@
 """NCBI BLAST client — submit queries, parse results, filter by barcoding gap."""
 
-import contextvars
 import io
 import re
 import threading
@@ -13,11 +12,10 @@ import pandas as pd
 import requests
 from Bio import Blast
 from Bio.SeqRecord import SeqRecord
-from joblib import Parallel, delayed
 from loguru import logger
 
 from .fasta import records_to_fasta_string
-from trident.core import config
+from trident.core import config, stop
 from trident.core.http import retry_call
 from trident.core.constants import (
     NCBI_GAP_SIZE,
@@ -340,16 +338,21 @@ _next_request = 0.0
 def _blast_request(**params) -> requests.Response:
     """POST one URL API request, with TRIDENT's tool name and the contact
     email, at least BLAST_REQUEST_INTERVAL after the previous request of any
-    thread. Raises on an HTTP error."""
+    thread. Raises on an HTTP error, or ``StepStopped`` once the step is
+    stopped."""
     global _next_request
-    # Each request takes the next free slot, then waits for it outside the
-    # lock, so threads are served in the order they asked.
-    with _request_lock:
-        slot = max(_next_request, time.monotonic())
-        _next_request = slot + BLAST_REQUEST_INTERVAL
-    wait = slot - time.monotonic()
-    if wait > 0:
-        time.sleep(wait)
+    # Wait (outside the lock) until no request of any thread was sent in the
+    # last BLAST_REQUEST_INTERVAL. Nothing is reserved ahead, so a stopped
+    # request leaves no slot that would delay the next run (or other users).
+    while True:
+        stop.check_stop()
+        with _request_lock:
+            now = time.monotonic()
+            if now >= _next_request:
+                _next_request = now + BLAST_REQUEST_INTERVAL
+                break
+            wait = _next_request - now
+        stop.wait(wait)
     params["tool"] = "trident"
     if Blast.email:
         params["email"] = Blast.email
@@ -405,7 +408,7 @@ def _poll_blast_job(rid: str, rtoe: int | None = None) -> bytes:
     warned = False
     failures = 0
     while True:
-        time.sleep(delay)
+        stop.wait(delay)
         delay = BLAST_POLL_INTERVAL
         if not warned and time.monotonic() - start > BLAST_SLOW_JOB:
             logger.warning(
@@ -531,6 +534,7 @@ def submit_blast_batch(
     if circuit is not None and circuit.is_open:
         retry = False
     try:
+        stop.check_stop()  # also for the qblast client, which has no stop
         logger.debug(f"Processing batch {batch_id} with {len(batch)} sequences")
 
         multi_fasta = records_to_fasta_string(batch)
@@ -545,7 +549,12 @@ def submit_blast_batch(
         result = None
 
     # A failure counts once retries were tried; any success closes the circuit.
-    if circuit is not None and (retry or result is not None):
+    # A batch skipped by a stop says nothing about NCBI.
+    if (
+        circuit is not None
+        and (retry or result is not None)
+        and not stop.stop_requested()
+    ):
         circuit.record(result is not None)
     return result
 
@@ -672,21 +681,16 @@ def run_blast_batches(
         )
         if result is not None:
             outcome = [result], []
-        elif not retried or circuit.is_open:
+        elif not retried or circuit.is_open or stop.stop_requested():
             outcome = [], [rec.id for rec in batch]
         else:
             outcome = _split_failed_batch(batch, i + 1, circuit, **blast_kwargs)
         notify_progress(progress_handler, len(batch))
         return outcome
 
-    # Build every task here, in the caller's thread: each gets a copy of the
-    # caller's context (loguru's contextualize values included). A generator
-    # would not do, since joblib consumes part of it from its own threads.
-    tasks = [
-        delayed(contextvars.copy_context().run)(worker_wrapper, batch, i)
-        for i, batch in enumerate(batches)
-    ]
-    outcomes = Parallel(n_jobs=n_threads, backend="threading", verbose=0)(tasks)
+    outcomes = stop.run_threads(
+        worker_wrapper, [(batch, i) for i, batch in enumerate(batches)], n_threads
+    )
 
     successful = [df for dfs, _ in outcomes for df in dfs]
     # Ids of sequences whose query still errored after retries and splitting,

@@ -9,6 +9,7 @@ serves the real XML2 fixture (``url_api_fake``).
 
 import contextvars
 import copy
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,7 +19,7 @@ from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
 import trident.clients.ncbi as ncbi
-import trident.core.http as http
+import trident.core.stop as stop
 
 
 def _batch(start: int, n: int) -> list[SeqRecord]:
@@ -69,7 +70,8 @@ def ncbi_fake(monkeypatch):
 
     monkeypatch.setattr(ncbi.requests, "post", post)
     monkeypatch.setattr(ncbi, "read_xml2_archive", read_archive)
-    monkeypatch.setattr(http.time, "sleep", lambda s: None)
+    monkeypatch.setattr(stop, "wait", lambda s: None)
+    monkeypatch.setattr(ncbi, "BLAST_REQUEST_INTERVAL", 0.0)
     return fake
 
 
@@ -142,6 +144,29 @@ def test_every_worker_runs_in_the_callers_context(ncbi_fake, monkeypatch):
     assert seen == ["ui-run"] * 12
 
 
+def test_stop_keeps_finished_batches_and_skips_the_rest(ncbi_fake, monkeypatch):
+    """After a stop, the batches already done are returned and the others are
+    reported failed at once, for the cache to retry: no retry, no split."""
+    event = threading.Event()
+    fake_post = ncbi.requests.post
+
+    def post(url, data, **kwargs):
+        reply = fake_post(url, data, **kwargs)
+        if data["CMD"] == "Get":
+            event.set()  # the user stops once the first batch is done
+        return reply
+
+    monkeypatch.setattr(ncbi.requests, "post", post)
+    batches = [_batch(b * 2, 2) for b in range(3)]
+
+    with stop.stoppable(event):
+        df, failed = ncbi.run_blast_batches(batches, n_threads=1)
+
+    assert sorted(df["seq_id"]) == ["s0", "s1"]
+    assert failed == ["s2", "s3", "s4", "s5"]
+    assert ncbi_fake.jobs == 1
+
+
 def test_archive_missing_a_query_fails_the_job(ncbi_fake, monkeypatch):
     """A result without one record per query is an error (retried), not
     queries without hits."""
@@ -174,7 +199,8 @@ def url_api_fake(monkeypatch):
         return _reply(f"QBlastInfoBegin\n\tStatus={status}\nQBlastInfoEnd")
 
     monkeypatch.setattr(ncbi.requests, "post", post)
-    monkeypatch.setattr(ncbi.time, "sleep", lambda s: None)
+    monkeypatch.setattr(stop, "wait", lambda s: None)
+    monkeypatch.setattr(ncbi, "BLAST_REQUEST_INTERVAL", 0.0)
     return fake
 
 

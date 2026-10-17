@@ -8,7 +8,7 @@ All logic is delegated to the trident.pipelines.geo_pipeline module.
 import pandas as pd
 import streamlit as st
 
-from trident.core import config
+from trident.core import config, stop
 import trident.pipelines as pipe
 from trident.clients.gbif import (
     get_extent_column_name,
@@ -277,6 +277,8 @@ def _gbif_search_and_merge(
         user_agent=user_agent,
         progress_handler=_update_progress,
     )
+    # A stopped search is not merged: its result is partial and is dropped.
+    stop.check_stop()
 
     gbif_merge_df, gbif_merge_params = pipe.run_gbif_merge(
         gbif_search_df,

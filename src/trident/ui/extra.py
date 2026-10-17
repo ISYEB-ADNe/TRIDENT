@@ -379,6 +379,7 @@ def bold_filter_workflow():
             btn_key="bold_filter_apply",
             logs_prefix="bold_filter_",
             threaded=True,
+            stoppable=False,
             status_label="🔍 Filtering BOLD results...",
             before_button=_filter_success_message,
         )

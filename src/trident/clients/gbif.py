@@ -1,6 +1,7 @@
 """Client for the GBIF (Global Biodiversity Information Facility) API
 and geographic bounding box calculations."""
 
+import functools
 import re
 from collections.abc import Callable
 from typing import Literal
@@ -8,11 +9,11 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 import requests
-from joblib import Parallel, delayed
 from loguru import logger
 
 
 from trident.core.constants import GBIF_CONFIDENCE
+from trident.core import stop
 from trident.core.http import create_session
 from trident.core.utils import ensure_columns, extract_specific_epithet
 
@@ -214,9 +215,10 @@ def _match_single_taxon_name(
     ]
 
     own_session = session is None
-    if own_session:
-        session = create_session(user_agent=user_agent)
     try:
+        stop.check_stop()  # a stopped step builds no session for nothing
+        if own_session:
+            session = create_session(user_agent=user_agent)
         response = session.get(
             "https://api.gbif.org/v1/species/match", params={"name": name}, timeout=15
         )
@@ -261,7 +263,7 @@ def _match_single_taxon_name(
         return error_result
 
     finally:
-        if own_session:
+        if own_session and session is not None:
             session.close()
 
 
@@ -289,8 +291,10 @@ def match_taxon_names(
 
     # Each worker creates its own session: requests.Session is not thread-safe,
     # so sharing one across the threading backend can corrupt the pool state.
-    results = Parallel(n_jobs=n_jobs, backend="threading", verbose=0)(
-        delayed(_match_single_taxon_name)(name, user_agent=user_agent) for name in names
+    results = stop.run_threads(
+        functools.partial(_match_single_taxon_name, user_agent=user_agent),
+        [(name,) for name in names],
+        n_jobs,
     )
 
     results_df = pd.DataFrame(results)

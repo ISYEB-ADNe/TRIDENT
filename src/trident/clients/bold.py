@@ -1,12 +1,12 @@
 """Client for the BOLD (Barcode of Life Data Systems) API."""
 
 import json
-import time
 
 import pandas as pd
 import requests
 from loguru import logger
 
+from trident.core import stop
 from trident.core.http import create_session, with_optional_session
 from trident.core.utils import extract_specific_epithet, notify_progress
 
@@ -281,7 +281,7 @@ def get_records_from_species_list(
 
         # Rate limiting
         if i < len(species_list) - 1 and rate_limit_delay > 0:
-            time.sleep(rate_limit_delay)
+            stop.wait(rate_limit_delay)
 
     # Only close if created internally
     if session is None:
