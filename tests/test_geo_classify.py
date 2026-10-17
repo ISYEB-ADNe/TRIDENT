@@ -5,13 +5,9 @@ occurrences to wide form and bucket species into local / smaller / larger /
 never relative to the priority extent.
 """
 
-import inspect
-
 import pandas as pd
 
-from trident.pipelines.geo_pipeline import classify_gbif_extents, finalize_geo_results
-
-_finalize_geo = inspect.unwrap(finalize_geo_results)
+from trident.pipelines.geo_pipeline import classify_gbif_extents
 
 
 def _long_df(rows):
@@ -116,36 +112,3 @@ def test_larger_dedup_does_not_repeat_species():
         sp for b in larger for sp in b["df"]["scientificName"].tolist() if sp == "B"
     ]
     assert appearances == ["B"]
-
-
-# --- finalize_geo_results: drop NCBI-seen-but-MOL-rejected pairs ---
-#
-# A (seq_id, species) pair is removed only when in_mol is False AND that exact
-# pair appeared in the raw NCBI search (NCBI evaluated it and MOL rejected it).
-
-
-def _geo_rows():
-    return pd.DataFrame(
-        {
-            "seq_id": ["t1", "t1", "t1"],
-            "scientificName": ["A", "B", "C"],
-            "in_mol": [True, False, False],
-        }
-    )
-
-
-def test_finalize_removes_only_rejected_non_mol_pairs():
-    out = _finalize_geo(_geo_rows(), ncbi_search_pairs={("t1", "B")})
-    # B: not in_mol AND seen by NCBI -> removed. A: in_mol -> kept.
-    # C: not in_mol but never seen by NCBI -> kept.
-    assert out["scientificName"].tolist() == ["A", "C"]
-
-
-def test_finalize_keeps_in_mol_pair_even_if_in_ncbi_pairs():
-    out = _finalize_geo(_geo_rows(), ncbi_search_pairs={("t1", "A")})
-    assert "A" in out["scientificName"].tolist()  # in_mol shields it
-
-
-def test_finalize_noop_without_pairs():
-    out = _finalize_geo(_geo_rows(), ncbi_search_pairs=None)
-    assert len(out) == 3

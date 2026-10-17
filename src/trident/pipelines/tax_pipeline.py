@@ -8,6 +8,7 @@ Step order:
 
 Exploration:
     build_tax_summary(tax_df)
+    mol_rejected_rows(tax_df, ncbi_search_df, mol_df)
 """
 
 from typing import NamedTuple
@@ -568,18 +569,101 @@ def run_worms_merge(
 ### FINALIZE ###
 
 
+def mol_rejected_rows(
+    tax_df: pd.DataFrame,
+    ncbi_search_df: pd.DataFrame | None,
+    mol_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """TAX rows of species that BLAST returned for that same sequence but MOL rejected.
+
+    The test is per (seq_id, species) pair: a species can be a MOL hit for one
+    sequence and rejected for another. A BLAST hit is rejected when its
+    (seq_id, NCBI name) pair is not in mol_df. It matches a TAX row when its
+    NCBI name, or the WoRMS accepted name of that NCBI name, equals the TAX
+    species. Accepted names are known only for the names resolved for the MOL
+    list, so a synonym rejected for every sequence matches on its NCBI name
+    only. Rows that are MOL hits (in_mol) are never returned.
+
+    Args:
+        tax_df: TAX list with 'seq_id', 'scientificName' and 'in_mol'.
+        ncbi_search_df: Raw BLAST hits, before the MOL filter.
+        mol_df: MOL list (the hits that passed the filter), with
+            'acceptedName' when names were resolved. Without it, every BLAST
+            hit counts as rejected.
+
+    Returns:
+        The matching tax_df rows (original index kept), with the best identity
+        and query cover BLAST gave the species for that sequence.
+    """
+    score_cols = ["mol_top_identity_percentage", "mol_top_query_cover"]
+    if ncbi_search_df is None or ncbi_search_df.empty or tax_df.empty:
+        return tax_df.iloc[:0].assign(**{c: pd.Series(dtype=float) for c in score_cols})
+
+    accepted, mol_pairs = {}, set()
+    if mol_df is not None and not mol_df.empty:
+        mol_names = mol_df["scientificName"].map(normalize_name)
+        mol_pairs = set(zip(mol_df["seq_id"], mol_names))
+        if "acceptedName" in mol_df.columns:
+            accepted = dict(zip(mol_names, mol_df["acceptedName"]))
+    hits = ncbi_search_df[
+        ["seq_id", "scientificName", "identity_percentage", "query_cover"]
+    ]
+    raw_key = hits["scientificName"].map(normalize_name)
+    passed = pd.Series(
+        [p in mol_pairs for p in zip(hits["seq_id"], raw_key)], index=hits.index
+    )
+    hits, raw_key = hits[~passed], raw_key[~passed]
+    acc_key = raw_key.map(accepted).map(normalize_name).fillna(raw_key)
+    seen = top_hit_per_group(
+        pd.concat([hits.assign(_key=raw_key), hits.assign(_key=acc_key)]),
+        keys=["seq_id", "_key"],
+        sort=["identity_percentage", "query_cover"],
+        columns=["seq_id", "_key", "identity_percentage", "query_cover"],
+    ).rename(
+        columns={
+            "identity_percentage": "mol_top_identity_percentage",
+            "query_cover": "mol_top_query_cover",
+        }
+    )
+
+    expanded = tax_df[~tax_df["in_mol"].astype(bool)].drop(
+        columns=score_cols, errors="ignore"
+    )
+    rejected = (
+        expanded.assign(_key=expanded["scientificName"].map(normalize_name))
+        .reset_index()
+        .merge(seen, on=["seq_id", "_key"], how="inner")
+        .set_index("index")
+        .drop(columns="_key")
+    )
+    rejected.index.name = None
+    return rejected
+
+
 @save_to_db(
     "results_tax",
-    cache=FullCache(inherit_from=["worms_merge_params"]),
+    cache=FullCache(
+        inherit_from=["worms_merge_params"],
+        local={"tax_drop_mol_rejected": "drop_mol_rejected"},
+        fingerprint_on=["mol_df"],
+    ),
 )
 def finalize_tax_results(
-    worms_merge_df: pd.DataFrame, worms_merge_params: dict | None = None
+    worms_merge_df: pd.DataFrame,
+    worms_merge_params: dict | None = None,
+    ncbi_search_df: pd.DataFrame | None = None,
+    mol_df: pd.DataFrame | None = None,
+    drop_mol_rejected: bool = True,
 ) -> pd.DataFrame:
     """Finalize the TAX list for export or downstream analysis.
 
     Args:
         worms_merge_df: Merged DataFrame from run_worms_merge().
         worms_merge_params: Parameter dict from run_worms_merge, used for caching only.
+        ncbi_search_df: Raw BLAST hits, to find the species MOL rejected.
+        mol_df: MOL list with accepted names (see mol_rejected_rows).
+        drop_mol_rejected: Remove the species that BLAST returned for a
+            sequence but MOL rejected, for that sequence only.
 
     Returns:
         Finalized TAX DataFrame.
@@ -588,6 +672,15 @@ def finalize_tax_results(
         worms_merge_params = {}
 
     tax_df = worms_merge_df.copy()
+    if drop_mol_rejected:
+        rejected = mol_rejected_rows(tax_df, ncbi_search_df, mol_df)
+        if not rejected.empty:
+            logger.info(
+                f"Removed {len(rejected)} rows "
+                f"({rejected['scientificName'].nunique()} species) "
+                "returned by BLAST but rejected by MOL for that sequence"
+            )
+        tax_df = tax_df.drop(index=rejected.index).reset_index(drop=True)
     logger.success(f"Finalized TAX list: {len(tax_df)} rows")
     return tax_df
 

@@ -30,7 +30,6 @@ from trident.core.utils import (
     ensure_columns,
     reorder_taxonomy_columns,
     preserve_sequence_order,
-    top_hit_per_group,
     normalize_name,
 )
 
@@ -426,21 +425,12 @@ def run_gbif_filter(
 def finalize_geo_results(
     gbif_filter_df: pd.DataFrame,
     gbif_filter_params: dict | None = None,
-    ncbi_search_pairs: set[tuple[str, str]] | None = None,
 ) -> pd.DataFrame:
-    """Finalize the GEO list — remove (seq_id, species) pairs seen by NCBI but rejected by MOL.
-
-    A pair is removed when ``in_mol`` is False for that row AND the same
-    (seq_id, scientificName) pair appeared in the raw NCBI BLAST results.
-    This means NCBI evaluated the species for that sequence and it didn't
-    pass MOL filtering.
+    """Finalize the GEO list for export or downstream analysis.
 
     Args:
-        gbif_filter_df: Filtered GBIF occurrence DataFrame (with ``in_mol`` column).
+        gbif_filter_df: Filtered GBIF occurrence DataFrame.
         gbif_filter_params: GBIF filter parameters (for caching).
-        ncbi_search_pairs: (seq_id, scientificName) tuples from raw NCBI
-            BLAST results.  Rows where ``in_mol=False`` AND the pair is in
-            this set are removed.
 
     Returns:
         Finalized GEO DataFrame.
@@ -449,67 +439,11 @@ def finalize_geo_results(
         gbif_filter_params = {}
 
     geo_df = gbif_filter_df.copy()
-
-    if ncbi_search_pairs and "in_mol" in geo_df.columns:
-        pair_col = list(zip(geo_df["seq_id"], geo_df["scientificName"]))
-        rejected = ~geo_df["in_mol"].astype(bool) & pd.Series(
-            [p in ncbi_search_pairs for p in pair_col], index=geo_df.index
-        )
-        n_removed = rejected.sum()
-        if n_removed:
-            n_species = geo_df.loc[rejected, "scientificName"].nunique()
-            logger.info(
-                f"Removed {n_removed} rows ({n_species} species) "
-                f"seen by NCBI but rejected by MOL filtering"
-            )
-        geo_df = geo_df[~rejected]
-
     logger.success(f"Finalized GEO list: {len(geo_df)} rows")
     return geo_df
 
 
 ### EXPLORATION / SUMMARY ###
-
-
-def get_ncbi_rejected_rows(
-    gbif_filter_df: pd.DataFrame,
-    geo_df: pd.DataFrame,
-    ncbi_search_df: pd.DataFrame | None = None,
-) -> pd.DataFrame:
-    """Return rows removed during finalization, enriched with top NCBI hit stats.
-
-    These are (seq_id, species) pairs that NCBI found but MOL filtering rejected.
-    """
-    keys = ["seq_id", "scientificName"]
-    merged = gbif_filter_df.merge(
-        geo_df[keys].drop_duplicates(),
-        on=keys,
-        how="left",
-        indicator=True,
-    )
-    rejected = gbif_filter_df.loc[merged["_merge"] == "left_only"].copy()
-
-    if rejected.empty or ncbi_search_df is None:
-        return rejected
-
-    # Compute top identity/query_cover from raw NCBI search results
-    top_hits = top_hit_per_group(
-        ncbi_search_df[
-            ["seq_id", "scientificName", "identity_percentage", "query_cover"]
-        ],
-        keys=keys,
-        sort=["identity_percentage", "query_cover"],
-    ).rename(
-        columns={
-            "identity_percentage": "mol_top_identity_percentage",
-            "query_cover": "mol_top_query_cover",
-        }
-    )
-    rejected = rejected.drop(
-        columns=["mol_top_identity_percentage", "mol_top_query_cover"], errors="ignore"
-    ).merge(top_hits, on=keys, how="left")
-
-    return rejected
 
 
 @preserve_sequence_order("seq_id", "gbif_merge_df")

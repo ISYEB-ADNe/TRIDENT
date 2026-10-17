@@ -127,11 +127,15 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
     )
 
     status.update(label="📊 Finalizing taxonomic expansion...", state="running")
+    ncbi_search_df = st.session_state.ncbi_search_df
     tax_df, final_params = pipe.finalize_tax_results(
         worms_merge_df,
         force_rerun=force_rerun,
         db_path=st.session_state.db_path,
         worms_merge_params=merge_params,
+        ncbi_search_df=ncbi_search_df,
+        mol_df=mol_df,
+        drop_mol_rejected=params["tax_drop_mol_rejected"],
     )
 
     summary_df = pipe.build_tax_summary(tax_df, mol_df)
@@ -144,6 +148,9 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
     st.session_state.tax_failed = tax_failed
     st.session_state.tax_failed_names = failed_names
     st.session_state.tax_homonyms = pipe.genus_homonyms(worms_search_df, tax_df)
+    st.session_state.tax_mol_rejected = pipe.mol_rejected_rows(
+        worms_merge_df, ncbi_search_df, mol_df
+    )
     st.session_state.tax_summary_df = summary_df
     st.session_state.tax_species = tax_df["scientificName"].unique().tolist()
 
@@ -183,9 +190,23 @@ def worms_search_workflow():
             )
             save_widget("worms_resolve_names")
 
+            persist_value("tax_drop_mol_rejected", True)
+            drop_mol_rejected = st.checkbox(
+                "Exclude species already rejected by MOL",
+                key="tax_drop_mol_rejected",
+                help=(
+                    "For each sequence, leave out the expanded species that BLAST "
+                    "returned for it but that failed the MOL filter (default). "
+                    "This applies per sequence: a species rejected for one "
+                    "sequence is kept for the others. Uncheck to keep them."
+                ),
+            )
+            save_widget("tax_drop_mol_rejected")
+
         current_params = {
             "worms_marine_only": marine_only,
             "worms_resolve_names": resolve_names,
+            "tax_drop_mol_rejected": drop_mol_rejected,
         }
 
         mol_df = st.session_state.mol_df
@@ -196,7 +217,11 @@ def worms_search_workflow():
             params_key="tax_params",
             flag_key="worms_search_flag",
             tab_id="tax",
-            compare_keys=["worms_marine_only", "worms_resolve_names"],
+            compare_keys=[
+                "worms_marine_only",
+                "worms_resolve_names",
+                "tax_drop_mol_rejected",
+            ],
             current_params=current_params,
             job_fn=worms_search_job,
             job_kwargs={"params": current_params},
@@ -366,6 +391,59 @@ def display_genus_homonyms():
         )
 
 
+def display_mol_rejected(seq_id=None):
+    """List the expanded species that BLAST returned but MOL rejected.
+
+    Per (sequence, species) pair; restricted to one sequence when seq_id is given.
+    """
+    rejected = st.session_state.tax_mol_rejected
+    if rejected is None or rejected.empty:
+        return
+    if seq_id is not None:
+        rejected = rejected[rejected["seq_id"] == seq_id]
+        if rejected.empty:
+            return
+    n_rows = len(rejected)
+    n_species = rejected["scientificName"].nunique()
+    dropped = st.session_state.tax_params.get("tax_drop_mol_rejected", False)
+    if seq_id is None:
+        title = (
+            f"🚫 {n_rows} {'row' if n_rows == 1 else 'rows'} ({n_species} species) "
+            "already rejected by MOL"
+        )
+    else:
+        title = f"🚫 {n_species} species already rejected by MOL for this sequence"
+    with st.expander(title, expanded=False):
+        st.caption(
+            "BLAST returned these species for the sequence, but they failed the "
+            "MOL filter. "
+            + (
+                "They are excluded from the TAX list for that sequence only."
+                if dropped
+                else "They are kept in the TAX list (setting off)."
+            )
+        )
+        st.dataframe(
+            rejected.sort_values(
+                ["seq_id", "mol_top_identity_percentage"], ascending=[True, False]
+            ),
+            width="stretch",
+            hide_index=True,
+            column_order=[
+                *(["seq_id"] if seq_id is None else []),
+                "scientificName",
+                "mol_top_identity_percentage",
+                "mol_top_query_cover",
+            ],
+            column_config={
+                "seq_id": COL["seq_id"],
+                "scientificName": COL["scientificName"],
+                "mol_top_identity_percentage": COL["mol_top_identity_percentage"],
+                "mol_top_query_cover": COL["mol_top_query_cover"],
+            },
+        )
+
+
 def display_worms_summary():
     st.dataframe(
         st.session_state.tax_summary_df,
@@ -482,6 +560,7 @@ def display_worms_sequence():
 
     st.caption(":green[■] Species also in MOL list")
     display_worms_sequence_table(seq_df)
+    display_mol_rejected(selected_seq)
 
 
 def display_full_tax_list():
@@ -542,6 +621,7 @@ def display_worms_results():
         st.markdown("### 📊 TAX List Overview")
         render_worms_metrics()
         display_genus_homonyms()
+        display_mol_rejected()
         display_worms_summary()
 
         with st.expander(

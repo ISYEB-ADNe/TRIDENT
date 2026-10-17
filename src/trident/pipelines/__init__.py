@@ -21,6 +21,7 @@ from .tax_pipeline import (
     run_worms_search,
     run_worms_merge,
     finalize_tax_results,
+    mol_rejected_rows,
     empty_tax_results,
     build_tax_summary,
 )
@@ -32,7 +33,6 @@ from .geo_pipeline import (
     run_gbif_filter,
     finalize_geo_results,
     empty_geo_results,
-    get_ncbi_rejected_rows,
     build_geo_summary,
     classify_gbif_extents,
 )
@@ -92,6 +92,7 @@ __all__ = [
     "run_worms_search",
     "run_worms_merge",
     "finalize_tax_results",
+    "mol_rejected_rows",
     "empty_tax_results",
     "build_tax_summary",
     "prepare_gbif_input",
@@ -100,7 +101,6 @@ __all__ = [
     "run_gbif_filter",
     "finalize_geo_results",
     "empty_geo_results",
-    "get_ncbi_rejected_rows",
     "build_geo_summary",
     "classify_gbif_extents",
     "prepare_bold_input",

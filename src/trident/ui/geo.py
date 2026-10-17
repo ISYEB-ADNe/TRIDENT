@@ -490,19 +490,11 @@ def gbif_filter_job(*, force_rerun, retry_empty=False, min_occurrences, extent):
         force_rerun=force_rerun,
     )
 
-    ncbi_search_df = st.session_state.ncbi_search_df
-    ncbi_search_pairs = (
-        set(zip(ncbi_search_df["seq_id"], ncbi_search_df["scientificName"]))
-        if ncbi_search_df is not None
-        else None
-    )
-
     geo_df, geo_params = pipe.finalize_geo_results(
         gbif_filter_df,
         db_path=st.session_state.db_path,
         gbif_filter_params=gbif_filter_params,
         force_rerun=force_rerun,
-        ncbi_search_pairs=ncbi_search_pairs,
     )
 
     geo_summary_df = pipe.build_geo_summary(
@@ -663,74 +655,6 @@ def display_missing_species():
         )
 
 
-def display_rejected_species():
-    """Show rows removed during finalization (found by NCBI but rejected by MOL)."""
-    gbif_filter_df = st.session_state.gbif_filter_df
-    if gbif_filter_df is None:
-        return
-    rejected_df = pipe.get_ncbi_rejected_rows(
-        gbif_filter_df, st.session_state.geo_df, st.session_state.ncbi_search_df
-    )
-    if rejected_df.empty:
-        return
-    n_rows = len(rejected_df)
-    n_species = rejected_df["scientificName"].nunique()
-    row_word = "row" if n_rows == 1 else "rows"
-    species_word = "species" if n_species == 1 else "species"
-    with st.expander(
-        f"🚫 {n_rows} {row_word} ({n_species} {species_word}) removed — already rejected by MOL"
-    ):
-        st.info(
-            "These (sequence, species) pairs appeared in NCBI BLAST results but did not "
-            "survive MOL filtering. They are excluded from the GEO list."
-        )
-        cols = rejected_df.columns.tolist()
-        priority = [
-            "seq_id",
-            "scientificName",
-            "mol_top_identity_percentage",
-            "gbif_occurrences",
-            "gbif_taxonURL",
-            "taxonURL",
-            "genus",
-            "specificEpithet",
-            "family",
-            "order",
-            "class",
-            "phylum",
-            "kingdom",
-        ]
-        ordered = priority + [c for c in cols if c not in priority]
-        st.dataframe(
-            rejected_df,
-            hide_index=True,
-            width="stretch",
-            column_order=ordered,
-            column_config={
-                "seq_id": COL["seq_id"],
-                "scientificName": COL["scientificName"],
-                "mol_top_identity_percentage": COL["mol_top_identity_percentage"],
-                "mol_top_query_cover": None,
-                "gbif_occurrences": COL["gbif_occurrences"],
-                "gbif_taxonURL": COL["gbif_taxonURL"],
-                "taxonURL": COL["taxonURL"],
-                "genus": COL["genus"],
-                "specificEpithet": COL["specificEpithet"],
-                "family": COL["family"],
-                "order": COL["order"],
-                "class": COL["class"],
-                "phylum": COL["phylum"],
-                "kingdom": COL["kingdom"],
-                "in_mol": None,
-                "dna_sequence": None,
-                "scientificNameAuthorship": None,
-                "taxonRank": None,
-                "taxonID": None,
-                "taxonID_db": None,
-            },
-        )
-
-
 def display_gbif_sequence_table(
     seq_df: pd.DataFrame,
     min_occurrences: int,
@@ -854,40 +778,6 @@ def display_gbif_sequence():
         target_extent,
     )
 
-    # Show species rejected by MOL for this sequence
-    gbif_filter_df = st.session_state.gbif_filter_df
-    if gbif_filter_df is not None:
-        rejected_df = pipe.get_ncbi_rejected_rows(
-            gbif_filter_df, st.session_state.geo_df, st.session_state.ncbi_search_df
-        )
-        rejected_seq = rejected_df[rejected_df["seq_id"] == selected_seq]
-        if not rejected_seq.empty:
-            n_species = rejected_seq["scientificName"].nunique()
-            with st.expander(f"🚫 {n_species} species rejected by MOL filtering"):
-                st.info(
-                    "These species appeared in NCBI BLAST results but did not "
-                    "survive MOL filtering. They are excluded from the GEO list."
-                )
-                st.dataframe(
-                    rejected_seq,
-                    hide_index=True,
-                    width="stretch",
-                    column_order=[
-                        "scientificName",
-                        "mol_top_identity_percentage",
-                        "gbif_occurrences",
-                        "gbif_taxonURL",
-                    ],
-                    column_config={
-                        "scientificName": COL["scientificName"],
-                        "mol_top_identity_percentage": COL[
-                            "mol_top_identity_percentage"
-                        ],
-                        "gbif_occurrences": COL["gbif_occurrences"],
-                        "gbif_taxonURL": COL["gbif_taxonURL"],
-                    },
-                )
-
 
 def display_full_geo_list():
     """Display the complete GEO list in a flat table."""
@@ -949,7 +839,6 @@ def display_gbif_results():
         render_gbif_metrics()
         display_gbif_summary()
         display_missing_species()
-        display_rejected_species()
 
         with st.expander(
             f"View full GEO list ({len(st.session_state.geo_df)} species)",

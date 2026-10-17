@@ -3,7 +3,8 @@
 Covers the pure logic: prepare_worms_input (accepted-genus expansion),
 apply_name_resolution (attach acceptedName/AphiaID), run_worms_merge (in_mol
 credited on the accepted name, verbatim preserved), genus_homonyms (which
-genus homonym is kept) and summarize_name_resolution
+genus homonym is kept), finalize_tax_results (species MOL rejected) and
+summarize_name_resolution
 (what the TAX tab reports about the MOL names). The cached run_name_resolution
 step is exercised via its client contract in test_worms.py.
 """
@@ -18,12 +19,14 @@ from trident.pipelines.tax_pipeline import (
     apply_name_resolution,
     genus_homonyms,
     run_worms_merge,
+    finalize_tax_results,
     summarize_name_resolution,
 )
 
 # run_worms_merge is wrapped by @save_to_db + @preserve_sequence_order; unwrap to
 # the pure logic so we can test it without a database.
 _merge = inspect.unwrap(run_worms_merge)
+_finalize = inspect.unwrap(finalize_tax_results)
 
 
 def _resolution_df():
@@ -309,3 +312,55 @@ def test_hits_without_a_name_are_neither_resolved_nor_expanded():
     nameless = apply_name_resolution(mol.iloc[:1], None)
     assert prepare_worms_input(nameless) == []
     assert summarize_name_resolution(nameless).n_names == 0
+
+
+def test_species_rejected_by_mol_are_dropped_for_that_sequence_only():
+    """A species BLAST returned for a sequence but MOL rejected leaves that
+    sequence's TAX list, under its NCBI name or a synonym, and stays elsewhere."""
+    tax = pd.DataFrame(
+        {
+            "seq_id": ["s1", "s1", "s1", "s1", "s2"],
+            "scientificName": [
+                "Gadus morhua",
+                "Gadus chalcogrammus",
+                "Gadus macrocephalus",
+                "Gadus nunavut",
+                "Gadus chalcogrammus",
+            ],
+            "in_mol": [True, False, False, False, True],
+        }
+    )
+    ncbi = pd.DataFrame(
+        {
+            "seq_id": ["s1", "s1", "s1", "s2"],
+            "scientificName": [
+                "Gadus morhua",
+                "Gadus chalcogrammus",
+                "Gadus ogac",
+                "Gadus chalcogrammus",
+            ],
+            "identity_percentage": [100.0, 95.0, 94.0, 100.0],
+            "query_cover": [100.0, 100.0, 80.0, 100.0],
+        }
+    )
+    mol = pd.DataFrame(
+        {
+            "seq_id": ["s1", "s2", "s3"],
+            "scientificName": ["Gadus morhua", "Gadus chalcogrammus", "Gadus ogac"],
+            "acceptedName": [
+                "Gadus morhua",
+                "Gadus chalcogrammus",
+                "Gadus macrocephalus",
+            ],
+        }
+    )
+
+    out = _finalize(tax, ncbi_search_df=ncbi, mol_df=mol)
+    assert set(zip(out["seq_id"], out["scientificName"])) == {
+        ("s1", "Gadus morhua"),
+        ("s1", "Gadus nunavut"),
+        ("s2", "Gadus chalcogrammus"),
+    }
+
+    kept = _finalize(tax, ncbi_search_df=ncbi, mol_df=mol, drop_mol_rejected=False)
+    assert len(kept) == len(tax)
