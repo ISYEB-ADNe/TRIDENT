@@ -4,11 +4,13 @@ import contextvars
 import io
 import re
 import threading
+import time
 import zipfile
 from collections.abc import Callable
 from functools import wraps
 
 import pandas as pd
+import requests
 from Bio import Blast
 from Bio.SeqRecord import SeqRecord
 from joblib import Parallel, delayed
@@ -256,17 +258,25 @@ def read_xml2_archive(data: bytes) -> list:
         return records
 
 
+def _read_job_result(data: bytes, multi_fasta: str) -> list:
+    """Parse a job's XML2 archive. Raises if it does not hold one record per
+    query, so an incomplete archive is retried instead of passing for queries
+    without hits."""
+    records = read_xml2_archive(data)
+    n_queries = sum(line.startswith(">") for line in multi_fasta.splitlines())
+    if len(records) != n_queries:
+        raise ValueError(f"BLAST result holds {len(records)} of {n_queries} queries")
+    return records
+
+
 def _run_qblast_once(
     multi_fasta: str,
     evalue: float,
     hitlist_size: int,
     entrez_query: str | None,
 ) -> list:
-    """Submit one BLASTn job to NCBI and parse its XML2 result (one attempt).
-
-    Raises if the result does not hold one record per query, so an incomplete
-    archive is retried instead of passing for queries without hits.
-    """
+    """Submit one BLASTn job to NCBI through Biopython's qblast and parse its
+    XML2 result (one attempt). The fallback client (BLAST_CLIENT=qblast)."""
     with Blast.qblast(
         program="blastn",
         database="nt",
@@ -276,17 +286,176 @@ def _run_qblast_once(
         entrez_query=entrez_query,
         format_type="XML2",
     ) as stream:
-        data = stream.read()
-    records = read_xml2_archive(data)
-    n_queries = sum(line.startswith(">") for line in multi_fasta.splitlines())
-    if len(records) != n_queries:
-        raise ValueError(f"BLAST result holds {len(records)} of {n_queries} queries")
-    return records
+        return _read_job_result(stream.read(), multi_fasta)
 
 
 # Same job, resubmitted as a whole after each delay in BLAST_RETRY_DELAYS: a
 # failed submission, poll or truncated response is retried.
 _run_qblast = retry_call(delays=BLAST_RETRY_DELAYS)(_run_qblast_once)
+
+
+### BLAST URL API CLIENT ###
+
+# TRIDENT's own client for NCBI's Common URL API, the one qblast uses: submit a
+# job (CMD=Put, which returns its RID), then poll it for its XML2 result
+# (CMD=Get). NCBI answers a poll with the result's zip archive once the job is
+# done, and before that with a page holding the job's status (Status=WAITING,
+# FAILED or UNKNOWN, as NCBI's sample client web_blast.pl reads it). Unlike
+# qblast, which takes any such page for a running job, it reads that status,
+# so a failed or expired job raises instead of being polled forever; and it
+# spaces the requests of all threads as NCBI asks. It sends the same search
+# parameters as qblast, so both give the same hits; qblast stays available as
+# a fallback (BLAST_CLIENT=qblast) in case NCBI changes the API.
+# https://blast.ncbi.nlm.nih.gov/doc/blast-help/urlapi.html
+# https://blast.ncbi.nlm.nih.gov/doc/blast-help/developerinfo.html
+NCBI_BLAST_URL = "https://blast.ncbi.nlm.nih.gov/Blast.cgi"
+
+# NCBI's guidelines: at most one request every 10 s, and each job polled at
+# most once a minute. The first poll comes after NCBI's estimate of the job's
+# time (RTOE, or BLAST_FIRST_POLL without one), as in NCBI's sample client:
+# small jobs are often done within it. A job still running after
+# BLAST_SLOW_JOB is logged, but kept: a long wait means a busy NCBI, where a
+# resubmitted job would start again at the back of the queue. A job NCBI has
+# lost ends up UNKNOWN once its RID expires, and raises then.
+BLAST_REQUEST_INTERVAL = 10.0
+BLAST_FIRST_POLL = 30.0
+BLAST_POLL_INTERVAL = 60.0
+BLAST_SLOW_JOB = 600.0
+# Failed polls in a row (request error, or neither a result nor a status)
+# tolerated before the job is given up, so a transient error does not cost a
+# resubmission of a job that may be almost done.
+BLAST_POLL_FAILURES = 3
+# (connect, read) timeouts of one request; a large result can take a while.
+BLAST_TIMEOUT = (30.0, 300.0)
+
+_RID = re.compile(r"^\s*RID = (\S+)", re.MULTILINE)
+_RTOE = re.compile(r"^\s*RTOE = (\d+)", re.MULTILINE)
+_STATUS = re.compile(r"QBlastInfoBegin\s+Status=(\w+)")
+_NCBI_MESSAGE = re.compile(r"Message ID#[^<\n]*")
+
+_request_lock = threading.Lock()
+_next_request = 0.0
+
+
+def _blast_request(**params) -> requests.Response:
+    """POST one URL API request, with TRIDENT's tool name and the contact
+    email, at least BLAST_REQUEST_INTERVAL after the previous request of any
+    thread. Raises on an HTTP error."""
+    global _next_request
+    # Each request takes the next free slot, then waits for it outside the
+    # lock, so threads are served in the order they asked.
+    with _request_lock:
+        slot = max(_next_request, time.monotonic())
+        _next_request = slot + BLAST_REQUEST_INTERVAL
+    wait = slot - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+    params["tool"] = "trident"
+    if Blast.email:
+        params["email"] = Blast.email
+    response = requests.post(
+        NCBI_BLAST_URL,
+        data=params,
+        # Blast.email rather than the config: jobs run in threads that cannot
+        # read the email set in Settings (session state).
+        headers={"User-Agent": config.user_agent(Blast.email)},
+        timeout=BLAST_TIMEOUT,
+    )
+    response.raise_for_status()
+    return response
+
+
+def _submit_blast_job(
+    multi_fasta: str, evalue: float, hitlist_size: int, entrez_query: str | None
+) -> tuple[str, int | None]:
+    """Submit a BLASTn search of ``nt``; return its RID and RTOE (seconds)."""
+    params = {
+        "CMD": "Put",
+        "PROGRAM": "blastn",
+        "DATABASE": "nt",
+        "QUERY": multi_fasta,
+        "EXPECT": evalue,
+        "HITLIST_SIZE": hitlist_size,
+    }
+    if entrez_query:
+        params["ENTREZ_QUERY"] = entrez_query
+    page = _blast_request(**params).text
+    match = _RID.search(page)
+    if not match:
+        message = _NCBI_MESSAGE.search(page)
+        raise ValueError(
+            f"NCBI refused the BLAST job: {message.group(0).strip()}"
+            if message
+            else "NCBI returned no RID for the BLAST job"
+        )
+    rtoe = _RTOE.search(page)
+    return match.group(1), int(rtoe.group(1)) if rtoe else None
+
+
+def _poll_blast_job(rid: str, rtoe: int | None = None) -> bytes:
+    """Poll a job until it is done and return its XML2 result (zip archive).
+
+    The first poll comes after RTOE (or BLAST_FIRST_POLL). A failed poll
+    (request error, or a reply that is neither the archive nor a status page)
+    is tried again, up to BLAST_POLL_FAILURES in a row. Raises if NCBI
+    reports the job failed or unknown (expired RID).
+    """
+    delay = rtoe or BLAST_FIRST_POLL
+    start = time.monotonic()
+    warned = False
+    failures = 0
+    while True:
+        time.sleep(delay)
+        delay = BLAST_POLL_INTERVAL
+        if not warned and time.monotonic() - start > BLAST_SLOW_JOB:
+            logger.warning(
+                f"BLAST job {rid} still running after {BLAST_SLOW_JOB / 60:.0f} min"
+            )
+            warned = True
+        try:
+            # ALIGNMENTS and DESCRIPTIONS as qblast sends them (its defaults).
+            reply = _blast_request(
+                CMD="Get", RID=rid, FORMAT_TYPE="XML2", ALIGNMENTS=500, DESCRIPTIONS=500
+            )
+            if reply.content.startswith(b"PK"):
+                return reply.content
+            match = _STATUS.search(reply.text)
+            if not match or match.group(1) == "READY":
+                raise ValueError("neither a result nor a job status in NCBI's reply")
+        except (requests.RequestException, ValueError) as e:
+            failures += 1
+            if failures >= BLAST_POLL_FAILURES:
+                raise
+            logger.debug(f"Poll of BLAST job {rid} failed ({e}); polling again")
+            continue
+        failures = 0
+        if match.group(1) != "WAITING":
+            raise ValueError(f"BLAST job {rid} ended with status {match.group(1)}")
+
+
+def _run_blast_job_once(
+    multi_fasta: str,
+    evalue: float,
+    hitlist_size: int,
+    entrez_query: str | None,
+) -> list:
+    """Submit one BLASTn job to NCBI and parse its XML2 result (one attempt)."""
+    rid, rtoe = _submit_blast_job(multi_fasta, evalue, hitlist_size, entrez_query)
+    logger.debug(f"BLAST job {rid} submitted (estimated {rtoe} s)")
+    return _read_job_result(_poll_blast_job(rid, rtoe), multi_fasta)
+
+
+# Same job, resubmitted as a whole after each delay in BLAST_RETRY_DELAYS, as
+# with qblast: a failed submission, a job given up or a bad result is retried.
+_run_blast_job = retry_call(delays=BLAST_RETRY_DELAYS)(_run_blast_job_once)
+
+
+def _blast_runner(retry: bool) -> Callable:
+    """The job function of the BLAST client: TRIDENT's URL API client, or
+    Biopython's qblast with BLAST_CLIENT=qblast."""
+    if config.get("BLAST_CLIENT") == "qblast":
+        return _run_qblast if retry else _run_qblast_once
+    return _run_blast_job if retry else _run_blast_job_once
 
 
 class BlastCircuit:
@@ -336,8 +505,9 @@ def submit_blast_batch(
 ) -> pd.DataFrame | None:
     """Submit a BLASTn query for a single batch of sequences.
 
-    Builds a multi-FASTA string from the batch, submits it to NCBI BLAST via
-    qblast, parses the XML2 response, and returns a raw results DataFrame.
+    Builds a multi-FASTA string from the batch, submits it to NCBI BLAST
+    through the configured client (``_blast_runner``), parses the XML2
+    response, and returns a raw results DataFrame.
     With ``retry``, a failed job is resubmitted after each delay in
     ``BLAST_RETRY_DELAYS``; if it still fails, returns None so the caller can
     handle partial results.
@@ -364,8 +534,7 @@ def submit_blast_batch(
         logger.debug(f"Processing batch {batch_id} with {len(batch)} sequences")
 
         multi_fasta = records_to_fasta_string(batch)
-        run = _run_qblast if retry else _run_qblast_once
-        records = run(multi_fasta, evalue, hitlist_size, entrez_query)
+        records = _blast_runner(retry)(multi_fasta, evalue, hitlist_size, entrez_query)
         df = parse_blast_records(records)
 
         logger.debug(f"Batch {batch_id} completed successfully")

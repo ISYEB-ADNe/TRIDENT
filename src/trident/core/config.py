@@ -69,11 +69,16 @@ def get(key: str, default: str | None = None) -> str | None:
         try:
             import streamlit as st
 
+            from streamlit.runtime.scriptrunner import get_script_run_ctx
+
             if key in st.secrets:
                 return st.secrets[key]
-            val = st.session_state.get(f"_config_{key}")
-            if val:
-                return val
+            # Session state belongs to a script run: worker threads (step jobs,
+            # BLAST batches) have none, and reading it there only logs warnings.
+            if get_script_run_ctx(suppress_warning=True) is not None:
+                val = st.session_state.get(f"_config_{key}")
+                if val:
+                    return val
         except Exception:
             pass
     _load_dotenv_once()

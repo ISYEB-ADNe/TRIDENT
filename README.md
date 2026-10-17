@@ -117,6 +117,8 @@ You can also use a `.env` file at the project root:
 CONTACT_EMAIL=your-email@example.com
 ```
 
+If BLAST searches start failing after a change on NCBI's side, `BLAST_CLIENT = "qblast"` in `secrets.toml` (or `BLAST_CLIENT=qblast` in `.env`) switches to Biopython's BLAST client.
+
 </details>
 
 ## How to use the app

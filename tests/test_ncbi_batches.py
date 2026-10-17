@@ -1,9 +1,10 @@
-"""Failure handling of NCBI BLAST batches (``run_blast_batches``).
+"""Failure handling of NCBI BLAST jobs and batches (``run_blast_batches``).
 
-NCBI is faked at its boundary (``Blast.qblast`` and the XML2 archive reader):
-each query sequence gets one real hit (from the XML2 test fixture), a job
-holding a "bad" sequence is rejected, and ``down`` makes every job fail. Waits
-between retries are skipped.
+NCBI is faked at its boundary (the URL API requests and the XML2 archive
+reader): each query sequence gets one real hit (from the XML2 test fixture), a
+job holding a "bad" sequence is rejected, and ``down`` makes every request
+fail. Waits are skipped. The polling of a job is tested against a fake that
+serves the real XML2 fixture (``url_api_fake``).
 """
 
 import contextvars
@@ -12,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import requests
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
@@ -27,22 +29,6 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "blast_xml2_one_query.zip"
 _TEMPLATE = ncbi.read_xml2_archive(_FIXTURE.read_bytes())[0]
 
 
-class _Stream:
-    """What Blast.qblast returns: a response to read, usable with ``with``."""
-
-    def __init__(self, data):
-        self.data = data
-
-    def read(self):
-        return self.data
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
 def _record(seq_id: str):
     """A Bio.Blast record for ``seq_id`` with a single hit."""
     record = copy.deepcopy(_TEMPLATE)
@@ -51,25 +37,38 @@ def _record(seq_id: str):
     return record
 
 
+def _query_ids(fasta: str) -> list[str]:
+    return [line[1:].split()[0] for line in fasta.splitlines() if line.startswith(">")]
+
+
+def _reply(text="", content=b""):
+    return SimpleNamespace(text=text, content=content, raise_for_status=lambda: None)
+
+
 @pytest.fixture
 def ncbi_fake(monkeypatch):
-    fake = SimpleNamespace(bad=set(), down=False, jobs=0)
+    """NCBI's URL API, one job per submission, done at the first poll."""
+    fake = SimpleNamespace(bad=set(), down=False, jobs=0, queries={})
 
-    def qblast(sequence, **kwargs):
-        fake.jobs += 1
+    def post(url, data, **kwargs):
+        if data["CMD"] == "Put":
+            fake.jobs += 1
         if fake.down:
-            raise ConnectionError("NCBI unreachable")
-        ids = [
-            line[1:].split()[0]
-            for line in sequence.splitlines()
-            if line.startswith(">")
-        ]
-        if fake.bad & set(ids):
-            raise ValueError("NCBI rejected the query")
-        return _Stream(ids)  # the archive "bytes"
+            raise requests.ConnectionError("NCBI unreachable")
+        if data["CMD"] == "Put":
+            ids = _query_ids(data["QUERY"])
+            if fake.bad & set(ids):
+                return _reply("<p>Message ID#24 Error: NCBI rejected the query</p>")
+            rid = f"R{fake.jobs}"
+            fake.queries[rid] = ids
+            return _reply(f"QBlastInfoBegin\n    RID = {rid}\n    RTOE = 30\n")
+        return _reply(content=b"PK" + data["RID"].encode())  # the archive "bytes"
 
-    monkeypatch.setattr(ncbi.Blast, "qblast", qblast)
-    monkeypatch.setattr(ncbi, "read_xml2_archive", lambda ids: list(map(_record, ids)))
+    def read_archive(data):
+        return [_record(i) for i in fake.queries[data[2:].decode()]]
+
+    monkeypatch.setattr(ncbi.requests, "post", post)
+    monkeypatch.setattr(ncbi, "read_xml2_archive", read_archive)
     monkeypatch.setattr(http.time, "sleep", lambda s: None)
     return fake
 
@@ -128,13 +127,14 @@ def test_every_worker_runs_in_the_callers_context(ncbi_fake, monkeypatch):
         "caller", default=None
     )
     seen = []
-    fake_qblast = ncbi.Blast.qblast
+    fake_post = ncbi.requests.post
 
-    def qblast(**kwargs):
-        seen.append(var.get())
-        return fake_qblast(**kwargs)
+    def post(url, data, **kwargs):
+        if data["CMD"] == "Put":
+            seen.append(var.get())
+        return fake_post(url, data, **kwargs)
 
-    monkeypatch.setattr(ncbi.Blast, "qblast", qblast)
+    monkeypatch.setattr(ncbi.requests, "post", post)
     var.set("ui-run")
 
     ncbi.run_blast_batches([_batch(i, 1) for i in range(12)], n_threads=3)
@@ -142,10 +142,62 @@ def test_every_worker_runs_in_the_callers_context(ncbi_fake, monkeypatch):
     assert seen == ["ui-run"] * 12
 
 
-def test_archive_missing_a_query_fails_the_job(monkeypatch):
+def test_archive_missing_a_query_fails_the_job(ncbi_fake, monkeypatch):
     """A result without one record per query is an error (retried), not
     queries without hits."""
-    monkeypatch.setattr(ncbi.Blast, "qblast", lambda **k: _Stream(["s0"]))
-    monkeypatch.setattr(ncbi, "read_xml2_archive", lambda ids: list(map(_record, ids)))
+    read_archive = ncbi.read_xml2_archive
+    monkeypatch.setattr(ncbi, "read_xml2_archive", lambda data: read_archive(data)[:1])
     with pytest.raises(ValueError, match="1 of 2 queries"):
-        ncbi._run_qblast_once(">s0\nACGT\n>s1\nACGT\n", 1e-10, 10, None)
+        ncbi._run_blast_job_once(">s0\nACGT\n>s1\nACGT\n", 1e-10, 10, None)
+
+
+@pytest.fixture
+def url_api_fake(monkeypatch):
+    """NCBI's URL API: a job is WAITING for ``polls`` polls, then ends with
+    ``status`` (READY serves the one-query XML2 fixture). The first
+    ``glitches`` polls get a page without a status."""
+    fake = SimpleNamespace(polls=2, status="READY", glitches=0, requests=[])
+
+    def post(url, data, **kwargs):
+        fake.requests.append(data)
+        if data["CMD"] == "Put":
+            return _reply("QBlastInfoBegin\n    RID = R1\n    RTOE = 20\nQBlastInfoEnd")
+        if fake.glitches:
+            fake.glitches -= 1
+            return _reply("<html>Service temporarily unavailable</html>")
+        if len(fake.requests) - 1 <= fake.polls:
+            status = "WAITING"
+        elif fake.status == "READY":
+            return _reply(content=_FIXTURE.read_bytes())
+        else:
+            status = fake.status
+        return _reply(f"QBlastInfoBegin\n\tStatus={status}\nQBlastInfoEnd")
+
+    monkeypatch.setattr(ncbi.requests, "post", post)
+    monkeypatch.setattr(ncbi.time, "sleep", lambda s: None)
+    return fake
+
+
+def test_url_api_client_polls_until_ready(url_api_fake):
+    """The job is polled while WAITING, then its XML2 result is parsed."""
+    records = ncbi._run_blast_job_once(">s0\nACGT\n", 1e-10, 10, None)
+
+    assert len(records) == 1 and len(records[0]) > 0
+    assert [d["CMD"] for d in url_api_fake.requests] == ["Put"] + ["Get"] * 3
+
+
+def test_url_api_client_fails_a_failed_job(url_api_fake):
+    """A job NCBI reports FAILED raises (so it is retried)."""
+    url_api_fake.status = "FAILED"
+    with pytest.raises(ValueError, match="status FAILED"):
+        ncbi._run_blast_job_once(">s0\nACGT\n", 1e-10, 10, None)
+
+
+def test_url_api_client_keeps_the_job_over_transient_poll_errors(url_api_fake):
+    """Failed polls below the limit keep polling the same job; it is not
+    resubmitted."""
+    url_api_fake.glitches = ncbi.BLAST_POLL_FAILURES - 1
+    records = ncbi._run_blast_job_once(">s0\nACGT\n", 1e-10, 10, None)
+
+    assert len(records) == 1
+    assert sum(d["CMD"] == "Put" for d in url_api_fake.requests) == 1

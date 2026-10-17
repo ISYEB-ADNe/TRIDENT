@@ -8,9 +8,9 @@ Two retry levels exist, and a client needs exactly one of them:
   and ``Retry-After`` support. Used by the WoRMS, BOLD and GBIF clients. Retries
   are fast (seconds) and invisible to the calling code.
 - Per call (``retry_call``): re-runs a whole function when it raises. For
-  clients that cannot use a ``requests`` session and whose unit of work is a
-  long job rather than one request: NCBI BLAST (``qblast`` submits a job, then
-  polls it for minutes through ``urllib``). Retries are slow (tens of seconds).
+  clients whose unit of work is a long job rather than one request: NCBI BLAST
+  (a job is submitted, then polled for minutes; the client tolerates a few
+  failed polls itself). Retries are slow (tens of seconds).
 
 A call that still fails after its retries raises to the client, which reports
 the item to the cache's ``failure_sink`` so it is retried on the next run
