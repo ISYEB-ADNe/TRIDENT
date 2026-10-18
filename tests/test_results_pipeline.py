@@ -371,3 +371,47 @@ def test_gbif_export_common_taxon_is_a_real_taxon(monkeypatch):
     )
     assert rows.loc["subspecies", "scientificName"] == "Liparis fabricii"
     assert rows.loc["subspecies", "taxonRank"] == "Species"
+
+
+def test_resolve_sequences_matches_the_gbif_export(monkeypatch):
+    """Each sequence resolves to the taxon the GBIF export writes for it, and is
+    at species level when that taxon is a species or a subspecies; only a
+    candidate named by its genus alone keeps the sequence at genus."""
+    monkeypatch.setattr(results_pipeline, "get_aphia_records", lambda name: [])
+    lone_subspecies = _liparis("lone", _FISH, "fabricii fabricii")
+    lone_subspecies["taxonRank"] = "Subspecies"
+    genus_only = {**_liparis("genus_only", _FISH, "x"), "specificEpithet": None}
+    genus_only["scientificName"] = "Liparis"
+    no_epithet = {**_liparis("no_epithet", _FISH, "fabricii"), "specificEpithet": None}
+    results = pd.DataFrame(
+        [
+            lone_subspecies,
+            _liparis("subspecies", _FISH, "fabricii"),
+            _liparis("subspecies", _FISH, "fabricii fabricii"),
+            _liparis("genus", _FISH, "liparis"),
+            _liparis("genus", _FISH, "fabricii"),
+            _liparis("both", _FISH, "liparis"),
+            _liparis("both", _PLANT, "loeselii"),
+            genus_only,
+            _liparis("genus_only", _FISH, "fabricii"),
+            no_epithet,
+            _liparis("no_epithet", _FISH, "fabricii fabricii"),
+            {"seq_id": "empty", "dna_sequence": "ACGT"},
+        ]
+    )
+    resolved = results_pipeline.resolve_sequences(results).set_index("seq_id")
+    export = build_gbif_export_df(results).set_index("seq_id")
+    for col in ("scientificName", "taxonRank"):
+        assert resolved[col].equals(export.loc[resolved.index, col])
+    assert resolved.loc["genus_only", "taxonRank"] == "Genus"
+    assert resolved["species_level"].to_dict() == {
+        "lone": True,
+        "subspecies": True,
+        "genus": False,
+        "both": False,
+        "genus_only": False,
+        "no_epithet": True,
+        "empty": False,
+    }
+    # A subspecies counts with its species.
+    assert resolved.loc["lone", "species"] == resolved.loc["subspecies", "species"]

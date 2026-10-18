@@ -7,6 +7,7 @@ which does WoRMS lookups for higher-level taxa).
     build_results_df(sequences_df, geo_df, mol_df, ...) → DataFrame
     find_sequence_exclusion_step(all_seq_ids, ...) → DataFrame
     build_gbif_export_df(results_df) → DataFrame (one row per MOTU/ASV)
+    resolve_sequences(results_df) → DataFrame (species count and shared rank per MOTU/ASV)
     add_below_mol(df, mol_df, ncbi_search_df) → DataFrame
     add_low_identity_warning(df, threshold) → DataFrame
 """
@@ -14,7 +15,12 @@ which does WoRMS lookups for higher-level taxa).
 import pandas as pd
 from loguru import logger
 
-from trident.clients.worms import clean_authorships, get_aphia_records, pick_record
+from trident.clients.worms import (
+    _INFRASPECIFIC_RANKS,
+    clean_authorships,
+    get_aphia_records,
+    pick_record,
+)
 from trident.core.utils import (
     ensure_columns,
     find_exclusion_pipeline_step,
@@ -370,8 +376,12 @@ def _find_common_taxonomy(group: pd.DataFrame) -> dict:
 
     for col in TAXONOMY_HIERARCHY:
         values = group[col].dropna().unique()
-        # An epithet names a species only within a known genus.
-        if len(values) > 1 or (col == "specificEpithet" and resolved_rank != "genus"):
+        # An epithet names a species only within a known genus, and not when a
+        # candidate is a genus alone (a one-word name keeps it at genus).
+        if len(values) > 1 or (
+            col == "specificEpithet"
+            and (resolved_rank != "genus" or _has_genus_only(group))
+        ):
             break
         if len(values) == 1:
             result[col] = values[0]
@@ -398,6 +408,66 @@ def _find_common_taxonomy(group: pd.DataFrame) -> dict:
     result["identificationRemarks"] = ", ".join(sorted(species_names))
 
     return result
+
+
+def _has_genus_only(group: pd.DataFrame) -> bool:
+    """Whether a candidate is named by a genus alone."""
+    names = group["scientificName"].dropna().astype(str).str.strip()
+    return bool((~names.str.contains(" ")).any())
+
+
+# WoRMS ranks at species level or below, lower case.
+SPECIES_RANKS = {"species"} | {rank.lower() for rank in _INFRASPECIFIC_RANKS}
+
+
+def resolve_sequences(results_df: pd.DataFrame) -> pd.DataFrame:
+    """Give each sequence its number of species and the taxon they resolve to.
+
+    The taxon and its rank are the ones the GBIF export writes for the sequence
+    (same routine): the species itself, or the lowest taxon its species share,
+    empty when none is shared or no species is assigned. species_level is True
+    when that taxon is a species or below (a species and its subspecies resolve
+    to the species), and species then names that species by genus and epithet,
+    so a subspecies counts with its species.
+
+    Returns:
+        DataFrame with columns: seq_id, n_species, taxonRank, scientificName,
+        species_level, species.
+    """
+    rows = []
+    for seq_id, group in results_df.groupby("seq_id", sort=False):
+        species_rows = group.dropna(subset=["scientificName"])
+        n_species = species_rows["scientificName"].nunique()
+        row = {"seq_id": seq_id, "n_species": n_species, "species_level": False}
+        if n_species:
+            common = _find_common_taxonomy(species_rows)
+            row["taxonRank"] = common["taxonRank"]
+            row["scientificName"] = common["scientificName"]
+            rank = str(common["taxonRank"]).lower()
+            name = str(common["scientificName"])
+            # A lone binomial whose rank WoRMS left empty is still a species.
+            row["species_level"] = rank in SPECIES_RANKS or (
+                n_species == 1 and pd.isna(common["taxonRank"]) and " " in name
+            )
+            if row["species_level"]:
+                genus, epithet = common["genus"], common["specificEpithet"]
+                row["species"] = (
+                    f"{genus} {epithet}"
+                    if pd.notna(genus) and pd.notna(epithet)
+                    else name
+                )
+        rows.append(row)
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "seq_id",
+            "n_species",
+            "taxonRank",
+            "scientificName",
+            "species_level",
+            "species",
+        ],
+    )
 
 
 @preserve_sequence_order("seq_id", "results_df")
