@@ -52,6 +52,22 @@ from trident.clients.ncbi import (
 ### DATA PREPARATION ###
 
 
+def hypo_queries(geo_df) -> dict[str, str]:
+    """Entrez organism query of each seq_id, from its MOL-validated species.
+
+    The query restricts the BLAST of the seq_id's proxy sequences; a seq_id
+    without MOL species is absent (no restriction, query ""). Used by
+    prepare_hypo_input and run_hypo_merge, so both see the same query.
+    """
+    if geo_df.empty:
+        return {}
+    return {
+        seq_id: "(" + " OR ".join(f'"{sp}"[orgn]' for sp in species) + ")"
+        for seq_id, species in group_species_by_flag(geo_df, "in_mol").items()
+        if species
+    }
+
+
 def prepare_hypo_input(extra_df, geo_df):
     """Build per-seq_id BLAST inputs from EXTRA proxy sequences and GEO validation status.
 
@@ -65,7 +81,7 @@ def prepare_hypo_input(extra_df, geo_df):
     Returns:
         dict: {seq_id: {'sequences': [SeqRecord, ...], 'entrez_query': str}, ...}
     """
-    mol_species_by_seq = group_species_by_flag(geo_df, "in_mol")
+    queries = hypo_queries(geo_df)
 
     input_data = {}
     for seq_id, group in extra_df.groupby("seq_id", observed=False):
@@ -75,16 +91,10 @@ def prepare_hypo_input(extra_df, geo_df):
                 group["dna_sequence_extra"], group["seq_id_extra"]
             )
         ]
-
-        # Build Entrez query from MOL-validated species for this seq_id
-        species_list = mol_species_by_seq.get(seq_id, [])
-        if species_list:
-            formatted = " OR ".join(f'"{sp}"[orgn]' for sp in species_list)
-            query_string = f"({formatted})"
-        else:
-            query_string = ""
-
-        input_data[seq_id] = {"sequences": seq_records, "entrez_query": query_string}
+        input_data[seq_id] = {
+            "sequences": seq_records,
+            "entrez_query": queries.get(seq_id, ""),
+        }
 
     n_seq = sum(len(v["sequences"]) for v in input_data.values())
     logger.info(f"Prepared HYPO input: {n_seq} sequences to BLAST")
@@ -162,6 +172,10 @@ def run_hypo_search(
 ) -> pd.DataFrame:
     """NCBI BLAST search on proxy sequences grouped by seq_id.
 
+    A proxy record shared by several seq_ids with the same Entrez query is
+    searched once: (proxy record id, entrez_query) is one cache item, and its
+    hits are returned once.
+
     Args:
         sequences_dict: {seq_id: {'sequences': [SeqRecord], 'entrez_query': str}}.
         batch_size: Sequences per NCBI batch.
@@ -169,11 +183,12 @@ def run_hypo_search(
         ev_exponent: Negative exponent for E-value threshold (e.g. 10 → 1e-10).
         max_hits: Maximum hits per query.
         identity_cutoff: Minimum identity percentage to retain.
-        ntop: If > 0, keep only top N hits per query by identity.
+        ntop: If > 0, keep only top N hits per (proxy record, hit species,
+            Entrez query) by identity.
         progress_handler: Optional progress tracker.
-        failure_sink: If provided, the ids of proxy records (BOLD sequences)
-            whose BLAST errored are appended here so the cache layer retries
-            them instead of caching them as empty.
+        failure_sink: If provided, the (proxy record id, entrez_query) of each
+            proxy record (BOLD sequence) whose BLAST errored is appended here,
+            so the cache layer retries it instead of caching it as empty.
 
     Returns:
         DataFrame with NCBI BLAST results for proxy sequences.
@@ -182,29 +197,37 @@ def run_hypo_search(
     logger.info(f"Starting HYPO search: {len(sequences_dict)} {seq_word}")
 
     all_results = []
+    searched = set()  # (proxy record id, entrez_query) already searched
     circuit = BlastCircuit()  # shared by every MOTU of this run
     for seq_id, seq_dict in sequences_dict.items():
-        logger.info(f"Processing {seq_id} ({len(seq_dict['sequences'])} seqs)")
-        batches = create_sequence_batches(seq_dict["sequences"], batch_size)
+        query = seq_dict["entrez_query"]
+        records = [r for r in seq_dict["sequences"] if (r.id, query) not in searched]
+        # A skipped record counts as done: progress totals every record.
+        notify_progress(progress_handler, len(seq_dict["sequences"]) - len(records))
+        if not records:
+            logger.debug(f"Skipping {seq_id}: its proxies were searched already")
+            continue
+        searched.update((r.id, query) for r in records)
+        logger.info(f"Processing {seq_id} ({len(records)} seqs)")
+        batches = create_sequence_batches(records, batch_size)
         results, failed_ids = run_blast_batches(
             batches,
             n_threads=num_threads,
             evalue=10 ** (-ev_exponent),
             hitlist_size=max_hits,
-            entrez_query=seq_dict["entrez_query"],
+            entrez_query=query,
             progress_handler=progress_handler,
             circuit=circuit,
         )
-        # Report the proxy records whose BLAST errored: they are the cache key
-        # (seq_id of each proxy record, not the MOTU seq_id), so they are retried
-        # on the next run rather than cached as empty.
+        # Report the proxy records whose BLAST errored, with this MOTU's query:
+        # (proxy seq_id, entrez_query) is the cache key, so they are retried on
+        # the next run rather than cached as empty. A proxy shared by several
+        # MOTUs stays cached for those where it succeeded.
         if failed_ids and failure_sink is not None:
-            failure_sink.extend(failed_ids)
+            failure_sink.extend((rid, query) for rid in failed_ids)
         if not results.empty:
-            results = process_blast_results(
-                results, fasta_sequences=seq_dict["sequences"]
-            )
-            results["entrez_query"] = seq_dict["entrez_query"]
+            results = process_blast_results(results, fasta_sequences=records)
+            results["entrez_query"] = query
             all_results.append(results)
 
     if all_results:
@@ -214,7 +237,8 @@ def run_hypo_search(
         if ntop > 0:
             search_df = top_hit_per_group(
                 search_df,
-                keys=["seq_id", "scientificName"],
+                # Per cache item: hits under two queries do not compete.
+                keys=["seq_id", "scientificName", "entrez_query"],
                 sort=["identity_percentage", "query_cover"],
                 n=ntop,
             )
@@ -232,25 +256,29 @@ def run_hypo_search(
     table_name="hypo_merge",
     cache=FullCache(
         inherit_from=["hypo_search_params", "extra_params"],
-        fingerprint_on=["hypo_search_df"],
+        fingerprint_on=["hypo_search_df", "geo_df"],
     ),
 )
 @preserve_sequence_order("seq_id", "extra_df")
 def run_hypo_merge(
     hypo_search_df: pd.DataFrame,
     extra_df: pd.DataFrame,
+    geo_df: pd.DataFrame,
     hypo_search_params: dict | None = None,
     extra_params: dict | None = None,
 ) -> pd.DataFrame:
     """Map proxy sequence IDs back to target sequences via EXTRA.
 
-    Joins BLAST search results (keyed by seq_id_extra) with the EXTRA
-    DataFrame to recover the original seq_id, scientificName, and
-    target dna_sequence.
+    Joins BLAST search results (keyed by seq_id_extra and the Entrez query)
+    with the EXTRA DataFrame to recover the original seq_id, scientificName,
+    and target dna_sequence. Each seq_id gets only the hits found under its
+    own query: a proxy shared by two seq_ids is searched once per query.
 
     Args:
         hypo_search_df: Search results from run_hypo_search.
         extra_df: EXTRA DataFrame with proxy-to-target mapping.
+        geo_df: GEO DataFrame the search input was prepared from, for the
+            Entrez query of each seq_id (see hypo_queries).
         hypo_search_params: Params from run_hypo_search (for caching).
         extra_params: Params from finalize_extra_results (for caching).
 
@@ -269,13 +297,22 @@ def run_hypo_merge(
         "identity_percentage",
         "hit_def",
         "hit_url",
+        "entrez_query",
     ]
-    merge_df = extra_df.merge(
+    queries = hypo_queries(geo_df)
+    merge_df = extra_df.assign(
+        entrez_query=pd.Series(
+            [queries.get(s, "") for s in extra_df["seq_id"]],
+            index=extra_df.index,
+            dtype=object,
+        )
+    ).merge(
         hypo_search_df[search_cols],
-        left_on="seq_id_extra",
-        right_on="seq_id",
+        left_on=["seq_id_extra", "entrez_query"],
+        right_on=["seq_id", "entrez_query"],
         suffixes=("", "_blast"),
     )
+    merge_df = merge_df.drop(columns="entrez_query")
 
     # seq_id_blast is the duplicate from search (= seq_id_extra), drop it
     # scientificName_blast is the BLAST hit species (not the target species)
@@ -448,9 +485,9 @@ def run_hypo_check(
         hypo_filter_df: Filtered DataFrame from run_hypo_filter.
         ev_exponent: Negative exponent for E-value threshold.
         progress_handler: Optional progress tracker.
-        failure_sink: If provided, seq_ids whose BLAST errored are appended
-            here so the cache layer retries them instead of caching them as a
-            (false) no-hit.
+        failure_sink: If provided, the (seq_id, scientificName) of each check
+            whose BLAST errored is appended here, so the cache layer retries it
+            instead of caching it as a (false) no-hit.
 
     Returns:
         DataFrame with NCBI check results per species.
@@ -485,10 +522,11 @@ def run_hypo_check(
         )
 
         if blast_res is None:
-            # BLAST errored — report so this seq_id is retried, not recorded
-            # as a (false) no-hit.
+            # BLAST errored: report this (seq_id, species) so it is retried, not
+            # recorded as a (false) no-hit. The other species of the seq_id
+            # stay cached.
             if failure_sink is not None:
-                failure_sink.append(seq_id)
+                failure_sink.append((seq_id, sci_name))
             notify_progress(progress_handler)
             continue
 
@@ -666,7 +704,9 @@ def empty_hypo_results(extra_df: pd.DataFrame) -> pd.DataFrame:
     queried or cached.
     """
     search_df, _ = run_hypo_search({}, db_path=None)
-    merge_df, _ = run_hypo_merge(search_df, extra_df, extra_params={}, db_path=None)
+    merge_df, _ = run_hypo_merge(
+        search_df, extra_df, pd.DataFrame(), extra_params={}, db_path=None
+    )
     filter_df, _ = run_hypo_filter(merge_df, db_path=None)
     check_df, _ = run_hypo_check(filter_df, db_path=None)
     hypo_df, _ = finalize_hypo_results(filter_df, check_df, db_path=None)

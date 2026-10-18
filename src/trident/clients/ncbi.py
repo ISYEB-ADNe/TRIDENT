@@ -412,7 +412,8 @@ def _poll_blast_job(rid: str, rtoe: int | None = None) -> bytes:
         delay = BLAST_POLL_INTERVAL
         if not warned and time.monotonic() - start > BLAST_SLOW_JOB:
             logger.warning(
-                f"BLAST job {rid} still running after {BLAST_SLOW_JOB / 60:.0f} min"
+                f"BLAST job {rid} still running after {BLAST_SLOW_JOB / 60:.0f} min, "
+                f"status: {NCBI_BLAST_URL}?CMD=Get&RID={rid}&FORMAT_OBJECT=SearchInfo"
             )
             warned = True
         try:

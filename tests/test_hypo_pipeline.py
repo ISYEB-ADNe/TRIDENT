@@ -74,34 +74,46 @@ def test_prepare_empty_entrez_when_no_mol_species():
 # --- run_hypo_merge: proxy hit -> target species ---
 
 
-def test_merge_maps_proxy_to_target_and_renames_hit():
-    # EXTRA: target seq t1 / species "Gadus morhua" carried by proxy P1.
+def test_merge_maps_proxy_to_target_under_its_own_query():
+    """Each target gets the hits of its proxy under its own Entrez query: proxy
+    P1, shared by t1 and t2, is searched once per query, and t1 must not get
+    the hit found under t2's query."""
     extra_df = pd.DataFrame(
         {
-            "seq_id": ["t1"],
-            "scientificName": ["Gadus morhua"],
-            "seq_id_extra": ["P1"],
-            "dna_sequence_extra": ["ACGT"],
+            "seq_id": ["t1", "t2"],
+            "scientificName": ["Gadus morhua", "Gadus chalcogrammus"],
+            "seq_id_extra": ["P1", "P1"],
+            "dna_sequence_extra": ["ACGT", "ACGT"],
         }
     )
-    # Proxy P1 BLASTed to a (different) hit species.
+    geo_df = pd.DataFrame(
+        {
+            "seq_id": ["t1", "t2"],
+            "scientificName": ["Gadus macrocephalus", "Gadus ogac"],
+            "in_mol": [True, True],
+        }
+    )
     hypo_search_df = pd.DataFrame(
         {
-            "seq_id": ["P1"],
-            "scientificName": ["Gadus macrocephalus"],
-            "query_cover": [80.0],
-            "identity_percentage": [92.0],
-            "hit_def": ["def"],
-            "hit_url": ["url"],
+            "seq_id": ["P1", "P1"],
+            "scientificName": ["Gadus macrocephalus", "Gadus ogac"],
+            "query_cover": [80.0, 70.0],
+            "identity_percentage": [92.0, 90.0],
+            "hit_def": ["def", "def"],
+            "hit_url": ["url", "url"],
+            "entrez_query": ['("Gadus macrocephalus"[orgn])', '("Gadus ogac"[orgn])'],
         }
     )
-    out = _merge(hypo_search_df, extra_df)
+    out = _merge(hypo_search_df, extra_df, geo_df)
+    assert list(zip(out["seq_id"], out["scientificName_hit"])) == [
+        ("t1", "Gadus macrocephalus"),
+        ("t2", "Gadus ogac"),
+    ]
     row = out.iloc[0]
-    assert row["seq_id"] == "t1"  # target seq preserved
     assert row["scientificName"] == "Gadus morhua"  # target species preserved
-    assert row["scientificName_hit"] == "Gadus macrocephalus"  # BLAST hit renamed
     assert row["identity_percentage"] == 92.0
     assert not any(c.endswith("_blast") for c in out.columns)  # dupes dropped
+    assert "entrez_query" not in out.columns
 
 
 # --- run_hypo_filter: query_cover + identity thresholds ---
@@ -239,11 +251,16 @@ def test_finalize_after_a_check_that_found_nothing(monkeypatch):
 
 def test_hypo_search_failed_proxy_blast_is_not_cached(tmp_path, monkeypatch):
     """A proxy record whose BLAST errored must be retried, not cached as "no
-    hits". The cache key is the proxy record id, so that is what gets reported."""
+    hits". The cache key is (proxy record id, MOTU query): a proxy shared by
+    two MOTUs that errors under one stays cached under the other, and a proxy
+    shared under the same query is searched once."""
+    query_a, query_b = '"Gadus morhua"[orgn]', '"Gadus chalcogrammus"[orgn]'
+    searched = []
 
-    def blast(batches, **kwargs):
-        # P1 errors; P2 is searched and genuinely returns no hits.
-        return pd.DataFrame(), ["P1"]
+    def blast(batches, entrez_query=None, **kwargs):
+        searched.extend((r.id, entrez_query) for batch in batches for r in batch)
+        # P1 errors under query A only; every other search returns no hits.
+        return pd.DataFrame(), ["P1"] if entrez_query == query_a else []
 
     monkeypatch.setattr(hypo_pipeline, "run_blast_batches", blast)
     sequences = {
@@ -252,12 +269,55 @@ def test_hypo_search_failed_proxy_blast_is_not_cached(tmp_path, monkeypatch):
                 SeqRecord(Seq("ACGT"), id="P1"),
                 SeqRecord(Seq("TTGG"), id="P2"),
             ],
-            "entrez_query": '"Gadus morhua"[orgn]',
-        }
+            "entrez_query": query_a,
+        },
+        "t2": {
+            "sequences": [SeqRecord(Seq("ACGT"), id="P1")],
+            "entrez_query": query_b,
+        },
+        "t3": {
+            "sequences": [SeqRecord(Seq("TTGG"), id="P2")],
+            "entrez_query": query_a,
+        },
     }
     db_path = str(tmp_path / "hypo.db")
 
     df, _ = run_hypo_search(sequences, db_path=db_path)
 
-    assert df.attrs["failed_items"] == ["P1"]
-    assert set(view_cached_runs(db_path, "hypo_search")["seq_id"]) == {"P2"}
+    assert sorted(searched) == sorted(
+        [("P1", query_a), ("P1", query_b), ("P2", query_a)]
+    )
+    assert df.attrs["failed_items"] == [("P1", query_a)]
+    cached = view_cached_runs(db_path, "hypo_search")
+    assert sorted(zip(cached["seq_id"], cached["entrez_query"])) == sorted(
+        [("P1", query_b), ("P2", query_a)]
+    )
+
+
+# --- run_hypo_check: failure handling ---
+
+
+def test_hypo_check_failed_species_does_not_evict_its_siblings(tmp_path, monkeypatch):
+    """A check whose BLAST errored is retried; the other species checked for
+    the same sequence stay cached."""
+
+    def blast(batch, entrez_query=None, **kwargs):
+        return None if "Gadus ogac" in entrez_query else pd.DataFrame()
+
+    monkeypatch.setattr(hypo_pipeline, "submit_blast_batch", blast)
+    filter_df = pd.DataFrame(
+        {
+            "seq_id": ["t1", "t1"],
+            "scientificName": ["Gadus morhua", "Gadus ogac"],
+            "dna_sequence": ["ACGT", "ACGT"],
+        }
+    )
+    db_path = str(tmp_path / "hypo.db")
+
+    df, _ = run_hypo_check(filter_df, db_path=db_path)
+
+    assert df.attrs["failed_items"] == [("t1", "Gadus ogac")]
+    cached = view_cached_runs(db_path, "hypo_check")
+    assert list(zip(cached["seq_id"], cached["scientificName"])) == [
+        ("t1", "Gadus morhua")
+    ]

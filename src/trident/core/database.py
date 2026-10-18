@@ -268,20 +268,31 @@ def _failed_item_filter(
     """Build a predicate that returns True for cache items that failed.
 
     *failure_sink* holds the identifying values (e.g. species names) the
-    pipeline function reported as failed. They are matched against the first
-    ``match_map`` key of each cache item. With no failures or no match_map the
-    predicate is always False (nothing is treated as failed).
+    pipeline function reported as failed. A plain value is matched against the
+    first ``match_map`` key of each cache item, a tuple against all its keys in
+    the order of ``match_map``. With no failures or no match_map the predicate
+    is always False (nothing is treated as failed).
 
-    The first match_map key defines the failure granularity. This is
-    intentional: gbif failures are per-species but cached per (species,
-    extent), so matching the first key (species) drops every extent for a
-    failed species. The reporter must push values for that first key.
+    A plain value fails every item sharing that first key. This is intentional
+    for gbif: failures are per-species but cached per (species, extent), so a
+    failed species drops all its extents. A step whose first key recurs across
+    items that fail independently (the HYPO proxy records, shared by several
+    MOTUs) reports tuples instead, so a failure drops only its own item.
     """
-    failed_values = set(failure_sink or [])
-    if not failed_values or not match_map:
+    if not failure_sink or not match_map:
         return lambda item: False
-    key_field = next(iter(match_map.keys()))
-    return lambda item: item.get(key_field) in failed_values
+    keys = list(match_map.keys())
+    # Tuples compare as strings, like the run_id assignment of result rows.
+    failed_keys = {
+        tuple(str(v) for v in value)
+        for value in failure_sink
+        if isinstance(value, tuple)
+    }
+    failed_values = {value for value in failure_sink if not isinstance(value, tuple)}
+    return lambda item: (
+        item.get(keys[0]) in failed_values
+        or tuple(str(item.get(k)) for k in keys) in failed_keys
+    )
 
 
 def _find_cached_run_id(
@@ -578,6 +589,16 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
             # empty result with its columns.
             if db_path is None or not cache_items:
                 return func(*args, **kwargs), params
+
+            # One entry per distinct item: a duplicate would get its own inputs
+            # row, while its result rows all go to one run_id, so a cache hit
+            # could load the empty one.
+            cache_items = list(
+                {
+                    tuple(_params_to_sql_values(item).items()): item
+                    for item in cache_items
+                }.values()
+            )
 
             with get_connection(db_path) as conn:
                 # 0. Clear empty cache entries so failed items get retried

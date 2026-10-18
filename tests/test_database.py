@@ -455,8 +455,8 @@ def test_failed_items_exposed_on_result_for_this_call_only(db_path):
 
 
 def test_failed_items_leave_no_orphan_rows(db_path):
-    """A failure is matched on the first key only, so a sibling item that
-    succeeded is not cached either. Its rows must not be saved without an
+    """A plain failure value is matched on the first key only, so a sibling
+    item that succeeded is not cached either. Its rows must not be saved without an
     inputs row: their run_id would later be reused by another item, which
     would then load them as its own results."""
 

@@ -221,6 +221,7 @@ def hypo_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     hypo_merge_df, hypo_merge_params = pipe.run_hypo_merge(
         hypo_search_df,
         extra_df,
+        geo_df,
         hypo_search_params=hypo_search_params,
         extra_params=st.session_state.extra_params,
         force_rerun=force_rerun,
