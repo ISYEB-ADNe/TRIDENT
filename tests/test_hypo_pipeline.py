@@ -76,9 +76,9 @@ def test_prepare_empty_entrez_when_no_mol_species():
 
 
 def test_merge_maps_proxy_to_target_under_its_own_query():
-    """Each target gets the hits of its proxy under its own Entrez query: proxy
-    P1, shared by t1 and t2, is searched once per query, and t1 must not get
-    the hit found under t2's query."""
+    """Each target gets the hits of its proxy found under its own Entrez query:
+    for proxy P1, shared by t1 and t2, t1 does not get the hit found under t2's
+    query."""
     extra_df = pd.DataFrame(
         {
             "seq_id": ["t1", "t2"],
@@ -251,15 +251,14 @@ def test_finalize_after_a_check_that_found_nothing(monkeypatch):
 
 
 def test_hypo_search_failed_proxy_blast_is_not_cached(tmp_path, monkeypatch):
-    """A proxy record whose BLAST errored must be retried, not cached as "no
-    hits". The cache key is (proxy record id, MOTU query): a proxy shared by
-    two MOTUs that errors under one stays cached under the other, and a proxy
-    shared under the same query is searched once."""
+    """A proxy record whose BLAST errored is retried, not cached as "no hits".
+    The cache key is (proxy record id, MOTU query): a proxy shared by two MOTUs
+    that errors under one query stays cached under the other."""
     query_a, query_b = '"Gadus morhua"[orgn]', '"Gadus chalcogrammus"[orgn]'
-    searched = []
 
-    def blast(batch, batch_id, circuit, progress_handler=None, entrez_query=None, **kw):
-        searched.extend((r.id, entrez_query) for r in batch)
+    def blast(
+        batch, batch_id, circuit, progress_handler=None, entrez_query=None, **kwargs
+    ):
         # P1 errors under query A only; every other search returns no hits.
         failed = [r.id for r in batch if r.id == "P1" and entrez_query == query_a]
         return [], failed
@@ -277,18 +276,11 @@ def test_hypo_search_failed_proxy_blast_is_not_cached(tmp_path, monkeypatch):
             "sequences": [SeqRecord(Seq("ACGT"), id="P1")],
             "entrez_query": query_b,
         },
-        "t3": {
-            "sequences": [SeqRecord(Seq("TTGG"), id="P2")],
-            "entrez_query": query_a,
-        },
     }
     db_path = str(tmp_path / "hypo.db")
 
     df, _ = run_hypo_search(sequences, db_path=db_path)
 
-    assert sorted(searched) == sorted(
-        [("P1", query_a), ("P1", query_b), ("P2", query_a)]
-    )
     assert df.attrs["failed_items"] == [("P1", query_a)]
     cached = view_cached_runs(db_path, "hypo_search")
     assert sorted(zip(cached["seq_id"], cached["entrez_query"])) == sorted(
@@ -296,7 +288,7 @@ def test_hypo_search_failed_proxy_blast_is_not_cached(tmp_path, monkeypatch):
     )
 
 
-# --- run_hypo_search: parallel jobs ---
+# --- run_hypo_search: BLAST jobs ---
 
 
 def test_hypo_search_runs_motus_in_parallel(tmp_path, monkeypatch):
@@ -304,7 +296,9 @@ def test_hypo_search_runs_motus_in_parallel(tmp_path, monkeypatch):
     meanwhile, instead of waiting for it."""
     other_done = threading.Event()
 
-    def blast(batch, batch_id, circuit, progress_handler=None, **kwargs):
+    def blast(
+        batch, batch_id, circuit, progress_handler=None, entrez_query=None, **kwargs
+    ):
         if batch[0].id == "P1":  # t1's job is slow until t2's job has run
             assert other_done.wait(timeout=5), "t2 waited for t1's job"
         else:
@@ -323,19 +317,25 @@ def test_hypo_search_runs_motus_in_parallel(tmp_path, monkeypatch):
 
 
 def test_hypo_search_batches_motus_sharing_a_query(tmp_path, monkeypatch):
-    """MOTUs with the same Entrez query fill one batch instead of sending one
-    small NCBI job each; a different query gets its own batch."""
+    """MOTUs with the same Entrez query fill one batch, and a proxy they share
+    is sent once; a different query gets its own batch."""
     sent = []
 
-    def blast(batch, batch_id, circuit, progress_handler=None, entrez_query=None, **kw):
+    def blast(
+        batch, batch_id, circuit, progress_handler=None, entrez_query=None, **kwargs
+    ):
         sent.append((entrez_query, [r.id for r in batch]))
         return [], []
 
     monkeypatch.setattr(hypo_pipeline, "blast_batch", blast)
+    p1, p2, p3 = (
+        SeqRecord(Seq(s), id=i)
+        for s, i in [("ACGT", "P1"), ("TTGG", "P2"), ("GGCC", "P3")]
+    )
     sequences = {
-        "t1": {"sequences": [SeqRecord(Seq("ACGT"), id="P1")], "entrez_query": "a"},
-        "t2": {"sequences": [SeqRecord(Seq("TTGG"), id="P2")], "entrez_query": "a"},
-        "t3": {"sequences": [SeqRecord(Seq("GGCC"), id="P3")], "entrez_query": "b"},
+        "t1": {"sequences": [p1, p2], "entrez_query": "a"},
+        "t2": {"sequences": [p2], "entrez_query": "a"},
+        "t3": {"sequences": [p3], "entrez_query": "b"},
     }
 
     run_hypo_search(sequences, batch_size=10, db_path=str(tmp_path / "hypo.db"))
@@ -343,7 +343,7 @@ def test_hypo_search_batches_motus_sharing_a_query(tmp_path, monkeypatch):
     assert sorted(sent) == [("a", ["P1", "P2"]), ("b", ["P3"])]
 
 
-# --- run_hypo_check: failure handling ---
+# --- run_hypo_check ---
 
 
 def test_hypo_check_failed_species_does_not_evict_its_siblings(tmp_path, monkeypatch):

@@ -27,6 +27,7 @@ from trident.clients.gbif import (
 from trident.core.constants import GBIF_MIN_OCCURRENCES
 from trident.core.database import save_to_db, FullCache, CustomCache, warn_empty_params
 from trident.core.utils import (
+    pluralize,
     ensure_columns,
     reorder_taxonomy_columns,
     preserve_sequence_order,
@@ -488,7 +489,7 @@ def build_geo_summary(
     # 4. Column Formatting
     summary_pivot.columns = [get_extent_column_name(c) for c in summary_pivot.columns]
 
-    seq_word = "sequence" if len(summary_pivot) == 1 else "sequences"
+    seq_word = pluralize(len(summary_pivot), "sequence")
     logger.info(f"Generated GEO summary for {len(summary_pivot)} unique {seq_word}.")
 
     return summary_pivot

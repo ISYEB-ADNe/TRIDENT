@@ -21,6 +21,7 @@ from loguru import logger
 from trident.core.database import save_to_db, PartialCache, FullCache
 from trident.core.http import create_session
 from trident.core.utils import (
+    pluralize,
     preserve_sequence_order,
     top_hit_per_group,
     normalize_name,
@@ -55,7 +56,7 @@ def prepare_worms_input(df: pd.DataFrame) -> list[str]:
         genera = df["genus"]
     # A hit without a name has no genus to expand.
     genera = genera.dropna().unique().tolist()
-    genus_word = "genus" if len(genera) == 1 else "genera"
+    genus_word = pluralize(len(genera), "genus", "genera")
     logger.debug(f"Prepared WoRMS input: {len(genera)} unique {genus_word}")
     return genera
 
@@ -322,7 +323,7 @@ def run_worms_search(
     Returns:
         DataFrame with WoRMS species data for the requested genera.
     """
-    genus_word = "genus" if len(genera_list) == 1 else "genera"
+    genus_word = pluralize(len(genera_list), "genus", "genera")
     logger.info(f"Starting WoRMS search: {len(genera_list)} unique {genus_word}")
 
     worms_search_df, failed_genera = get_species_from_genus_list(

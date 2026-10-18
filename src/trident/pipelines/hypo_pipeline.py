@@ -34,6 +34,7 @@ from trident.core.constants import (
 from trident.core import stop
 from trident.core.database import save_to_db, FullCache, CustomCache
 from trident.core.utils import (
+    pluralize,
     preserve_sequence_order,
     notify_progress,
     group_species_by_flag,
@@ -197,7 +198,7 @@ def run_hypo_search(
     Returns:
         DataFrame with NCBI BLAST results for proxy sequences.
     """
-    seq_word = "sequence" if len(sequences_dict) == 1 else "sequences"
+    seq_word = pluralize(len(sequences_dict), "sequence")
     logger.info(f"Starting HYPO search: {len(sequences_dict)} {seq_word}")
 
     # Batches are made per Entrez query, across MOTUs: MOTUs with the same MOL
@@ -213,9 +214,7 @@ def run_hypo_search(
             if (rec.id, query) not in owner:
                 owner[(rec.id, query)] = seq_id
                 by_query.setdefault(query, []).append(rec)
-    # A skipped record counts as done: progress totals every record.
     n_shared = n_records - len(owner)
-    notify_progress(progress_handler, n_shared)
 
     batches = [
         (batch, query)
@@ -233,7 +232,7 @@ def run_hypo_search(
     def job(k, batch, query):
         # The label names the MOTUs, so every log line of the batch says which.
         motus = ", ".join(dict.fromkeys(owner[(r.id, query)] for r in batch))
-        seqs = "seq" if len(batch) == 1 else "seqs"
+        seqs = pluralize(len(batch), "seq")
         label = f"{k}/{len(batches)} ({len(batch)} {seqs}: {motus})"
         return blast_batch(
             batch, label, circuit, progress_handler, entrez_query=query, **blast_kwargs

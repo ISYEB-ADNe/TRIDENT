@@ -8,6 +8,7 @@ All logic is delegated to the trident.pipelines.geo_pipeline module.
 import pandas as pd
 import streamlit as st
 
+from trident.core.utils import pluralize
 from trident.core import config, stop
 import trident.pipelines as pipe
 from trident.clients.gbif import (
@@ -660,7 +661,7 @@ def display_missing_species():
     n_mol = len(mol_seqs)
     title = f"⚠️ {len(missing)} TAX species not found in GBIF"
     if n_mol:
-        title += f" ({n_mol} direct MOL {'hit' if n_mol == 1 else 'hits'})"
+        title += f" ({n_mol} direct MOL {pluralize(n_mol, 'hit')})"
     with st.expander(title):
         st.caption(
             "No confident GBIF match for these names, so they are absent from GEO."

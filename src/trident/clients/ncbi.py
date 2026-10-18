@@ -24,7 +24,12 @@ from trident.core.constants import (
     NCBI_QUERY_COVER,
     NCBI_METHOD,
 )
-from trident.core.utils import extract_specific_epithet, notify_progress, to_binomial
+from trident.core.utils import (
+    extract_specific_epithet,
+    notify_progress,
+    to_binomial,
+    pluralize,
+)
 
 
 ### CREDENTIALS ###
@@ -127,7 +132,7 @@ def create_sequence_batches(
         batches.append(sequences[start:end])
         start = end
 
-    batch_word = "batch" if len(batches) == 1 else "batches"
+    batch_word = pluralize(len(batches), "batch", "batches")
     logger.debug(f"Created {len(batches)} {batch_word}: {[len(b) for b in batches]}")
     return batches
 
@@ -723,7 +728,7 @@ def run_blast_batches(
     if not batches:
         return pd.DataFrame(columns=BLAST_RAW_COLUMNS), []
     n_threads = min(n_threads, len(batches))
-    n_threads_str = "thread" if n_threads == 1 else "threads"
+    n_threads_str = pluralize(n_threads, "thread")
     logger.debug(f"Starting parallel execution with {n_threads} {n_threads_str}")
 
     if circuit is None:

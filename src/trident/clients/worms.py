@@ -9,6 +9,7 @@ from loguru import logger
 from trident.core import stop
 from trident.core.http import create_session, with_optional_session
 from trident.core.utils import (
+    pluralize,
     extract_specific_epithet,
     normalize_name,
     notify_progress,
@@ -522,7 +523,7 @@ def get_species_from_genus_list(
                 continue
 
             all_records.extend(children)
-            record_word = "record" if len(children) == 1 else "records"
+            record_word = pluralize(len(children), "record")
             logger.info(f"Retrieved {len(children)} {record_word} for genus '{genus}'")
 
         except Exception as e:
@@ -537,7 +538,7 @@ def get_species_from_genus_list(
 
     # 3. Filter and build taxonomy DataFrame
     df, kept, skipped = _build_taxonomy_dataframe(all_records, accepted_only)
-    record_word = "record" if len(all_records) == 1 else "records"
+    record_word = pluralize(len(all_records), "record")
     logger.info(
         f"Completed: {kept} species kept, {skipped} skipped from {len(all_records)} {record_word}"
     )

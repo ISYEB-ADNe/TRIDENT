@@ -74,7 +74,24 @@ def top_hit_per_group(
     return top
 
 
+def pluralize(n: int, one: str, many: str | None = None) -> str:
+    """The word for *n* items: *one* for exactly 1, else *many* (default
+    *one* + "s"), e.g. ``f"{n} {pluralize(n, 'genus', 'genera')}"``."""
+    return one if n == 1 else many or one + "s"
+
+
 _progress_lock = threading.Lock()
+
+
+def set_progress_total(handler: dict | object | None, total: int) -> None:
+    """Set the total of a progress tracker: the ``"total"`` key of a dict
+    tracker, the ``total`` attribute of a tqdm-like one. No-op otherwise."""
+    with _progress_lock:
+        if isinstance(handler, dict) and "total" in handler:
+            handler["total"] = total
+        elif hasattr(handler, "total") and hasattr(handler, "refresh"):
+            handler.total = total
+            handler.refresh()
 
 
 def notify_progress(handler: dict | object | None, n: int = 1) -> None:

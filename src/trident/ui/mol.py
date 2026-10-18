@@ -7,6 +7,7 @@ This module handles only UI rendering and user interaction.
 import streamlit as st
 
 
+from trident.core.utils import pluralize
 from trident.clients import ncbi
 from trident.clients.ncbi import set_ncbi_email
 from trident.core import config
@@ -156,17 +157,17 @@ def ncbi_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     email = config.contact_email()
     total_sequences = len(sequences)
     progress_info = {"current": 0, "total": total_sequences}
-    seq_str = "sequence" if total_sequences <= 1 else "sequences"
     progress_placeholder = st.empty()
 
     # 3. Run NCBI search in a background thread
     def _poll():
-        curr_seq = progress_info["current"]
-        if total_sequences > 0:
-            percent = min(curr_seq / total_sequences, 1.0)
+        curr_seq, total = progress_info["current"], progress_info["total"]
+        if total > 0:
+            percent = min(curr_seq / total, 1.0)
             progress_bar.progress(
                 percent,
-                text=f"Search: {curr_seq}/{total_sequences} {seq_str} blasted...",
+                text=f"Search: {curr_seq}/{total} "
+                f"{pluralize(total, 'sequence')} blasted...",
             )
 
     ncbi_search_df, ncbi_search_params = run_with_progress(

@@ -7,6 +7,7 @@ This module handles only UI rendering and user interaction.
 import streamlit as st
 
 
+from trident.core.utils import pluralize
 from trident.core import config
 import trident.pipelines as pipe
 
@@ -51,11 +52,11 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
         res_info = {"current": 0, "total": len(res_names)}
 
         def _res_poll():
-            curr = res_info["current"]
-            if res_names:
+            curr, total = res_info["current"], res_info["total"]
+            if total > 0:
                 progress_bar.progress(
-                    min(curr / len(res_names), 1.0),
-                    text=f"Resolving {curr}/{len(res_names)} names against WoRMS",
+                    min(curr / total, 1.0),
+                    text=f"Resolving {curr}/{total} names against WoRMS",
                 )
 
         resolution_df, _ = run_with_progress(
@@ -84,16 +85,16 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
     genera_list = pipe.prepare_worms_input(mol_df)
     total_names = len(genera_list)
     progress_info = {"current": 0, "total": total_names}
-    name_str = "genus" if total_names <= 1 else "genera"
 
     # 3. Background Execution
     def _poll():
-        curr = progress_info["current"]
-        if total_names > 0:
-            percent = min(curr / total_names, 1.0)
+        curr, total = progress_info["current"], progress_info["total"]
+        if total > 0:
+            percent = min(curr / total, 1.0)
             progress_bar.progress(
                 percent,
-                text=f"Search: {curr}/{total_names} {name_str} expanded",
+                text=f"Search: {curr}/{total} {pluralize(total, 'genus', 'genera')} "
+                "expanded",
             )
 
     worms_search_df, worms_search_params = run_with_progress(
@@ -305,9 +306,7 @@ def render_worms_metrics():
     if not renamed.empty:
         merged = summary.n_names - summary.n_species
         merged_text = (
-            f" ({merged} {'synonym' if merged == 1 else 'synonyms'} merged)"
-            if merged
-            else ""
+            f" ({merged} {pluralize(merged, 'synonym')} merged)" if merged else ""
         )
         st.caption(
             f"{summary.n_names} MOL names = {summary.n_species} WoRMS accepted "
@@ -356,7 +355,7 @@ def display_genus_homonyms():
         return
     n_genera = homonyms["genus"].nunique()
     with st.expander(
-        f"⚠️ {n_genera} {'genus' if n_genera == 1 else 'genera'} with homonyms in WoRMS",
+        f"⚠️ {n_genera} {pluralize(n_genera, 'genus', 'genera')} with homonyms in WoRMS",
         expanded=False,
     ):
         st.caption(
@@ -405,7 +404,7 @@ def display_mol_rejected(seq_id=None):
     dropped = st.session_state.tax_params.get("tax_drop_mol_rejected", False)
     if seq_id is None:
         title = (
-            f"🚫 {n_rows} {'row' if n_rows == 1 else 'rows'} ({n_species} species) "
+            f"🚫 {n_rows} {pluralize(n_rows, 'row')} ({n_species} species) "
             "already rejected by MOL"
         )
     else:

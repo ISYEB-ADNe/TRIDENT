@@ -51,12 +51,12 @@ def bold_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
 
     # Background Execution
     def _poll():
-        curr = progress_info["current"]
-        if total_names > 0:
-            percent = min(curr / total_names, 1.0)
+        curr, total = progress_info["current"], progress_info["total"]
+        if total > 0:
+            percent = min(curr / total, 1.0)
             progress_bar.progress(
                 percent,
-                text=f"Queried {curr}/{total_names} species from BOLD...",
+                text=f"Queried {curr}/{total} species from BOLD...",
             )
 
     bold_search_df, bold_search_params = run_with_progress(
@@ -271,12 +271,12 @@ def bold_filter_job(*, force_rerun, retry_empty=False, status, progress_bar, par
 
     # Background Execution
     def _poll():
-        curr = progress_info["current"]
-        if total_species > 0:
-            percent = min(curr / total_species, 1.0)
+        curr, total = progress_info["current"], progress_info["total"]
+        if total > 0:
+            percent = min(curr / total, 1.0)
             progress_bar.progress(
                 percent,
-                text=f"Filtering: {curr}/{total_species} species...",
+                text=f"Filtering: {curr}/{total} species...",
             )
 
     bold_filter_df, bold_filter_params = run_with_progress(

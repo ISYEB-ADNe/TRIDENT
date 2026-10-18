@@ -8,7 +8,7 @@ from loguru import logger
 
 from trident.core import stop
 from trident.core.http import create_session, with_optional_session
-from trident.core.utils import extract_specific_epithet, notify_progress
+from trident.core.utils import extract_specific_epithet, notify_progress, pluralize
 
 
 ### BOLD API ###
@@ -292,7 +292,7 @@ def get_records_from_species_list(
         if all_records
         else pd.DataFrame(columns=BOLD_RECORD_COLUMNS)
     )
-    record_word = "record" if len(bold_df) == 1 else "records"
+    record_word = pluralize(len(bold_df), "record")
     logger.info(
         f"BOLD retrieval complete: {len(bold_df)} {record_word}, {len(failed_species)} failed"
     )

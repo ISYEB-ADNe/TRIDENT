@@ -5,6 +5,7 @@ import pytest
 
 from datetime import datetime, timezone
 
+from trident.core.utils import notify_progress
 from trident.core.database import (
     CustomCache,
     FullCache,
@@ -150,6 +151,26 @@ def test_partial_cache_caches_per_item(db_path):
     df2, _ = my_step(["a", "b", "c", "d"], db_path=db_path)
     assert len(df2) == 4
     assert executed_items == ["d"]
+
+
+def test_progress_total_counts_only_the_items_executed(db_path):
+    """A resumed run's progress bar ends full: its total is the items this
+    call executes, not the cached ones."""
+
+    @save_to_db(
+        "test_progress",
+        cache=PartialCache(items_kwarg="items", item_key="name"),
+    )
+    def my_step(items, progress_handler=None):
+        for _ in items:
+            notify_progress(progress_handler)
+        return pd.DataFrame({"name": items})
+
+    my_step(["a", "b"], db_path=db_path)
+    progress = {"current": 0, "total": 3}
+    my_step(["a", "b", "c"], progress_handler=progress, db_path=db_path)
+
+    assert progress == {"current": 1, "total": 1}
 
 
 def test_partial_cache_with_extract(db_path):

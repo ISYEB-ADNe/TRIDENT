@@ -191,18 +191,17 @@ def hypo_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     geo_df = st.session_state.geo_df
     sequences_dict = pipe.prepare_hypo_input(extra_df, geo_df)
     email = config.contact_email()
-    total_sequences = len(extra_df)
-    progress_info = {"current": 0, "total": total_sequences}
-    name_str = "sequence" if total_sequences == 1 else "sequences"
+    # save_to_db sets the total to the searches this run executes.
+    progress_info = {"current": 0, "total": 0}
 
     # 3. Search (background thread for progress tracking)
     def _poll():
-        curr = progress_info["current"]
-        if total_sequences > 0:
-            percent = min(curr / total_sequences, 1.0)
+        curr, total = progress_info["current"], progress_info["total"]
+        if total > 0:
+            percent = min(curr / total, 1.0)
             progress_bar.progress(
                 percent,
-                text=f"Search: {curr} / {total_sequences} {name_str} blasted...",
+                text=f"Search: {curr} / {total} proxy searches done...",
             )
 
     hypo_search_df, hypo_search_params = run_with_progress(
@@ -542,16 +541,15 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
     )
     total_sequences = len(sequences_df)
     progress_info = {"current": 0, "total": total_sequences}
-    name_str = "sequence" if total_sequences == 1 else "sequences"
 
     # Check (background thread for progress tracking)
     def _poll():
-        curr = progress_info["current"]
-        if total_sequences > 0:
-            percent = min(curr / total_sequences, 1.0)
+        curr, total = progress_info["current"], progress_info["total"]
+        if total > 0:
+            percent = min(curr / total, 1.0)
             progress_bar.progress(
                 percent,
-                text=f"Check: {curr} / {total_sequences} {name_str} processed...",
+                text=f"Check: {curr} / {total} species checks done...",
             )
 
     # Save check results

@@ -14,7 +14,7 @@ import pandas as pd
 from loguru import logger
 
 from trident.core import config
-from trident.core.utils import ensure_columns
+from trident.core.utils import ensure_columns, set_progress_total
 
 
 # ---------------------------------------------------------------------------
@@ -556,15 +556,21 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
     and ``retry_empty`` (bool).
 
     If the wrapped function declares a ``failure_sink`` parameter, it receives a
-    list to append the identifying values of items whose query failed; those
-    items are excluded from caching and retried on the next run (see
-    ``_failed_item_filter``). The values reported during this call are also
+    list to append the identifying values of items whose query failed: a value
+    of the first ``match_map`` key, or a tuple of all its keys to fail one item
+    only. Those items are excluded from caching and retried on the next run
+    (see ``_failed_item_filter``). The values reported during this call are also
     exposed as ``df.attrs["failed_items"]`` on the returned DataFrame, so the
     UI can tell failed items from genuinely empty ones. The attribute lives in
     memory only (not stored in SQLite) and describes this call: items that
     failed in an earlier call are re-executed, so they appear again only if
     they fail again. pandas may copy ``attrs`` onto frames derived from the
     result; only read it on the frame returned here.
+
+    A ``progress_handler`` (a dict with a ``"total"`` key, or tqdm-like) gets
+    as total the number of items this call executes, so a run resumed from the
+    cache ends its progress bar full. The function must count one step per
+    item.
 
     An empty result keeps its columns: each step records the columns its
     function returns, and they are restored on a cache hit. With no items to
@@ -630,6 +636,12 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
                 logger.info(
                     f"{func.__name__}: {len(cached_dfs)} cached, "
                     f"{len(uncached_items)} to execute"
+                )
+                # A progress tracker counts items as they are executed, so its
+                # total is what this call executes: a resumed run starts at 0
+                # and ends at its total, cached items aside.
+                set_progress_total(
+                    bound_kwargs.get("progress_handler"), len(uncached_items)
                 )
 
                 # 2. Execute uncached items. A function that accepts a

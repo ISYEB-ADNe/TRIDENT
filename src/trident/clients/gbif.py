@@ -13,6 +13,7 @@ from loguru import logger
 
 
 from trident.core.constants import GBIF_CONFIDENCE
+from trident.core.utils import pluralize
 from trident.core import stop
 from trident.core.http import create_session
 from trident.core.utils import ensure_columns, extract_specific_epithet
@@ -417,7 +418,7 @@ def filter_taxon_matches(
     filtered_df = filtered_df[_GBIF_TAXON_COLS]
 
     dups_removed = before_dedup - len(filtered_df)
-    dups_str = "duplicates" if dups_removed != 1 else "duplicate"
+    dups_str = pluralize(dups_removed, "duplicate")
     dups_message = f" ({dups_removed} {dups_str} removed)" if dups_removed > 0 else ""
     logger.info(
         f"Retained {len(filtered_df)}/{len(matches_df)} taxon keys after quality filtering{dups_message}"

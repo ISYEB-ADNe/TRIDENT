@@ -20,6 +20,7 @@ import pandas as pd
 import streamlit as st
 from loguru import logger
 
+from trident.core.utils import pluralize
 from trident.core import stop
 from trident.logging import get_log_level
 
@@ -621,7 +622,7 @@ def record_empty_step(
     """
     failed = (st.session_state.get(failed_key) or []) if failed_key else []
     if failed:
-        query_word = "query" if len(failed) == 1 else "queries"
+        query_word = pluralize(len(failed), "query", "queries")
         st.warning(
             f"⚠️ {len(failed)} {query_word} of the previous step failed, so its "
             "list may be empty only because of them. Re-run that step to retry "
@@ -666,7 +667,7 @@ def show_failed_items_banner(
     if len(failed) > 10:
         shown += f", ... (+{len(failed) - 10} more)"
     request = f"the {source} request" if source else "the request"
-    label = item if len(failed) == 1 else items
+    label = pluralize(len(failed), item, items)
     st.warning(
         f"⚠️ {len(failed)} {label} could not be queried: {request} failed "
         "after retries, so they were not saved. Click **Re-run with Same "

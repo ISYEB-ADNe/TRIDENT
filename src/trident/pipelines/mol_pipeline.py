@@ -36,7 +36,7 @@ from trident.core.constants import (
     NCBI_LOW_IDENTITY_THRESHOLD,
 )
 from trident.core.database import save_to_db, PartialCache, FullCache
-from trident.core.utils import preserve_sequence_order
+from trident.core.utils import preserve_sequence_order, pluralize
 
 
 ### DATA PREPARATION ###
@@ -98,7 +98,7 @@ def run_ncbi_search(
     Returns:
         DataFrame of processed BLAST hits with taxonomy and alignment metrics.
     """
-    sequence_word = "sequence" if len(sequences) == 1 else "sequences"
+    sequence_word = pluralize(len(sequences), "sequence")
     logger.info(f"Starting NCBI BLAST: {len(sequences)} {sequence_word}")
 
     batches = create_sequence_batches(sequences, batch_size)
