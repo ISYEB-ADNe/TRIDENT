@@ -167,7 +167,7 @@ def get_aphia_record_by_ncbi_taxid(
 
 
 # Ranks below species: a record of these ranks is resolved to its species.
-_INFRASPECIFIC_RANKS = {"Subspecies", "Variety", "Forma", "Natio"}
+INFRASPECIFIC_RANKS = {"Subspecies", "Variety", "Forma", "Natio"}
 
 
 def _species_of(record: dict) -> tuple[str, int] | None:
@@ -248,7 +248,7 @@ def resolve_accepted_name(
 
     accepted = record.get("valid_name") or record.get("scientificname") or taxon_name
     aphia_id = record.get("valid_AphiaID") or record.get("AphiaID")
-    if matched_by == "ncbi_taxid" and record.get("rank") in _INFRASPECIFIC_RANKS:
+    if matched_by == "ncbi_taxid" and record.get("rank") in INFRASPECIFIC_RANKS:
         species = _species_of(record)
         if species is None:
             return not_found

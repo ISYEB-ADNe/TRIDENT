@@ -16,7 +16,7 @@ import pandas as pd
 from loguru import logger
 
 from trident.clients.worms import (
-    _INFRASPECIFIC_RANKS,
+    INFRASPECIFIC_RANKS,
     clean_authorships,
     get_aphia_records,
     pick_record,
@@ -347,6 +347,21 @@ GBIF_EXPORT_COLS = [
 ]
 
 
+def _lone_taxon(row) -> dict:
+    """The taxon of a sequence with one species: that species' own row."""
+    result = {col: row.get(col) for col in TAXONOMY_HIERARCHY}
+    for col in (
+        "scientificName",
+        "scientificNameAuthorship",
+        "taxonRank",
+        "taxonID",
+        "taxonID_db",
+    ):
+        result[col] = row.get(col)
+    result["identificationRemarks"] = pd.NA
+    return result
+
+
 def _find_common_taxonomy(group: pd.DataFrame) -> dict:
     """Find the lowest common taxonomic rank for a group of species rows.
 
@@ -356,16 +371,7 @@ def _find_common_taxonomy(group: pd.DataFrame) -> dict:
     species_names = group["scientificName"].dropna().unique().tolist()
 
     if len(species_names) <= 1:
-        # Single species or empty — keep as-is
-        row = group.iloc[0]
-        result = {col: row.get(col) for col in TAXONOMY_HIERARCHY}
-        result["scientificName"] = row.get("scientificName")
-        result["scientificNameAuthorship"] = row.get("scientificNameAuthorship")
-        result["taxonRank"] = row.get("taxonRank")
-        result["taxonID"] = row.get("taxonID")
-        result["taxonID_db"] = row.get("taxonID_db")
-        result["identificationRemarks"] = pd.NA
-        return result
+        return _lone_taxon(group.iloc[0])
 
     # Walk the hierarchy top-down: a level is common only when every level
     # above it is too, so homonyms (e.g. the genus Liparis, a fish and a plant)
@@ -373,14 +379,19 @@ def _find_common_taxonomy(group: pd.DataFrame) -> dict:
     result = {col: pd.NA for col in TAXONOMY_HIERARCHY}
     resolved_rank = None
     resolved_name = None
+    # Plain lists: pandas calls on these small groups cost more than the work.
+    filled = {
+        col: [v for v in group[col].tolist() if pd.notna(v)]
+        for col in TAXONOMY_HIERARCHY
+    }
+    genus_only = any(" " not in str(name).strip() for name in species_names)
 
     for col in TAXONOMY_HIERARCHY:
-        values = group[col].dropna().unique()
+        values = list(dict.fromkeys(filled[col]))
         # An epithet names a species only within a known genus, and not when a
         # candidate is a genus alone (a one-word name keeps it at genus).
         if len(values) > 1 or (
-            col == "specificEpithet"
-            and (resolved_rank != "genus" or _has_genus_only(group))
+            col == "specificEpithet" and (resolved_rank != "genus" or genus_only)
         ):
             break
         if len(values) == 1:
@@ -410,21 +421,15 @@ def _find_common_taxonomy(group: pd.DataFrame) -> dict:
     return result
 
 
-def _has_genus_only(group: pd.DataFrame) -> bool:
-    """Whether a candidate is named by a genus alone."""
-    names = group["scientificName"].dropna().astype(str).str.strip()
-    return bool((~names.str.contains(" ")).any())
-
-
 # WoRMS ranks at species level or below, lower case.
-SPECIES_RANKS = {"species"} | {rank.lower() for rank in _INFRASPECIFIC_RANKS}
+SPECIES_RANKS = {"species"} | {rank.lower() for rank in INFRASPECIFIC_RANKS}
 
 
 def resolve_sequences(results_df: pd.DataFrame) -> pd.DataFrame:
     """Give each sequence its number of species and the taxon they resolve to.
 
     The taxon and its rank are the ones the GBIF export writes for the sequence
-    (same routine): the species itself, or the lowest taxon its species share,
+    (same routines): the species itself, or the lowest taxon its species share,
     empty when none is shared or no species is assigned. species_level is True
     when that taxon is a species or below (a species and its subspecies resolve
     to the species), and species then names that species by genus and epithet,
@@ -434,23 +439,36 @@ def resolve_sequences(results_df: pd.DataFrame) -> pd.DataFrame:
         DataFrame with columns: seq_id, n_species, taxonRank, scientificName,
         species_level, species.
     """
+    species_rows = results_df.dropna(subset=["scientificName"])
+    n_species = species_rows.groupby("seq_id")["scientificName"].nunique()
+
+    # A lone species is its own taxon, taken from its first row as the GBIF
+    # export does; only sequences with several species need the common taxon.
+    single = n_species.index[n_species == 1]
+    first_rows = species_rows[species_rows["seq_id"].isin(single)].drop_duplicates(
+        "seq_id"
+    )
+    common = {row["seq_id"]: _lone_taxon(row) for row in first_rows.to_dict("records")}
+    several = species_rows[species_rows["seq_id"].isin(n_species.index[n_species > 1])]
+    for seq_id, group in several.groupby("seq_id", sort=False):
+        common[seq_id] = _find_common_taxonomy(group)
+
     rows = []
-    for seq_id, group in results_df.groupby("seq_id", sort=False):
-        species_rows = group.dropna(subset=["scientificName"])
-        n_species = species_rows["scientificName"].nunique()
-        row = {"seq_id": seq_id, "n_species": n_species, "species_level": False}
-        if n_species:
-            common = _find_common_taxonomy(species_rows)
-            row["taxonRank"] = common["taxonRank"]
-            row["scientificName"] = common["scientificName"]
-            rank = str(common["taxonRank"]).lower()
-            name = str(common["scientificName"])
+    for seq_id in results_df["seq_id"].dropna().drop_duplicates():
+        n = int(n_species.get(seq_id, 0))
+        row = {"seq_id": seq_id, "n_species": n, "species_level": False}
+        if n:
+            taxon = common[seq_id]
+            row["taxonRank"] = taxon["taxonRank"]
+            row["scientificName"] = taxon["scientificName"]
+            rank = str(taxon["taxonRank"]).lower()
+            name = str(taxon["scientificName"])
             # A lone binomial whose rank WoRMS left empty is still a species.
             row["species_level"] = rank in SPECIES_RANKS or (
-                n_species == 1 and pd.isna(common["taxonRank"]) and " " in name
+                n == 1 and pd.isna(taxon["taxonRank"]) and " " in name
             )
             if row["species_level"]:
-                genus, epithet = common["genus"], common["specificEpithet"]
+                genus, epithet = taxon["genus"], taxon["specificEpithet"]
                 row["species"] = (
                     f"{genus} {epithet}"
                     if pd.notna(genus) and pd.notna(epithet)

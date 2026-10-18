@@ -132,8 +132,8 @@ def _assignments(curated_df, results_df, threshold):
             note.append(f"best identity below {threshold}%")
         if row["below_mol"]:
             note.append("HYPO species below the MOL filter")
-        if row["n_species"] > 1 and pd.isna(row["taxonRank"]):
-            note.append("no shared taxon")
+        if pd.isna(row["taxonRank"]) and not row["species_level"]:
+            note.append("no shared taxon" if row["n_species"] > 1 else "rank unknown")
         notes.append(", ".join(note))
     table["note"] = notes
     return table
@@ -236,7 +236,14 @@ def show_summary(assignments, curated_df, results_df, threshold):
         help="Sequences whose best NCBI identity (MOL+GEO) is below the threshold.",
     )
     if not higher.empty:
-        ranks = higher["taxonRank"].str.lower().fillna("no shared taxon")
+        ranks = pd.Series(
+            [
+                rank.lower()
+                if pd.notna(rank)
+                else ("no shared taxon" if n > 1 else "rank unknown")
+                for rank, n in zip(higher["taxonRank"], higher["n_species"])
+            ]
+        )
         st.caption(f"Higher rank: {_count_phrase(ranks.value_counts())}.")
     if not unassigned.empty:
         reasons = unassigned["note"].value_counts()
@@ -372,25 +379,28 @@ def show_sequence_detail(results_df, assignments, threshold):
         st.markdown("### 🔬 Candidate species of a (M)OTU/ASV")
         by_seq = assignments.set_index("seq_id")
 
-        def _seq_label(seq_id):
-            row = by_seq.loc[seq_id]
-            if row["n_species"] == 0:
-                return f"{seq_id} ∅"
-            return f"{seq_id} ⚠" if row["note"] else seq_id
-
-        selected_seq = sequence_selector(format_fn=_seq_label)
+        labels = {
+            seq_id: f"{seq_id} ∅" if n == 0 else f"{seq_id} ⚠" if note else seq_id
+            for seq_id, n, note in zip(
+                assignments["seq_id"], assignments["n_species"], assignments["note"]
+            )
+        }
+        selected_seq = sequence_selector(format_fn=lambda s: labels.get(s, s))
         row = by_seq.loc[selected_seq]
-        if row["species_level"] and row["n_species"] == 1:
-            st.markdown(f"Assigned to **{row['scientificName']}** (species).")
-        elif pd.notna(row["taxonRank"]):
+        n = row["n_species"]
+        rank = row["taxonRank"].lower() if pd.notna(row["taxonRank"]) else None
+        candidates = f", {n} candidate species" if n > 1 else ""
+        if n == 0:
+            st.info(f"Unassigned: {row['note']}.")
+        elif row["species_level"] or rank:
             st.markdown(
                 f"Assigned to **{row['scientificName']}** "
-                f"({row['taxonRank'].lower()}), {row['n_species']} candidate species."
+                f"({rank or 'species'}){candidates}."
             )
-        elif row["n_species"] > 1:
-            st.markdown(f"{row['n_species']} candidate species with no shared taxon.")
+        elif n > 1:
+            st.markdown(f"{n} candidate species with no shared taxon.")
         else:
-            st.info(f"Unassigned: {row['note']}.")
+            st.markdown(f"Assigned to **{row['scientificName']}** (rank unknown).")
         if row["note"] and row["n_species"]:
             st.caption(f"⚠ {row['note'][:1].upper()}{row['note'][1:]}.")
 
@@ -523,22 +533,23 @@ def show_exports(curated_df):
             with dl2:
                 # Built in the script run, where the session's contact email
                 # and the spinner apply; offered for the results it was built from.
-                fingerprint = int(
-                    pd.util.hash_pandas_object(
+                def fingerprint():
+                    rows = pd.util.hash_pandas_object(
                         curated_df[export_cols], index=False
-                    ).sum()
-                )
+                    )
+                    return int(rows.sum())
+
                 if st.button(
                     "📥 GBIF export (CSV)", width="stretch", key="new_gbif_csv"
                 ):
                     with st.spinner("Looking up higher-level taxa in WoRMS..."):
                         gbif_df = build_gbif_export_df(curated_df)
                     st.session_state._gbif_export_new = (
-                        fingerprint,
+                        fingerprint(),
                         gbif_df.to_csv(index=False),
                     )
                 built = st.session_state.get("_gbif_export_new")
-                if built and built[0] == fingerprint:
+                if built and built[0] == fingerprint():
                     st.download_button(
                         label="⬇️ Download GBIF export",
                         data=built[1],
