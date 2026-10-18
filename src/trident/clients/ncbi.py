@@ -97,7 +97,7 @@ def create_sequence_batches(
     across the first batches, so sizes differ by at most 1.
 
     Provide either batch_size OR n_batches, not both. If neither is given,
-    defaults to batch_size=10.
+    defaults to batch_size=50.
 
     Args:
         sequences: List of sequences to split.
@@ -119,7 +119,7 @@ def create_sequence_batches(
 
     if n_batches is None:
         if batch_size is None:
-            batch_size = 10
+            batch_size = 50
         n_batches = (total + batch_size - 1) // batch_size
 
     base_size = total // n_batches
@@ -229,6 +229,20 @@ BLAST_CIRCUIT_THRESHOLD = 3
 _XML2_MESSAGE = re.compile(rb"<message>(.*?)</message>", re.DOTALL)
 _XML2_QUERY_TITLE = re.compile(rb"<query-title>(.*?)</query-title>", re.DOTALL)
 _NO_HITS_MESSAGE = b"No hits found"
+# NCBI gives each search a fixed CPU budget; a search that exceeds it stops
+# without the hits of its queries.
+_CPU_LIMIT_MESSAGE = "CPU usage limit"
+
+
+def _is_cpu_limit(text: str) -> bool:
+    """Whether an NCBI reply or message says the search hit its CPU budget."""
+    return _CPU_LIMIT_MESSAGE in text
+
+
+class BlastCpuLimit(ValueError):
+    """A search NCBI stopped at its CPU budget. Resending it the same fails the
+    same way, so it is split into smaller searches instead of retried, and it
+    says nothing about NCBI being down."""
 
 
 def read_xml2_archive(data: bytes) -> list:
@@ -243,7 +257,9 @@ def read_xml2_archive(data: bytes) -> list:
     a per-query BLAST warning such as "Could not calculate ungapped
     Karlin-Altschul parameters" on a low-complexity sequence. Messages are
     removed before parsing, so the query comes out with whatever hits it has;
-    any message other than "No hits found" is logged as a warning.
+    any message other than "No hits found" is logged as a warning. The one
+    exception is NCBI's "CPU usage limit was exceeded": the search stopped
+    early, so the archive raises ``BlastCpuLimit`` and the batch is split.
 
     Returns:
         Bio.Blast Record objects, one per query.
@@ -258,6 +274,10 @@ def read_xml2_archive(data: bytes) -> list:
         for n in sorted(numbered):
             xml = archive.read(numbered[n])
             for message in _XML2_MESSAGE.findall(xml):
+                if _is_cpu_limit(message.decode(errors="replace")):
+                    raise BlastCpuLimit(
+                        f"NCBI stopped the search: {message.decode(errors='replace')}"
+                    )
                 if message.strip() != _NO_HITS_MESSAGE:
                     title = _XML2_QUERY_TITLE.search(xml)
                     query = title.group(1).decode(errors="replace") if title else n
@@ -302,9 +322,11 @@ def _run_qblast_once(
 
 # Same job, resubmitted as a whole after each delay in BLAST_RETRY_DELAYS: a
 # failed submission, poll or truncated response is retried.
-_run_qblast = retry_call(delays=BLAST_RETRY_DELAYS, describe=lambda: _job_label.get())(
-    _run_qblast_once
-)
+_run_qblast = retry_call(
+    delays=BLAST_RETRY_DELAYS,
+    no_retry=(BlastCpuLimit,),
+    describe=lambda: _job_label.get(),
+)(_run_qblast_once)
 
 
 ### BLAST URL API CLIENT ###
@@ -455,7 +477,10 @@ def _poll_blast_job(rid: str, rtoe: int | None = None) -> bytes:
             continue
         failures = 0
         if match.group(1) != "WAITING":
-            raise ValueError(f"BLAST job {rid} ended with status {match.group(1)}")
+            ended = f"BLAST job {rid} ended with status {match.group(1)}"
+            if _is_cpu_limit(reply.text):
+                raise BlastCpuLimit(f"{ended}: CPU usage limit was exceeded")
+            raise ValueError(ended)
 
 
 def _run_blast_job_once(
@@ -474,7 +499,9 @@ def _run_blast_job_once(
 # Same job, resubmitted as a whole after each delay in BLAST_RETRY_DELAYS, as
 # with qblast: a failed submission, a job given up or a bad result is retried.
 _run_blast_job = retry_call(
-    delays=BLAST_RETRY_DELAYS, describe=lambda: _job_label.get()
+    delays=BLAST_RETRY_DELAYS,
+    no_retry=(BlastCpuLimit,),
+    describe=lambda: _job_label.get(),
 )(_run_blast_job_once)
 
 
@@ -556,6 +583,10 @@ def submit_blast_batch(
 
     Returns:
         DataFrame of raw BLAST hits, or None if the query failed.
+
+    Raises:
+        BlastCpuLimit: NCBI stopped the search at its CPU budget; the caller
+            splits the batch (it is not recorded on ``circuit``).
     """
     if circuit is not None and circuit.is_open:
         retry = False
@@ -575,6 +606,9 @@ def submit_blast_batch(
         )
         result = df
 
+    except BlastCpuLimit as e:
+        logger.warning(f"{label} too heavy for NCBI: {e}")
+        raise
     except Exception as e:
         logger.error(f"{label} failed: {e}")
         result = None
@@ -592,62 +626,81 @@ def submit_blast_batch(
     return result
 
 
-def _split_failed_batch(
+def _split_batch(
     batch: list[SeqRecord],
     batch_id: int | str | None,
     circuit: BlastCircuit | None = None,
+    too_heavy: bool = False,
     **blast_kwargs,
 ) -> tuple[list[pd.DataFrame], list[str]]:
-    """Isolate the sequences that make a failed batch fail, by halving it.
+    """Split a batch that failed into halves, each with a single attempt, down
+    to single sequences: a half that succeeds is kept, a half that fails is
+    split again.
 
-    Called once a batch has failed all its retries, so the failure is likely
-    caused by one of its sequences rather than by a transient error. Each half
-    gets a single attempt: a half that succeeds is kept, a failed half is split
-    again, down to single sequences. If both halves fail, the problem is likely
-    on NCBI's side (overload, outage), so splitting stops and the whole batch is
-    reported failed. This bounds the extra jobs: about 2 per halving level for
-    one bad sequence, and 2 in total when NCBI is down.
+    Two causes, told apart by NCBI's reply:
+
+    - The batch failed all its retries (*too_heavy* False): likely one of its
+      sequences. If both halves fail too, the problem is likely on NCBI's side
+      (overload, outage), so splitting stops and the whole batch is reported
+      failed. This bounds the extra jobs: about 2 per halving level for one
+      bad sequence, and 2 in total when NCBI is down. Known limit: two bad
+      sequences in different halves also make both halves fail; a lower batch
+      size narrows it down on the next run.
+    - NCBI stopped the search at its CPU budget (*too_heavy* True, see
+      ``BlastCpuLimit``): half the work can still be too much, so both halves
+      failing that way is expected and each is halved again.
 
     A half that succeeds shows NCBI is up, so it is recorded as a success on
-    ``circuit``: a batch failed by a bad sequence must not count toward the
-    "NCBI is down" threshold.
-
-    Known limit: two bad sequences that land in different halves also make both
-    halves fail, so the whole batch is reported failed (as it was before
-    splitting existed). A lower batch size narrows it down on the next run.
+    ``circuit``: a batch failed by a bad sequence or by its size must not count
+    toward the "NCBI is down" threshold. Splitting stops once the step is
+    stopped, or once the circuit is open unless the batch was too heavy (a
+    CPU-limit reply shows NCBI is answering). The halves of a too-heavy batch
+    keep their retries, since nothing says they would fail.
 
     Returns:
-        Tuple of (result DataFrames of the halves that succeeded, ids of the
+        Tuple of (result DataFrames of the parts that succeeded, ids of the
         sequences still failed).
     """
-    if len(batch) == 1:
-        return [], [batch[0].id]
+    circuit_open = circuit is not None and circuit.is_open and not too_heavy
+    if len(batch) == 1 or stop.stop_requested() or circuit_open:
+        return [], [rec.id for rec in batch]
 
     mid = len(batch) // 2
     halves = [batch[:mid], batch[mid:]]
+    reason = "too heavy for NCBI" if too_heavy else "failed after retries"
     logger.warning(
-        f"Batch {batch_id} failed after retries; splitting it into "
-        f"{len(halves[0])} + {len(halves[1])} sequences to isolate the failure"
+        f"Batch {batch_id} {reason}; splitting it into "
+        f"{len(halves[0])} + {len(halves[1])} sequences"
     )
-    results = [
-        submit_blast_batch(
-            half, batch_id=batch_id, retry=False, circuit=circuit, **blast_kwargs
-        )
-        for half in halves
-    ]
-    if all(res is None for res in results):
+    results, heavy = [], []
+    for half in halves:
+        try:
+            results.append(
+                submit_blast_batch(
+                    half,
+                    batch_id=batch_id,
+                    retry=too_heavy,
+                    circuit=circuit,
+                    **blast_kwargs,
+                )
+            )
+            heavy.append(False)
+        except BlastCpuLimit:
+            results.append(None)
+            heavy.append(True)
+    if not too_heavy and not any(heavy) and all(res is None for res in results):
         return [], [rec.id for rec in batch]
 
     dfs, failed = [], []
-    for half, res in zip(halves, results):
+    for half, res, half_heavy in zip(halves, results, heavy):
         if res is not None:
             dfs.append(res)
-        else:
-            half_dfs, half_failed = _split_failed_batch(
-                half, batch_id, circuit, **blast_kwargs
-            )
-            dfs += half_dfs
-            failed += half_failed
+            continue
+        half_dfs, half_failed = _split_batch(
+            half, batch_id, circuit, too_heavy=half_heavy, **blast_kwargs
+        )
+        dfs += half_dfs
+        failed += half_failed
     return dfs, failed
 
 
@@ -659,8 +712,8 @@ def blast_batch(
     **blast_kwargs,
 ) -> tuple[list[pd.DataFrame], list[str]]:
     """Run one batch as a worker of a parallel run: submit it with retries,
-    split it if it still fails (see ``_split_failed_batch``), then report its
-    sequences to *progress_handler*.
+    split it if it still fails or is too heavy for NCBI (see ``_split_batch``),
+    then report its sequences to *progress_handler*.
 
     *blast_kwargs* are those of ``submit_blast_batch`` (evalue, hitlist_size,
     entrez_query), so callers running batches with different queries in one
@@ -673,15 +726,19 @@ def blast_batch(
     # single attempt, so it is not split even if another thread closes the
     # circuit in the meantime.
     retried = not circuit.is_open
-    result = submit_blast_batch(
-        batch, batch_id=batch_id, circuit=circuit, **blast_kwargs
-    )
-    if result is not None:
-        outcome = [result], []
-    elif not retried or circuit.is_open or stop.stop_requested():
-        outcome = [], [rec.id for rec in batch]
+    try:
+        result = submit_blast_batch(
+            batch, batch_id=batch_id, circuit=circuit, **blast_kwargs
+        )
+    except BlastCpuLimit:
+        outcome = _split_batch(batch, batch_id, circuit, too_heavy=True, **blast_kwargs)
     else:
-        outcome = _split_failed_batch(batch, batch_id, circuit, **blast_kwargs)
+        if result is not None:
+            outcome = [result], []
+        elif not retried:
+            outcome = [], [rec.id for rec in batch]
+        else:  # stops at once if the step was stopped or the circuit opened
+            outcome = _split_batch(batch, batch_id, circuit, **blast_kwargs)
     notify_progress(progress_handler, len(batch))
     return outcome
 
@@ -722,8 +779,9 @@ def run_blast_batches(
         failed_ids). ``failed_ids`` lists the ids of sequences whose query
         errored (distinct from sequences that simply returned no hits), so the
         caller can retry them instead of caching them as empty. A batch that
-        fails its retries is split by ``_split_failed_batch`` (unless the
-        circuit is open), so only the sequences that still fail are listed.
+        fails its retries, or that NCBI stops at its CPU limit, is split by
+        ``_split_batch`` (unless the circuit is open), so only the sequences
+        that still fail are listed.
     """
     if not batches:
         return pd.DataFrame(columns=BLAST_RAW_COLUMNS), []

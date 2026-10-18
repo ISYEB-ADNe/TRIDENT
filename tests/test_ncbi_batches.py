@@ -49,7 +49,7 @@ def _reply(text="", content=b""):
 @pytest.fixture
 def ncbi_fake(monkeypatch):
     """NCBI's URL API, one job per submission, done at the first poll."""
-    fake = SimpleNamespace(bad=set(), down=False, jobs=0, queries={})
+    fake = SimpleNamespace(bad=set(), down=False, jobs=0, queries={}, max_queries=None)
 
     def post(url, data, **kwargs):
         if data["CMD"] == "Put":
@@ -66,7 +66,10 @@ def ncbi_fake(monkeypatch):
         return _reply(content=b"PK" + data["RID"].encode())  # the archive "bytes"
 
     def read_archive(data):
-        return [_record(i) for i in fake.queries[data[2:].decode()]]
+        ids = fake.queries[data[2:].decode()]
+        if fake.max_queries and len(ids) > fake.max_queries:
+            raise ncbi.BlastCpuLimit("CPU usage limit was exceeded")
+        return [_record(i) for i in ids]
 
     monkeypatch.setattr(ncbi.requests, "post", post)
     monkeypatch.setattr(ncbi, "read_xml2_archive", read_archive)
@@ -95,6 +98,33 @@ def test_bad_sequences_in_many_batches_do_not_stop_retries(ncbi_fake):
 
     assert sorted(failed) == sorted(ncbi_fake.bad)
     assert len(df) == n_batches * 9
+
+
+def test_batch_over_the_cpu_limit_is_split_until_it_fits(ncbi_fake):
+    """A search NCBI stops at its CPU limit is halved until the parts fit,
+    without retries, and does not count as NCBI being down: every batch of a
+    run gets the same treatment and every sequence gets its hits."""
+    ncbi_fake.max_queries = 2
+    n_batches = ncbi.BLAST_CIRCUIT_THRESHOLD + 2
+    batches = [_batch(b * 8, 8) for b in range(n_batches)]
+
+    df, failed = ncbi.run_blast_batches(batches, n_threads=1)
+
+    assert failed == []
+    assert len(df) == n_batches * 8
+    assert ncbi_fake.jobs == n_batches * (1 + 2 + 4)  # 8, then 4 + 4, then 4 x 2
+
+
+def test_bad_sequence_in_a_heavy_batch_fails_alone(ncbi_fake):
+    """A batch both too heavy and holding a bad sequence still loses only that
+    sequence: each part is split on its own cause."""
+    ncbi_fake.max_queries = 2
+    ncbi_fake.bad = {"s3"}
+
+    df, failed = ncbi.run_blast_batches([_batch(0, 8)], n_threads=1)
+
+    assert failed == ["s3"]
+    assert sorted(df["seq_id"]) == sorted(f"s{i}" for i in range(8) if i != 3)
 
 
 def test_ncbi_down_fails_everything_at_bounded_cost(ncbi_fake):

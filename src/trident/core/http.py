@@ -165,6 +165,7 @@ def retry_call(
     *,
     delays: tuple[float, ...],
     exceptions: tuple[type[BaseException], ...] = (Exception,),
+    no_retry: tuple[type[BaseException], ...] = (),
     describe: Callable[[], str] | None = None,
 ) -> Callable:
     """Decorator that re-runs the whole function when it raises.
@@ -185,6 +186,8 @@ def retry_call(
             Required: the right spacing depends on the service.
         exceptions: Exception types that trigger a retry; others propagate
             immediately.
+        no_retry: Subtypes of ``exceptions`` that propagate immediately, for
+            failures a repeat cannot fix.
         describe: Returns what the call is, for the retry warning (e.g. the
             BLAST batch being run); the function name by default.
 
@@ -201,7 +204,7 @@ def retry_call(
                 stop.check_stop()
                 try:
                     return func(*args, **kwargs)
-                except stop.StepStopped:
+                except (stop.StepStopped, *no_retry):
                     raise
                 except exceptions as e:
                     if delay is None:

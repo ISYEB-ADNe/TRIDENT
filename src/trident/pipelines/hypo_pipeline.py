@@ -44,6 +44,7 @@ from trident.core.utils import (
 from trident.clients.ncbi import (
     BLAST_HIT_COLUMNS,
     BlastCircuit,
+    BlastCpuLimit,
     blast_batch,
     create_sequence_batches,
     log_batch_failures,
@@ -164,7 +165,7 @@ def _hypo_search_rebuild(input_selected, original_inputs):
 )
 def run_hypo_search(
     sequences_dict,
-    batch_size: int = 10,
+    batch_size: int = 50,
     num_threads: int = 4,
     ev_exponent: int = HYPO_EV_EXPONENT,
     max_hits: int = HYPO_MAX_HITS,
@@ -231,7 +232,9 @@ def run_hypo_search(
 
     def job(k, batch, query):
         # The label names the MOTUs, so every log line of the batch says which.
-        motus = ", ".join(dict.fromkeys(owner[(r.id, query)] for r in batch))
+        owners = list(dict.fromkeys(owner[(r.id, query)] for r in batch))
+        more = f" +{len(owners) - 3} more" if len(owners) > 3 else ""
+        motus = ", ".join(owners[:3]) + more
         seqs = pluralize(len(batch), "seq")
         label = f"{k}/{len(batches)} ({len(batch)} {seqs}: {motus})"
         return blast_batch(
@@ -536,14 +539,17 @@ def run_hypo_check(
 
     def check(index, seq_id, sci_name, seq_dna) -> pd.DataFrame | None:
         sequence = SeqRecord(Seq(seq_dna), id=seq_id)
-        blast_res = submit_blast_batch(
-            [sequence],
-            entrez_query=f'"{sci_name}"[orgn]',
-            evalue=10 ** (-ev_exponent),
-            batch_id=f"{index + 1}/{len(sequences_df)} ({seq_id}: {sci_name})",
-            hitlist_size=10,
-            circuit=circuit,
-        )
+        try:
+            blast_res = submit_blast_batch(
+                [sequence],
+                entrez_query=f'"{sci_name}"[orgn]',
+                evalue=10 ** (-ev_exponent),
+                batch_id=f"{index + 1}/{len(sequences_df)} ({seq_id}: {sci_name})",
+                hitlist_size=10,
+                circuit=circuit,
+            )
+        except BlastCpuLimit:  # one sequence: nothing left to split
+            blast_res = None
         notify_progress(progress_handler)
         if blast_res is None:
             return None

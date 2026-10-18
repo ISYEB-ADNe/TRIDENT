@@ -183,8 +183,10 @@ BLAST_HELP = {
         "threshold are kept. A larger x is stricter."
     ),
     "batch_size": (
-        "Number of query sequences sent together in one NCBI BLAST request. "
-        "Larger batches mean fewer but longer requests, which NCBI may time out."
+        "Number of query sequences sent together in one NCBI BLAST search. NCBI "
+        "asks for fewer, larger searches: above about 100 searches a day it moves "
+        "a user to a slower queue. A search too heavy for NCBI is split into "
+        "smaller ones; if many batches fail, lower the batch size."
     ),
     "n_threads": (
         "Number of BLAST requests run at NCBI at the same time. More can speed up "

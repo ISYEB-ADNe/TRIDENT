@@ -9,8 +9,11 @@ import io
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from trident.clients.ncbi import (
     BLAST_HIT_COLUMNS,
+    BlastCpuLimit,
     parse_blast_records,
     process_blast_results,
     read_xml2_archive,
@@ -44,21 +47,34 @@ def test_query_without_hits_gives_no_rows():
     assert parse_blast_records(records).empty
 
 
-def test_a_blast_warning_does_not_lose_the_query():
-    """A per-query BLAST warning (here on a query without hits) is dropped
-    before parsing: the query still comes out, it does not fail the job."""
+def _no_hits_archive_with_message(message: bytes) -> bytes:
+    """The no-hits archive with its "No hits found" replaced by *message*."""
     with zipfile.ZipFile(NO_HITS) as archive:
         files = {name: archive.read(name) for name in archive.namelist()}
-    files["RID_1.xml"] = files["RID_1.xml"].replace(
-        b"No hits found",
-        b"Could not calculate ungapped Karlin-Altschul parameters",
-    )
+    files["RID_1.xml"] = files["RID_1.xml"].replace(b"No hits found", message)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as archive:
         for name, data in files.items():
             archive.writestr(name, data)
-    records = read_xml2_archive(buf.getvalue())
+    return buf.getvalue()
+
+
+def test_a_blast_warning_does_not_lose_the_query():
+    """A per-query BLAST warning (here on a query without hits) is dropped
+    before parsing: the query still comes out, it does not fail the job."""
+    data = _no_hits_archive_with_message(
+        b"Could not calculate ungapped Karlin-Altschul parameters"
+    )
+    records = read_xml2_archive(data)
     assert [r.query.description for r in records] == ["MUSA_Vert16S_00111"]
+
+
+def test_a_search_stopped_by_the_cpu_limit_fails():
+    """A search NCBI stopped at its CPU limit raises, so its batch is split
+    rather than its queries read as having no hits."""
+    data = _no_hits_archive_with_message(b"CPU usage limit was exceeded")
+    with pytest.raises(BlastCpuLimit):
+        read_xml2_archive(data)
 
 
 def test_no_hits_keep_the_columns_of_hits():
