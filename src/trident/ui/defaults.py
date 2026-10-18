@@ -5,6 +5,7 @@ of truth, also used by the pipeline functions). Performance and UI-only defaults
 (thread counts, batch sizes, the map centre) are defined here.
 """
 
+from trident.clients.ncbi import BLAST_GIVE_UP
 from trident.core.constants import (
     NCBI_MAX_HITS,
     NCBI_EV_EXPONENT,
@@ -33,6 +34,11 @@ NCBI_NUM_THREADS_DEFAULT = 4
 # NCBI takes one request every 10 s and each running job is polled once a
 # minute, so beyond about 6 jobs at once the polls take every request slot.
 BLAST_MAX_THREADS = 6
+# Minutes a BLAST job may wait at NCBI before it is resubmitted once, then
+# counted as failed (BlastGaveUp); most jobs take 1 to 3 min.
+BLAST_GIVE_UP_MINUTES_DEFAULT = round(BLAST_GIVE_UP / 60)
+# Below this, healthy jobs on a busy NCBI would be given up too.
+BLAST_GIVE_UP_MINUTES_MIN = 5
 NCBI_BATCH_SIZE_DEFAULT = 50
 NCBI_METHOD_DEFAULT = NCBI_METHOD
 NCBI_QUERY_COVER_DEFAULT = NCBI_QUERY_COVER

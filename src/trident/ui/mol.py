@@ -36,6 +36,8 @@ from trident.ui.ui import (
 )
 
 from trident.ui.defaults import (
+    BLAST_GIVE_UP_MINUTES_DEFAULT,
+    BLAST_GIVE_UP_MINUTES_MIN,
     BLAST_MAX_THREADS,
     NCBI_MAX_HITS_DEFAULT,
     NCBI_EV_EXPONENT_DEFAULT,
@@ -116,7 +118,7 @@ def display_ncbi_parameters():
         st.markdown(
             "These settings affect processing speed but not biological results, and should be left at default values most of the time."
         )
-        tcol1, tcol2 = st.columns(2)
+        tcol1, tcol2, tcol3 = st.columns(3)
 
         with tcol1:
             persist_value("ncbi_batch_size", NCBI_BATCH_SIZE_DEFAULT)
@@ -142,8 +144,18 @@ def display_ncbi_parameters():
                 key="ncbi_num_threads",
             )
             save_widget("ncbi_num_threads")
+        with tcol3:
+            persist_value("ncbi_give_up", BLAST_GIVE_UP_MINUTES_DEFAULT)
+            give_up = st.number_input(
+                "Give up after (min)",
+                BLAST_GIVE_UP_MINUTES_MIN,
+                None,  # no upper limit: a job waiting longer is still polled
+                help=BLAST_HELP["give_up"],
+                key="ncbi_give_up",
+            )
+            save_widget("ncbi_give_up")
 
-    return max_hits, ev_exponent, batch_size, threads
+    return max_hits, ev_exponent, batch_size, threads, give_up
 
 
 def ncbi_search_job(*, force_rerun, retry_empty=False, status, progress_bar, params):
@@ -175,6 +187,7 @@ def ncbi_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
         sequences,
         batch_size=params["batch_size"],
         num_threads=params["num_threads"],
+        give_up_minutes=params["give_up_minutes"],
         ev_exponent=params["ncbi_ev_exponent"],
         max_hits=params["ncbi_max_hits"],
         force_rerun=force_rerun,
@@ -204,12 +217,15 @@ def ncbi_search_workflow():
         st.markdown("### ⚙️ Search Configuration and Execution")
 
         # 1. Parameter inputs
-        max_hits, ev_exponent, batch_size, num_threads = display_ncbi_parameters()
+        max_hits, ev_exponent, batch_size, num_threads, give_up = (
+            display_ncbi_parameters()
+        )
         current_params = {
             "ncbi_max_hits": max_hits,
             "ncbi_ev_exponent": ev_exponent,
             "batch_size": batch_size,
             "num_threads": num_threads,
+            "give_up_minutes": give_up,
         }
 
         st.divider()
@@ -238,6 +254,7 @@ def ncbi_search_workflow():
             "sequence",
             "sequences",
             source="NCBI BLAST",
+            gives_up=True,
         )
     if mode != "NEW":
         display_ncbi_search_overview()

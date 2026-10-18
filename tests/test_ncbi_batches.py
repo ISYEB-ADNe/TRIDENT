@@ -2,8 +2,8 @@
 
 NCBI is faked at its boundary (the URL API requests and the XML2 archive
 reader): each query sequence gets one real hit (from the XML2 test fixture), a
-job holding a "bad" sequence is rejected, and ``down`` makes every request
-fail. Waits are skipped. The polling of a job is tested against a fake that
+job holding a "bad" sequence is rejected, a "stuck" one stays waiting, and
+``down`` makes every request fail. Waits are skipped. The polling of a job is tested against a fake that
 serves the real XML2 fixture (``url_api_fake``).
 """
 
@@ -48,8 +48,12 @@ def _reply(text="", content=b""):
 
 @pytest.fixture
 def ncbi_fake(monkeypatch):
-    """NCBI's URL API, one job per submission, done at the first poll."""
-    fake = SimpleNamespace(bad=set(), down=False, jobs=0, queries={}, max_queries=None)
+    """NCBI's URL API, one job per submission, done at the first poll. The
+    first ``stuck[id]`` jobs holding sequence ``id`` wait forever."""
+    fake = SimpleNamespace(
+        bad=set(), stuck={}, down=False, jobs=0, queries={}, max_queries=None
+    )
+    stuck_rids = set()
 
     def post(url, data, **kwargs):
         if data["CMD"] == "Put":
@@ -62,7 +66,12 @@ def ncbi_fake(monkeypatch):
                 return _reply("<p>Message ID#24 Error: NCBI rejected the query</p>")
             rid = f"R{fake.jobs}"
             fake.queries[rid] = ids
+            for i in set(ids) & {i for i, n in fake.stuck.items() if n > 0}:
+                fake.stuck[i] -= 1
+                stuck_rids.add(rid)
             return _reply(f"QBlastInfoBegin\n    RID = {rid}\n    RTOE = 30\n")
+        if data["RID"] in stuck_rids:
+            return _reply("QBlastInfoBegin\n\tStatus=WAITING\nQBlastInfoEnd")
         return _reply(content=b"PK" + data["RID"].encode())  # the archive "bytes"
 
     def read_archive(data):
@@ -257,3 +266,71 @@ def test_url_api_client_keeps_the_job_over_transient_poll_errors(url_api_fake):
 
     assert len(records) == 1
     assert sum(d["CMD"] == "Put" for d in url_api_fake.requests) == 1
+
+
+def test_slow_job_makes_way_for_the_next_batch(ncbi_fake, monkeypatch):
+    """With one thread, a job slow at NCBI lets the next batch run meanwhile,
+    on a spare thread."""
+    monkeypatch.setattr(ncbi, "BLAST_SLOW_JOB", -1.0)  # slow at its first poll
+    second_done = threading.Event()
+    first_polls, done = [], []
+    fake_post = ncbi.requests.post
+
+    def post(url, data, **kwargs):
+        if data["CMD"] == "Get":
+            ids = ncbi_fake.queries[data["RID"]]
+            if ids[0] == "s0":  # first batch: WAITING, then done after the second
+                first_polls.append(data["RID"])
+                if len(first_polls) == 1:
+                    return _reply("QBlastInfoBegin\n\tStatus=WAITING\nQBlastInfoEnd")
+                second_done.wait(timeout=5)  # times out if the second never ran
+            done.append(ids[0])
+            if ids[0] == "s2":
+                second_done.set()
+        return fake_post(url, data, **kwargs)
+
+    monkeypatch.setattr(ncbi.requests, "post", post)
+
+    df, failed = ncbi.run_blast_batches([_batch(0, 2), _batch(2, 2)], n_threads=1)
+
+    assert done == ["s2", "s0"]
+    assert failed == [] and len(df) == 4
+
+
+def test_stuck_job_is_resubmitted_once_then_fails(ncbi_fake):
+    """A job past the give-up time is resubmitted once. Stuck again, its
+    sequences fail without a split (each part would add a search to NCBI's
+    queue), and NCBI does not count as down."""
+    ncbi_fake.stuck = {"s0": 1, "s2": 2}  # first batch stuck once, second twice
+    circuit = ncbi.BlastCircuit(threshold=1)  # one failure would open it
+
+    df, failed = ncbi.run_blast_batches(
+        [_batch(0, 2), _batch(2, 2)], n_threads=1, circuit=circuit, give_up=-1.0
+    )
+
+    assert sorted(df["seq_id"]) == ["s0", "s1"]
+    assert sorted(failed) == ["s2", "s3"]
+    assert ncbi_fake.jobs == 4
+    assert not circuit.is_open
+
+
+def test_give_up_while_splitting_sends_nothing_more(ncbi_fake, monkeypatch):
+    """A part of a split batch given up stops the split: the parts not sent
+    yet fail with it, and the parts done keep their hits."""
+    ncbi_fake.bad = {"s3"}  # the batch fails, then its half s2 + s3
+    ncbi_fake.stuck = {"s2": 2}  # then s2 alone is given up twice
+    submitted = []
+    fake_post = ncbi.requests.post
+
+    def post(url, data, **kwargs):
+        if data["CMD"] == "Put":
+            submitted.append(_query_ids(data["QUERY"]))
+        return fake_post(url, data, **kwargs)
+
+    monkeypatch.setattr(ncbi.requests, "post", post)
+
+    df, failed = ncbi.run_blast_batches([_batch(0, 4)], n_threads=1, give_up=-1.0)
+
+    assert sorted(df["seq_id"]) == ["s0", "s1"]
+    assert sorted(failed) == ["s2", "s3"]
+    assert ["s3"] not in submitted  # never sent alone

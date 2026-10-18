@@ -20,6 +20,7 @@ from loguru import logger
 
 from trident.clients.fasta import dataframe_to_records
 from trident.clients.ncbi import (
+    BLAST_GIVE_UP,
     check_species_across_gap,
     create_sequence_batches,
     filter_blast_results,
@@ -75,6 +76,7 @@ def run_ncbi_search(
     num_threads: int = 3,
     ev_exponent: int = NCBI_EV_EXPONENT,
     max_hits: int = NCBI_MAX_HITS,
+    give_up_minutes: float = BLAST_GIVE_UP / 60,
     progress_handler: Any | None = None,
     failure_sink: list | None = None,
 ) -> pd.DataFrame:
@@ -86,10 +88,13 @@ def run_ncbi_search(
     Args:
         sequences: List of SeqRecord objects to query.
         batch_size: Number of sequences per BLAST request.
-        num_threads: Number of parallel BLAST threads.
+        num_threads: Batches run at once at normal pace, plus
+            BLAST_SLOW_THREADS while jobs are slow (see ``run_blast_pool``).
         ev_exponent: Negative exponent for the E-value threshold
             (e.g. 20 → evalue=1e-20).
         max_hits: Maximum BLAST hits returned per query sequence.
+        give_up_minutes: Minutes a BLAST job may wait at NCBI before it is
+            resubmitted once, then counted as failed (see ``BlastGaveUp``).
         progress_handler: Optional progress tracker (dict, tqdm, or None).
         failure_sink: If provided, seq_ids whose BLAST batch errored are
             appended here so the cache layer retries them instead of caching
@@ -108,6 +113,7 @@ def run_ncbi_search(
         evalue=10.0 ** (-ev_exponent),
         hitlist_size=max_hits,
         progress_handler=progress_handler,
+        give_up=give_up_minutes * 60,
     )
     if failed_ids and failure_sink is not None:
         failure_sink.extend(failed_ids)

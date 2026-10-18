@@ -31,7 +31,6 @@ from trident.core.constants import (
     HYPO_IDENTITY,
     HYPO_CHECK_EV_EXPONENT,
 )
-from trident.core import stop
 from trident.core.database import save_to_db, FullCache, CustomCache
 from trident.core.utils import (
     pluralize,
@@ -42,12 +41,15 @@ from trident.core.utils import (
     top_hit_per_group,
 )
 from trident.clients.ncbi import (
+    BLAST_GIVE_UP,
     BLAST_HIT_COLUMNS,
     BlastCircuit,
     BlastCpuLimit,
+    BlastGaveUp,
     blast_batch,
     create_sequence_batches,
     log_batch_failures,
+    run_blast_pool,
     process_blast_results,
     submit_blast_batch,
 )
@@ -171,6 +173,7 @@ def run_hypo_search(
     max_hits: int = HYPO_MAX_HITS,
     identity_cutoff: float = HYPO_IDENTITY_CUTOFF,
     ntop: int = HYPO_NTOP,
+    give_up_minutes: float = BLAST_GIVE_UP / 60,
     progress_handler: dict | None = None,
     failure_sink: list | None = None,
 ) -> pd.DataFrame:
@@ -180,17 +183,20 @@ def run_hypo_search(
     A proxy record shared by several seq_ids with the same Entrez query is
     searched once: (proxy record id, entrez_query) is one cache item, and its
     hits are returned once. Batches are made per query across seq_ids, and all
-    of them run in one pool of num_threads threads.
+    of them run as one parallel BLAST run (``run_blast_pool``).
 
     Args:
         sequences_dict: {seq_id: {'sequences': [SeqRecord], 'entrez_query': str}}.
         batch_size: Sequences per NCBI batch.
-        num_threads: Parallel threads, shared by the batches of every seq_id.
+        num_threads: Batches run at once at normal pace, plus
+            BLAST_SLOW_THREADS while jobs are slow; shared by every seq_id.
         ev_exponent: Negative exponent for E-value threshold (e.g. 10 → 1e-10).
         max_hits: Maximum hits per query.
         identity_cutoff: Minimum identity percentage to retain.
         ntop: If > 0, keep only top N hits per (proxy record, hit species,
             Entrez query) by identity.
+        give_up_minutes: Minutes a BLAST job may wait at NCBI before it is
+            resubmitted once, then counted as failed (see ``BlastGaveUp``).
         progress_handler: Optional progress tracker.
         failure_sink: If provided, the (proxy record id, entrez_query) of each
             proxy record (BOLD sequence) whose BLAST errored is appended here,
@@ -204,7 +210,7 @@ def run_hypo_search(
 
     # Batches are made per Entrez query, across MOTUs: MOTUs with the same MOL
     # species fill one batch instead of sending one small job each. All batches
-    # run in one pool, so a slow NCBI job holds only its own thread.
+    # run in one pool, so a slow NCBI job holds back only its own batch.
     by_query: dict[str, list[SeqRecord]] = {}
     owner = {}  # (proxy record id, entrez_query) -> MOTU that queued it
     n_records = 0
@@ -244,7 +250,7 @@ def run_hypo_search(
     jobs = [(k, batch, query) for k, (batch, query) in enumerate(batches, start=1)]
 
     all_results = []
-    outcomes = stop.run_threads(job, jobs, num_threads)
+    outcomes = run_blast_pool(job, jobs, num_threads, give_up_minutes * 60)
     log_batch_failures(outcomes)
     for (_, batch, query), (dfs, failed_ids) in zip(jobs, outcomes):
         # Report the proxy records whose BLAST errored, with the batch's query:
@@ -503,6 +509,7 @@ def run_hypo_check(
     hypo_filter_df: pd.DataFrame,
     ev_exponent: int = HYPO_CHECK_EV_EXPONENT,
     num_threads: int = 4,
+    give_up_minutes: float = BLAST_GIVE_UP / 60,
     progress_handler: dict | None = None,
     failure_sink: list | None = None,
 ) -> pd.DataFrame:
@@ -510,13 +517,16 @@ def run_hypo_check(
 
     BLASTs each target sequence against NCBI filtered to that species
     to confirm the species has the target marker in GenBank. The checks are
-    independent jobs, run on up to num_threads threads.
+    independent jobs, run as one parallel BLAST run (``run_blast_pool``).
 
     Args:
         hypo_filter_df: Filtered DataFrame from run_hypo_filter.
         ev_exponent: Negative exponent for E-value threshold.
-        num_threads: Parallel threads (NCBI's request spacing makes more than
-            about 6 useless).
+        num_threads: Checks run at once at normal pace, plus
+            BLAST_SLOW_THREADS while jobs are slow (NCBI's request spacing
+            makes more than about 6 useless).
+        give_up_minutes: Minutes a BLAST job may wait at NCBI before it is
+            resubmitted once, then counted as failed (see ``BlastGaveUp``).
         progress_handler: Optional progress tracker.
         failure_sink: If provided, the (seq_id, scientificName) of each check
             whose BLAST errored is appended here, so the cache layer retries it
@@ -548,7 +558,7 @@ def run_hypo_check(
                 hitlist_size=10,
                 circuit=circuit,
             )
-        except BlastCpuLimit:  # one sequence: nothing left to split
+        except (BlastCpuLimit, BlastGaveUp):  # failed: retried on the next run
             blast_res = None
         notify_progress(progress_handler)
         if blast_res is None:
@@ -585,7 +595,7 @@ def run_hypo_check(
             sequences_df["dna_sequence"],
         )
     )
-    outcomes = stop.run_threads(check, calls, num_threads)
+    outcomes = run_blast_pool(check, calls, num_threads, give_up_minutes * 60)
     all_results = []
     for (_, seq_id, sci_name, _), result in zip(calls, outcomes):
         if result is None:

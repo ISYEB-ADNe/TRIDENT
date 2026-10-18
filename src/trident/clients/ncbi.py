@@ -2,6 +2,7 @@
 
 import contextvars
 import io
+import os
 import re
 import threading
 import time
@@ -216,6 +217,122 @@ _job_label: contextvars.ContextVar[str] = contextvars.ContextVar(
     "blast_job_label", default="BLAST job"
 )
 
+# Threads a parallel run has beyond its n_threads, for batches to start while
+# slow jobs wait (see _BlastRun).
+BLAST_SLOW_THREADS = 2
+
+
+class _BlastRun:
+    """Scheduling shared by the workers of one parallel run (``run_blast_pool``).
+
+    At most *n_threads* batches hold a place, that is run at their normal
+    pace. A job waiting long at NCBI is slow (see ``_Job``): it is still
+    polled, less often, but its batch frees its place, so one of the
+    BLAST_SLOW_THREADS spare threads can start the next batch. The batch takes
+    a place again before it submits another job (a resubmission, a retry, a
+    split half). *give_up* is the run's give-up time in seconds (see
+    ``BlastGaveUp``).
+    """
+
+    def __init__(self, n_batches: int, n_threads: int, give_up: float):
+        self.give_up = give_up
+        self.n_threads = n_threads if n_threads > 0 else os.cpu_count() or 1
+        self.pool_size = min(n_batches, self.n_threads + BLAST_SLOW_THREADS)
+        self._changed = threading.Condition()
+        self._normal = 0  # batches holding a place
+
+    def take_place(self) -> None:
+        """Wait for a place (or for a stop: the batch then fails at once)."""
+        with self._changed:
+            while self._normal >= self.n_threads and not stop.stop_requested():
+                self._changed.wait(timeout=1.0)
+            self._normal += 1
+
+    def free_place(self) -> None:
+        with self._changed:
+            self._normal -= 1
+            self._changed.notify_all()
+
+
+class _Place:
+    """The place of the batch run by the current thread, if it holds one."""
+
+    def __init__(self, run: _BlastRun):
+        self.run = run
+        self.held = False
+
+    def take(self) -> None:
+        if not self.held:
+            self.run.take_place()
+            self.held = True
+
+    def free(self) -> None:
+        if self.held:
+            self.run.free_place()
+            self.held = False
+
+
+# Place of the batch the current thread runs, set by run_blast_pool (None
+# outside a parallel run).
+_place: contextvars.ContextVar[_Place | None] = contextvars.ContextVar(
+    "blast_place", default=None
+)
+
+
+class _Job:
+    """One job attempt: takes its batch's place again if a slow job freed it,
+    and frees it once this job is slow (``set_slow``). A job still waiting at
+    NCBI is slow after BLAST_SLOW_JOB (or half its give-up time if shorter),
+    and given up after its run's give-up time (BLAST_GIVE_UP outside a run)."""
+
+    def __init__(self):
+        self.place = _place.get()
+        self.slow = False
+        self.give_up = BLAST_GIVE_UP if self.place is None else self.place.run.give_up
+        self.slow_after = min(BLAST_SLOW_JOB, self.give_up / 2)
+        if self.place is not None:
+            self.place.take()
+
+    def set_slow(self) -> None:
+        self.slow = True
+        if self.place is not None:
+            self.place.free()
+
+
+def run_blast_pool(
+    fn: Callable, calls: list[tuple], n_threads: int, give_up: float | None = None
+) -> list:
+    """``[fn(*args) for args in calls]`` as one parallel BLAST run: each call is
+    a batch whose jobs are scheduled by a shared ``_BlastRun`` (slow jobs make
+    way for the next batches), on up to *n_threads* + BLAST_SLOW_THREADS
+    threads (see ``stop.run_threads``). A job still waiting at NCBI after
+    *give_up* seconds (default BLAST_GIVE_UP) is given up (see
+    ``BlastGaveUp``)."""
+    run = _BlastRun(
+        len(calls), n_threads, BLAST_GIVE_UP if give_up is None else give_up
+    )
+    spare = run.pool_size - min(run.n_threads, len(calls))
+    logger.debug(
+        f"Starting {len(calls)} BLAST {pluralize(len(calls), 'batch', 'batches')} "
+        f"on {run.n_threads} {pluralize(run.n_threads, 'thread')}, "
+        f"+{spare} while jobs are slow"
+    )
+
+    def batch(*args):
+        place = _Place(run)
+        # Taken before the batch starts, so it reads the circuit and the clock
+        # once it can run.
+        place.take()
+        token = _place.set(place)
+        try:
+            return fn(*args)
+        finally:
+            _place.reset(token)
+            place.free()
+
+    return stop.run_threads(batch, calls, run.pool_size)
+
+
 # Waits before each retry of a failed BLAST job. NCBI asks clients to poll a
 # job at most once a minute, so retries are spaced in tens of seconds.
 BLAST_RETRY_DELAYS = (30.0, 60.0)
@@ -237,6 +354,17 @@ _CPU_LIMIT_MESSAGE = "CPU usage limit"
 def _is_cpu_limit(text: str) -> bool:
     """Whether an NCBI reply or message says the search hit its CPU budget."""
     return _CPU_LIMIT_MESSAGE in text
+
+
+class BlastGaveUp(ValueError):
+    """A job still waiting at NCBI after its run's give-up time (BLAST_GIVE_UP
+    by default, see ``run_blast_pool``). In practice such a job rarely ends,
+    while the same search resubmitted usually takes a minute or two, so
+    ``submit_blast_batch`` resubmits it once and raises this only if the new
+    job is given up too. Its sequences are then reported failed (not cached,
+    so the next run queries them again) without a retry or a split, which
+    would only add searches to NCBI's queue, and it says nothing about NCBI
+    being down."""
 
 
 class BlastCpuLimit(ValueError):
@@ -307,7 +435,8 @@ def _run_qblast_once(
     entrez_query: str | None,
 ) -> list:
     """Submit one BLASTn job to NCBI through Biopython's qblast and parse its
-    XML2 result (one attempt). The fallback client (BLAST_CLIENT=qblast)."""
+    XML2 result (one attempt). The fallback client (BLAST_CLIENT=qblast). It
+    polls on its own, so a slow job neither makes way nor is given up."""
     with Blast.qblast(
         program="blastn",
         database="nt",
@@ -348,14 +477,18 @@ NCBI_BLAST_URL = "https://blast.ncbi.nlm.nih.gov/Blast.cgi"
 # NCBI's guidelines: at most one request every 10 s, and each job polled at
 # most once a minute. The first poll comes after NCBI's estimate of the job's
 # time (RTOE, or BLAST_FIRST_POLL without one), as in NCBI's sample client:
-# small jobs are often done within it. A job still running after
-# BLAST_SLOW_JOB is logged, but kept: a long wait means a busy NCBI, where a
-# resubmitted job would start again at the back of the queue. A job NCBI has
-# lost ends up UNKNOWN once its RID expires, and raises then.
+# small jobs are often done within it. Most jobs take 1 to 3 min, but one can
+# wait in NCBI's queue for hours: still waiting after BLAST_SLOW_JOB, it is
+# polled every BLAST_SLOW_POLL_INTERVAL and makes way for the next batches (see
+# _BlastRun), and after BLAST_GIVE_UP (the default, set per run) it is given up
+# (see BlastGaveUp). A job NCBI has lost ends up UNKNOWN once its RID expires,
+# and raises then.
 BLAST_REQUEST_INTERVAL = 10.0
 BLAST_FIRST_POLL = 30.0
 BLAST_POLL_INTERVAL = 60.0
-BLAST_SLOW_JOB = 600.0
+BLAST_SLOW_JOB = 300.0
+BLAST_SLOW_POLL_INTERVAL = 120.0
+BLAST_GIVE_UP = 600.0
 # Failed polls in a row (request error, or neither a result nor a status)
 # tolerated before the job is given up, so a transient error does not cost a
 # resubmission of a job that may be almost done.
@@ -437,28 +570,22 @@ def _duration(seconds: float) -> str:
     return f"{seconds:.0f} s" if seconds < 120 else f"{seconds / 60:.0f} min"
 
 
-def _poll_blast_job(rid: str, rtoe: int | None = None) -> bytes:
+def _poll_blast_job(rid: str, rtoe: int | None, job: _Job) -> bytes:
     """Poll a job until it is done and return its XML2 result (zip archive).
 
     The first poll comes after RTOE (or BLAST_FIRST_POLL). A failed poll
     (request error, or a reply that is neither the archive nor a status page)
-    is tried again, up to BLAST_POLL_FAILURES in a row. Raises if NCBI
-    reports the job failed or unknown (expired RID).
+    is tried again, up to BLAST_POLL_FAILURES in a row. A job still waiting
+    after ``job.slow_after`` is set slow, and after ``job.give_up`` it
+    raises ``BlastGaveUp`` (both counted from the first poll, so a long NCBI
+    estimate does not count). Raises if NCBI reports the job failed or unknown
+    (expired RID).
     """
-    delay = rtoe or BLAST_FIRST_POLL
+    stop.wait(rtoe or BLAST_FIRST_POLL)
     start = time.monotonic()
-    warned = False
     failures = 0
+    status_link = f"{NCBI_BLAST_URL}?CMD=Get&RID={rid}&FORMAT_OBJECT=SearchInfo"
     while True:
-        stop.wait(delay)
-        delay = BLAST_POLL_INTERVAL
-        if not warned and time.monotonic() - start > BLAST_SLOW_JOB:
-            logger.warning(
-                f"{_job_label.get()} (RID {rid}) still running after "
-                f"{_duration(BLAST_SLOW_JOB)}, status: "
-                f"{NCBI_BLAST_URL}?CMD=Get&RID={rid}&FORMAT_OBJECT=SearchInfo"
-            )
-            warned = True
         try:
             # ALIGNMENTS and DESCRIPTIONS as qblast sends them (its defaults).
             reply = _blast_request(
@@ -474,6 +601,7 @@ def _poll_blast_job(rid: str, rtoe: int | None = None) -> bytes:
             if failures >= BLAST_POLL_FAILURES:
                 raise
             logger.debug(f"Poll of BLAST job {rid} failed ({e}); polling again")
+            stop.wait(BLAST_SLOW_POLL_INTERVAL if job.slow else BLAST_POLL_INTERVAL)
             continue
         failures = 0
         if match.group(1) != "WAITING":
@@ -481,6 +609,20 @@ def _poll_blast_job(rid: str, rtoe: int | None = None) -> bytes:
             if _is_cpu_limit(reply.text):
                 raise BlastCpuLimit(f"{ended}: CPU usage limit was exceeded")
             raise ValueError(ended)
+        waited = time.monotonic() - start
+        if waited > job.give_up:
+            raise BlastGaveUp(
+                f"RID {rid} still waiting at NCBI after {_duration(waited)} "
+                f"(status: {status_link})"
+            )
+        if waited > job.slow_after and not job.slow:
+            job.set_slow()
+            logger.info(
+                f"{_job_label.get()} (RID {rid}) still waiting at NCBI after "
+                f"{_duration(waited)}; now polled every "
+                f"{_duration(BLAST_SLOW_POLL_INTERVAL)} (status: {status_link})"
+            )
+        stop.wait(BLAST_SLOW_POLL_INTERVAL if job.slow else BLAST_POLL_INTERVAL)
 
 
 def _run_blast_job_once(
@@ -490,17 +632,19 @@ def _run_blast_job_once(
     entrez_query: str | None,
 ) -> list:
     """Submit one BLASTn job to NCBI and parse its XML2 result (one attempt)."""
+    job = _Job()
     rid, rtoe = _submit_blast_job(multi_fasta, evalue, hitlist_size, entrez_query)
     estimate = f"NCBI estimate {rtoe} s" if rtoe is not None else "no NCBI estimate"
     logger.info(f"{_job_label.get()} submitted: RID {rid}, {estimate}")
-    return _read_job_result(_poll_blast_job(rid, rtoe), multi_fasta)
+    return _read_job_result(_poll_blast_job(rid, rtoe, job), multi_fasta)
 
 
 # Same job, resubmitted as a whole after each delay in BLAST_RETRY_DELAYS, as
-# with qblast: a failed submission, a job given up or a bad result is retried.
+# with qblast: a failed submission or poll, or a bad result, is retried (a job
+# given up or too heavy for NCBI is not).
 _run_blast_job = retry_call(
     delays=BLAST_RETRY_DELAYS,
-    no_retry=(BlastCpuLimit,),
+    no_retry=(BlastCpuLimit, BlastGaveUp),
     describe=lambda: _job_label.get(),
 )(_run_blast_job_once)
 
@@ -566,7 +710,8 @@ def submit_blast_batch(
     response, and returns a raw results DataFrame.
     With ``retry``, a failed job is resubmitted after each delay in
     ``BLAST_RETRY_DELAYS``; if it still fails, returns None so the caller can
-    handle partial results.
+    handle partial results. A job given up while waiting at NCBI is
+    resubmitted once, at once (see ``BlastGaveUp``).
 
     Args:
         batch: List of SeqRecord objects to query.
@@ -587,6 +732,9 @@ def submit_blast_batch(
     Raises:
         BlastCpuLimit: NCBI stopped the search at its CPU budget; the caller
             splits the batch (it is not recorded on ``circuit``).
+        BlastGaveUp: the job, resubmitted once, was given up again while
+            waiting at NCBI; the caller reports its sequences failed (not
+            recorded either).
     """
     if circuit is not None and circuit.is_open:
         retry = False
@@ -598,7 +746,14 @@ def submit_blast_batch(
         logger.debug(f"{label}: {len(batch)} sequences")
 
         multi_fasta = records_to_fasta_string(batch)
-        records = _blast_runner(retry)(multi_fasta, evalue, hitlist_size, entrez_query)
+        runner = _blast_runner(retry)
+        try:
+            records = runner(multi_fasta, evalue, hitlist_size, entrez_query)
+        except BlastGaveUp as e:
+            logger.warning(f"{label} given up: {e}; resubmitting it")
+            records = _blast_runner(retry=False)(
+                multi_fasta, evalue, hitlist_size, entrez_query
+            )
         df = parse_blast_records(records)
 
         logger.info(
@@ -608,6 +763,9 @@ def submit_blast_batch(
 
     except BlastCpuLimit as e:
         logger.warning(f"{label} too heavy for NCBI: {e}")
+        raise
+    except BlastGaveUp as e:
+        logger.warning(f"{label} given up again: {e}. Run the step again to retry it.")
         raise
     except Exception as e:
         logger.error(f"{label} failed: {e}")
@@ -655,15 +813,29 @@ def _split_batch(
     toward the "NCBI is down" threshold. Splitting stops once the step is
     stopped, or once the circuit is open unless the batch was too heavy (a
     CPU-limit reply shows NCBI is answering). The halves of a too-heavy batch
-    keep their retries, since nothing says they would fail.
+    keep their retries, since nothing says they would fail. Once a part is
+    given up while waiting at NCBI, nothing more is sent: more searches would
+    only wait in the same queue, so every part not done yet is failed.
 
     Returns:
         Tuple of (result DataFrames of the parts that succeeded, ids of the
         sequences still failed).
     """
+    done = []  # (result DataFrame, part) of the parts that succeeded
+    try:
+        _split_into(batch, batch_id, circuit, too_heavy, blast_kwargs, done)
+    except BlastGaveUp:
+        pass  # nothing more is sent: the parts not done fail below
+    ok = {rec.id for _, part in done for rec in part}
+    return [df for df, _ in done], [rec.id for rec in batch if rec.id not in ok]
+
+
+def _split_into(batch, batch_id, circuit, too_heavy, blast_kwargs, done):
+    """``_split_batch`` on *batch*: adds (result, part) to *done* for each part
+    that succeeds. A give-up raises ``BlastGaveUp`` up to ``_split_batch``."""
     circuit_open = circuit is not None and circuit.is_open and not too_heavy
     if len(batch) == 1 or stop.stop_requested() or circuit_open:
-        return [], [rec.id for rec in batch]
+        return
 
     mid = len(batch) // 2
     halves = [batch[:mid], batch[mid:]]
@@ -672,36 +844,28 @@ def _split_batch(
         f"Batch {batch_id} {reason}; splitting it into "
         f"{len(halves[0])} + {len(halves[1])} sequences"
     )
-    results, heavy = [], []
+    to_split = []  # (half, whether it was too heavy)
     for half in halves:
         try:
-            results.append(
-                submit_blast_batch(
-                    half,
-                    batch_id=batch_id,
-                    retry=too_heavy,
-                    circuit=circuit,
-                    **blast_kwargs,
-                )
+            res = submit_blast_batch(
+                half,
+                batch_id=batch_id,
+                retry=too_heavy,
+                circuit=circuit,
+                **blast_kwargs,
             )
-            heavy.append(False)
         except BlastCpuLimit:
-            results.append(None)
-            heavy.append(True)
-    if not too_heavy and not any(heavy) and all(res is None for res in results):
-        return [], [rec.id for rec in batch]
+            to_split.append((half, True))
+        else:
+            if res is not None:
+                done.append((res, half))
+            else:
+                to_split.append((half, False))
+    if not too_heavy and len(to_split) == 2 and not any(h for _, h in to_split):
+        return  # both halves failed: likely NCBI's side
 
-    dfs, failed = [], []
-    for half, res, half_heavy in zip(halves, results, heavy):
-        if res is not None:
-            dfs.append(res)
-            continue
-        half_dfs, half_failed = _split_batch(
-            half, batch_id, circuit, too_heavy=half_heavy, **blast_kwargs
-        )
-        dfs += half_dfs
-        failed += half_failed
-    return dfs, failed
+    for half, half_heavy in to_split:
+        _split_into(half, batch_id, circuit, half_heavy, blast_kwargs, done)
 
 
 def blast_batch(
@@ -711,9 +875,10 @@ def blast_batch(
     progress_handler: dict | object | None = None,
     **blast_kwargs,
 ) -> tuple[list[pd.DataFrame], list[str]]:
-    """Run one batch as a worker of a parallel run: submit it with retries,
-    split it if it still fails or is too heavy for NCBI (see ``_split_batch``),
-    then report its sequences to *progress_handler*.
+    """Run one batch as a worker of a parallel run (``run_blast_pool``): submit
+    it with retries, split it if it still fails or is too heavy for NCBI (see
+    ``_split_batch``), then report its sequences to *progress_handler*. A batch
+    given up twice while waiting at NCBI (see ``BlastGaveUp``) fails as it is.
 
     *blast_kwargs* are those of ``submit_blast_batch`` (evalue, hitlist_size,
     entrez_query), so callers running batches with different queries in one
@@ -732,6 +897,8 @@ def blast_batch(
         )
     except BlastCpuLimit:
         outcome = _split_batch(batch, batch_id, circuit, too_heavy=True, **blast_kwargs)
+    except BlastGaveUp:
+        outcome = [], [rec.id for rec in batch]
     else:
         if result is not None:
             outcome = [result], []
@@ -751,17 +918,19 @@ def run_blast_batches(
     entrez_query: str | None = None,
     progress_handler: dict | object | None = None,
     circuit: BlastCircuit | None = None,
+    give_up: float | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Execute multiple NCBI BLAST batches in parallel.
 
-    Runs up to n_threads batches concurrently using joblib threading. Progress
-    is reported per batch via progress_handler. Each worker runs in a copy of
-    the caller's context, so log context set by the caller (e.g. the UI log
-    sink) also applies to the workers' logs.
+    Runs up to n_threads batches concurrently, and a few more while jobs are
+    slow at NCBI (see ``run_blast_pool``). Progress is reported per batch via
+    progress_handler. Each worker runs in a copy of the caller's context, so
+    log context set by the caller (e.g. the UI log sink) also applies to the
+    workers' logs.
 
     Args:
         batches: List of sequence batches, each a list of SeqRecord objects.
-        n_threads: Maximum number of concurrent threads. Capped at len(batches).
+        n_threads: Batches run at once at normal pace. Capped at len(batches).
         evalue: E-value significance threshold for BLAST hits.
         hitlist_size: Maximum number of hits per query sequence.
         entrez_query: Optional filter in Entrez search syntax, passed to every
@@ -773,6 +942,9 @@ def run_blast_batches(
             - None for silent execution.
         circuit: Optional ``BlastCircuit`` shared by the whole run. A new one
             is created for this call when none is given.
+        give_up: Seconds a job may wait at NCBI before it is resubmitted
+            once, then counted as failed (default BLAST_GIVE_UP, see
+            ``BlastGaveUp``).
 
     Returns:
         Tuple of (concatenated DataFrame of successful batch results,
@@ -781,13 +953,11 @@ def run_blast_batches(
         caller can retry them instead of caching them as empty. A batch that
         fails its retries, or that NCBI stops at its CPU limit, is split by
         ``_split_batch`` (unless the circuit is open), so only the sequences
-        that still fail are listed.
+        that still fail are listed. A batch given up twice while waiting at
+        NCBI (see ``BlastGaveUp``) lists all its sequences.
     """
     if not batches:
         return pd.DataFrame(columns=BLAST_RAW_COLUMNS), []
-    n_threads = min(n_threads, len(batches))
-    n_threads_str = pluralize(n_threads, "thread")
-    logger.debug(f"Starting parallel execution with {n_threads} {n_threads_str}")
 
     if circuit is None:
         circuit = BlastCircuit()
@@ -801,8 +971,8 @@ def run_blast_batches(
         label = f"{i + 1}/{len(batches)}"
         return blast_batch(batch, label, circuit, progress_handler, **blast_kwargs)
 
-    outcomes = stop.run_threads(
-        worker, [(batch, i) for i, batch in enumerate(batches)], n_threads
+    outcomes = run_blast_pool(
+        worker, [(batch, i) for i, batch in enumerate(batches)], n_threads, give_up
     )
 
     log_batch_failures(outcomes)

@@ -20,6 +20,7 @@ import pandas as pd
 import streamlit as st
 from loguru import logger
 
+from trident.clients.ncbi import BLAST_SLOW_THREADS
 from trident.core.utils import pluralize
 from trident.core import stop
 from trident.logging import get_log_level
@@ -189,8 +190,16 @@ BLAST_HELP = {
         "smaller ones; if many batches fail, lower the batch size."
     ),
     "n_threads": (
-        "Number of BLAST requests run at NCBI at the same time. More can speed up "
-        "large inputs, but NCBI throttles heavy use, so too many can make batches fail."
+        "Number of BLAST searches run at NCBI at the same time. More can speed up "
+        "large inputs, but NCBI throttles heavy use, so too many can make batches "
+        "fail. A search left waiting at NCBI makes way for another one, up to "
+        f"{BLAST_SLOW_THREADS} more."
+    ),
+    "give_up": (
+        "Minutes a BLAST search may wait at NCBI. NCBI sometimes leaves a search "
+        "waiting for hours: past this time, it is sent again once, then counted "
+        "as failed (re-run the step to retry it). Most searches take 1 to 3 "
+        "min; raise it if large batches keep failing this way."
     ),
 }
 
@@ -655,12 +664,18 @@ def failed_items(df) -> list[str]:
 
 
 def show_failed_items_banner(
-    failed, item: str = "item", items: str = "items", source: str = ""
+    failed,
+    item: str = "item",
+    items: str = "items",
+    source: str = "",
+    gives_up: bool = False,
 ) -> None:
     """Warn about items whose query failed in the last run.
 
     Failed items are not cached (see ``failure_sink`` in ``save_to_db``), so a
     plain re-run queries them again while everything else comes from the cache.
+    *gives_up* says the source also fails a query it gave up waiting for (NCBI
+    BLAST jobs stuck in NCBI's queue).
     """
     failed = list(failed or [])
     if not failed:
@@ -670,10 +685,13 @@ def show_failed_items_banner(
         shown += f", ... (+{len(failed) - 10} more)"
     request = f"the {source} request" if source else "the request"
     label = pluralize(len(failed), item, items)
+    outcome = (
+        "failed after retries or was given up" if gives_up else "failed after retries"
+    )
     st.warning(
-        f"⚠️ {len(failed)} {label} could not be queried: {request} failed "
-        "after retries, so they were not saved. Click **Re-run with Same "
-        "Settings** to retry only these; everything else comes from the cache.\n\n"
+        f"⚠️ {len(failed)} {label} could not be queried: {request} {outcome}, "
+        "so they were not saved. Click **Re-run with Same Settings** to retry "
+        "only these; everything else comes from the cache.\n\n"
         f"{shown}"
     )
 

@@ -37,6 +37,8 @@ from trident.ui.ui import (
 )
 
 from trident.ui.defaults import (
+    BLAST_GIVE_UP_MINUTES_DEFAULT,
+    BLAST_GIVE_UP_MINUTES_MIN,
     BLAST_MAX_THREADS,
     HYPO_MAX_HITS_DEFAULT,
     HYPO_EV_EXPONENT_DEFAULT,
@@ -150,7 +152,7 @@ def display_hypo_parameters():
         st.markdown(
             "These settings affect processing speed but not biological results, and should be left at default values most of the time."
         )
-        tcol1, tcol2 = st.columns(2)
+        tcol1, tcol2, tcol3 = st.columns(3)
 
         with tcol1:
             persist_value("hypo_batch_size", HYPO_BATCH_SIZE_DEFAULT)
@@ -176,8 +178,18 @@ def display_hypo_parameters():
                 key="hypo_num_threads",
             )
             save_widget("hypo_num_threads")
+        with tcol3:
+            persist_value("hypo_give_up", BLAST_GIVE_UP_MINUTES_DEFAULT)
+            give_up = st.number_input(
+                "Give up after (min)",
+                BLAST_GIVE_UP_MINUTES_MIN,
+                None,  # no upper limit: a job waiting longer is still polled
+                help=BLAST_HELP["give_up"],
+                key="hypo_give_up",
+            )
+            save_widget("hypo_give_up")
 
-    return max_hits, ev_exponent, identity_cutoff, ntop, batch_size, threads
+    return max_hits, ev_exponent, identity_cutoff, ntop, batch_size, threads, give_up
 
 
 def hypo_search_job(*, force_rerun, retry_empty=False, status, progress_bar, params):
@@ -209,6 +221,7 @@ def hypo_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
         sequences_dict,
         batch_size=params["batch_size"],
         num_threads=params["num_threads"],
+        give_up_minutes=params["give_up_minutes"],
         ev_exponent=params["hypo_ev_exponent"],
         max_hits=params["hypo_max_hits"],
         identity_cutoff=params["hypo_identity_cutoff"],
@@ -250,7 +263,7 @@ def hypo_search_workflow():
         st.markdown("### ⚙️ Search Configuration and Execution")
 
         # Parameter Inputs (NCBI BLAST parameters)
-        max_hits, ev_exponent, identity_cutoff, ntop, batch_size, n_threads = (
+        max_hits, ev_exponent, identity_cutoff, ntop, batch_size, n_threads, give_up = (
             display_hypo_parameters()
         )
         current_params = {
@@ -260,6 +273,7 @@ def hypo_search_workflow():
             "hypo_ntop": ntop,
             "batch_size": batch_size,
             "num_threads": n_threads,
+            "give_up_minutes": give_up,
         }
         st.divider()
 
@@ -293,6 +307,7 @@ def hypo_search_workflow():
             "BOLD proxy sequence",
             "BOLD proxy sequences",
             source="NCBI BLAST",
+            gives_up=True,
         )
     if mode != "NEW" and st.session_state.hypo_merge_df is not None:
         with st.expander(
@@ -558,6 +573,7 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
         hypo_filter_df=hypo_filter_df,
         ev_exponent=params["hypo_check_ev_exponent"],
         num_threads=params["num_threads"],
+        give_up_minutes=params["give_up_minutes"],
         db_path=st.session_state.db_path,
         force_rerun=force_rerun,
         retry_empty=retry_empty,
@@ -704,6 +720,13 @@ def hypo_final_check_workflow():
                 ),
                 BLAST_MAX_THREADS,
             ),
+            # And so does its "Give up after" setting.
+            "give_up_minutes": coerce_stored_value(
+                st.session_state._widget_overrides.get(
+                    "hypo_give_up", BLAST_GIVE_UP_MINUTES_DEFAULT
+                ),
+                BLAST_GIVE_UP_MINUTES_DEFAULT,
+            ),
         }
         st.divider()
 
@@ -736,6 +759,7 @@ def hypo_final_check_workflow():
                 "sequence",
                 "sequences",
                 source="NCBI BLAST",
+                gives_up=True,
             )
         if mode != "NEW" and st.session_state.hypo_check_df is not None:
             st.divider()
