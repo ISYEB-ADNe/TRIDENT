@@ -1,5 +1,6 @@
 """NCBI BLAST client — submit queries, parse results, filter by barcoding gap."""
 
+import contextvars
 import io
 import re
 import threading
@@ -203,6 +204,13 @@ def parse_blast_records(records: list) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=BLAST_RAW_COLUMNS)
 
 
+# Label of the batch the current thread is running ("Batch 3/40 (MOTU ids)"),
+# set by submit_blast_batch, so the client's log lines (submission, slow job,
+# retry) say which batch they are about.
+_job_label: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "blast_job_label", default="BLAST job"
+)
+
 # Waits before each retry of a failed BLAST job. NCBI asks clients to poll a
 # job at most once a minute, so retries are spaced in tens of seconds.
 BLAST_RETRY_DELAYS = (30.0, 60.0)
@@ -289,7 +297,9 @@ def _run_qblast_once(
 
 # Same job, resubmitted as a whole after each delay in BLAST_RETRY_DELAYS: a
 # failed submission, poll or truncated response is retried.
-_run_qblast = retry_call(delays=BLAST_RETRY_DELAYS)(_run_qblast_once)
+_run_qblast = retry_call(delays=BLAST_RETRY_DELAYS, describe=lambda: _job_label.get())(
+    _run_qblast_once
+)
 
 
 ### BLAST URL API CLIENT ###
@@ -395,6 +405,11 @@ def _submit_blast_job(
     return match.group(1), int(rtoe.group(1)) if rtoe else None
 
 
+def _duration(seconds: float) -> str:
+    """A wait as the log shows it: seconds under 2 minutes, then minutes."""
+    return f"{seconds:.0f} s" if seconds < 120 else f"{seconds / 60:.0f} min"
+
+
 def _poll_blast_job(rid: str, rtoe: int | None = None) -> bytes:
     """Poll a job until it is done and return its XML2 result (zip archive).
 
@@ -412,8 +427,9 @@ def _poll_blast_job(rid: str, rtoe: int | None = None) -> bytes:
         delay = BLAST_POLL_INTERVAL
         if not warned and time.monotonic() - start > BLAST_SLOW_JOB:
             logger.warning(
-                f"BLAST job {rid} still running after {BLAST_SLOW_JOB / 60:.0f} min, "
-                f"status: {NCBI_BLAST_URL}?CMD=Get&RID={rid}&FORMAT_OBJECT=SearchInfo"
+                f"{_job_label.get()} (RID {rid}) still running after "
+                f"{_duration(BLAST_SLOW_JOB)}, status: "
+                f"{NCBI_BLAST_URL}?CMD=Get&RID={rid}&FORMAT_OBJECT=SearchInfo"
             )
             warned = True
         try:
@@ -445,13 +461,16 @@ def _run_blast_job_once(
 ) -> list:
     """Submit one BLASTn job to NCBI and parse its XML2 result (one attempt)."""
     rid, rtoe = _submit_blast_job(multi_fasta, evalue, hitlist_size, entrez_query)
-    logger.debug(f"BLAST job {rid} submitted (estimated {rtoe} s)")
+    estimate = f"NCBI estimate {rtoe} s" if rtoe is not None else "no NCBI estimate"
+    logger.info(f"{_job_label.get()} submitted: RID {rid}, {estimate}")
     return _read_job_result(_poll_blast_job(rid, rtoe), multi_fasta)
 
 
 # Same job, resubmitted as a whole after each delay in BLAST_RETRY_DELAYS, as
 # with qblast: a failed submission, a job given up or a bad result is retried.
-_run_blast_job = retry_call(delays=BLAST_RETRY_DELAYS)(_run_blast_job_once)
+_run_blast_job = retry_call(
+    delays=BLAST_RETRY_DELAYS, describe=lambda: _job_label.get()
+)(_run_blast_job_once)
 
 
 def _blast_runner(retry: bool) -> Callable:
@@ -470,7 +489,8 @@ class BlastCircuit:
     ``threshold`` jobs in a row have failed all their retries, the circuit is
     open: later jobs get a single attempt and failed batches are not split.
     A success closes it again. Thread-safe; create one per run and pass it to
-    every ``submit_blast_batch`` / ``run_blast_batches`` call of that run.
+    every ``submit_blast_batch`` / ``blast_batch`` / ``run_blast_batches`` call
+    of that run.
     """
 
     def __init__(self, threshold: int = BLAST_CIRCUIT_THRESHOLD):
@@ -503,7 +523,7 @@ def submit_blast_batch(
     entrez_query: str | None = None,
     evalue: float = 1e-10,
     hitlist_size: int = 500,
-    batch_id: int | None = None,
+    batch_id: int | str | None = None,
     retry: bool = True,
     circuit: BlastCircuit | None = None,
 ) -> pd.DataFrame | None:
@@ -534,20 +554,27 @@ def submit_blast_batch(
     """
     if circuit is not None and circuit.is_open:
         retry = False
+    label = f"Batch {batch_id}" if batch_id is not None else "BLAST job"
+    token = _job_label.set(label)
+    start = time.monotonic()
     try:
         stop.check_stop()  # also for the qblast client, which has no stop
-        logger.debug(f"Processing batch {batch_id} with {len(batch)} sequences")
+        logger.debug(f"{label}: {len(batch)} sequences")
 
         multi_fasta = records_to_fasta_string(batch)
         records = _blast_runner(retry)(multi_fasta, evalue, hitlist_size, entrez_query)
         df = parse_blast_records(records)
 
-        logger.debug(f"Batch {batch_id} completed successfully")
+        logger.info(
+            f"{label} done after {_duration(time.monotonic() - start)}: {len(df)} hits"
+        )
         result = df
 
     except Exception as e:
-        logger.error(f"Error in batch {batch_id}: {e}")
+        logger.error(f"{label} failed: {e}")
         result = None
+    finally:
+        _job_label.reset(token)
 
     # A failure counts once retries were tried; any success closes the circuit.
     # A batch skipped by a stop says nothing about NCBI.
@@ -562,7 +589,7 @@ def submit_blast_batch(
 
 def _split_failed_batch(
     batch: list[SeqRecord],
-    batch_id: int | None,
+    batch_id: int | str | None,
     circuit: BlastCircuit | None = None,
     **blast_kwargs,
 ) -> tuple[list[pd.DataFrame], list[str]]:
@@ -619,6 +646,41 @@ def _split_failed_batch(
     return dfs, failed
 
 
+def blast_batch(
+    batch: list[SeqRecord],
+    batch_id: int | str,
+    circuit: BlastCircuit,
+    progress_handler: dict | object | None = None,
+    **blast_kwargs,
+) -> tuple[list[pd.DataFrame], list[str]]:
+    """Run one batch as a worker of a parallel run: submit it with retries,
+    split it if it still fails (see ``_split_failed_batch``), then report its
+    sequences to *progress_handler*.
+
+    *blast_kwargs* are those of ``submit_blast_batch`` (evalue, hitlist_size,
+    entrez_query), so callers running batches with different queries in one
+    pool give each its own.
+
+    Returns:
+        Tuple of (result DataFrames, ids of the sequences whose query errored).
+    """
+    # Read before submitting: a batch submitted while the circuit is open got a
+    # single attempt, so it is not split even if another thread closes the
+    # circuit in the meantime.
+    retried = not circuit.is_open
+    result = submit_blast_batch(
+        batch, batch_id=batch_id, circuit=circuit, **blast_kwargs
+    )
+    if result is not None:
+        outcome = [result], []
+    elif not retried or circuit.is_open or stop.stop_requested():
+        outcome = [], [rec.id for rec in batch]
+    else:
+        outcome = _split_failed_batch(batch, batch_id, circuit, **blast_kwargs)
+    notify_progress(progress_handler, len(batch))
+    return outcome
+
+
 def run_blast_batches(
     batches: list[list[SeqRecord]],
     n_threads: int = 10,
@@ -672,49 +734,41 @@ def run_blast_batches(
         "entrez_query": entrez_query,
     }
 
-    def worker_wrapper(batch, i) -> tuple[list[pd.DataFrame], list[str]]:
-        # Read before submitting: a batch submitted while the circuit is open
-        # got a single attempt, so it is not split even if another thread
-        # closes the circuit in the meantime.
-        retried = not circuit.is_open
-        result = submit_blast_batch(
-            batch, batch_id=i + 1, circuit=circuit, **blast_kwargs
-        )
-        if result is not None:
-            outcome = [result], []
-        elif not retried or circuit.is_open or stop.stop_requested():
-            outcome = [], [rec.id for rec in batch]
-        else:
-            outcome = _split_failed_batch(batch, i + 1, circuit, **blast_kwargs)
-        notify_progress(progress_handler, len(batch))
-        return outcome
+    def worker(batch, i) -> tuple[list[pd.DataFrame], list[str]]:
+        label = f"{i + 1}/{len(batches)}"
+        return blast_batch(batch, label, circuit, progress_handler, **blast_kwargs)
 
     outcomes = stop.run_threads(
-        worker_wrapper, [(batch, i) for i, batch in enumerate(batches)], n_threads
+        worker, [(batch, i) for i, batch in enumerate(batches)], n_threads
     )
 
+    log_batch_failures(outcomes)
     successful = [df for dfs, _ in outcomes for df in dfs]
     # Ids of sequences whose query still errored after retries and splitting,
     # so the caller can retry them rather than cache them as empty (a failed
     # query is not a "no hits" result).
     failed_ids = [rec_id for _, ids in outcomes for rec_id in ids]
-    failed_count = sum(1 for _, ids in outcomes if ids)
+    if not successful:
+        return pd.DataFrame(columns=BLAST_RAW_COLUMNS), failed_ids
+    return pd.concat(successful, ignore_index=True), failed_ids
 
+
+def log_batch_failures(outcomes: list[tuple[list[pd.DataFrame], list[str]]]) -> None:
+    """Summarise the failures of a parallel run from its ``blast_batch``
+    outcomes: how many batches failed and sequences went unsearched, and an
+    error when every batch failed."""
+    failed_ids = [rec_id for _, ids in outcomes for rec_id in ids]
+    failed_count = sum(1 for _, ids in outcomes if ids)
     if failed_count > 0:
         logger.warning(
-            f"{failed_count}/{len(batches)} batches had failures: "
+            f"{failed_count}/{len(outcomes)} batches had failures: "
             f"{len(failed_ids)} sequences not searched"
         )
-
-    if not successful:
-        if failed_ids:
-            logger.error("All NCBI batches failed: returning empty DataFrame")
-        return pd.DataFrame(columns=BLAST_RAW_COLUMNS), failed_ids
-
+    if failed_ids and not any(dfs for dfs, _ in outcomes):
+        logger.error("All NCBI batches failed: no results")
     logger.debug(
-        f"Batches without failures: {len(batches) - failed_count}/{len(batches)}"
+        f"Batches without failures: {len(outcomes) - failed_count}/{len(outcomes)}"
     )
-    return pd.concat(successful, ignore_index=True), failed_ids
 
 
 ### RESULT PROCESSING ###

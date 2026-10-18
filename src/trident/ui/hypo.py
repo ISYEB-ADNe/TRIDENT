@@ -15,6 +15,7 @@ import trident.pipelines as pipe
 from trident.pipelines.results_pipeline import add_below_mol
 
 from trident.ui.ui import (
+    coerce_stored_value,
     record_empty_step,
     failed_items,
     show_failed_items_banner,
@@ -36,6 +37,7 @@ from trident.ui.ui import (
 )
 
 from trident.ui.defaults import (
+    BLAST_MAX_THREADS,
     HYPO_MAX_HITS_DEFAULT,
     HYPO_EV_EXPONENT_DEFAULT,
     HYPO_IDENTITY_CUTOFF_DEFAULT,
@@ -162,10 +164,14 @@ def display_hypo_parameters():
             save_widget("hypo_batch_size")
         with tcol2:
             persist_value("hypo_num_threads", HYPO_NUM_THREADS_DEFAULT)
+            # A value saved before the cap would be out of the widget's range.
+            st.session_state.hypo_num_threads = min(
+                st.session_state.hypo_num_threads, BLAST_MAX_THREADS
+            )
             threads = st.number_input(
                 "Parallel Threads",
                 1,
-                10,
+                BLAST_MAX_THREADS,
                 help=BLAST_HELP["n_threads"],
                 key="hypo_num_threads",
             )
@@ -553,6 +559,7 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
         logsink.wrap(pipe.run_hypo_check, before=lambda: set_ncbi_email(email)),
         hypo_filter_df=hypo_filter_df,
         ev_exponent=params["hypo_check_ev_exponent"],
+        num_threads=params["num_threads"],
         db_path=st.session_state.db_path,
         force_rerun=force_rerun,
         retry_empty=retry_empty,
@@ -689,6 +696,16 @@ def hypo_final_check_workflow():
         ev_exponent = display_hypo_check_controls()
         current_params = {
             "hypo_check_ev_exponent": ev_exponent,
+            # The search's "Parallel Threads" setting also applies to the check.
+            "num_threads": min(
+                coerce_stored_value(
+                    st.session_state._widget_overrides.get(
+                        "hypo_num_threads", HYPO_NUM_THREADS_DEFAULT
+                    ),
+                    HYPO_NUM_THREADS_DEFAULT,
+                ),
+                BLAST_MAX_THREADS,
+            ),
         }
         st.divider()
 

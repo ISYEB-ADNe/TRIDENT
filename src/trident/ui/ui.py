@@ -746,7 +746,7 @@ class StreamlitLogSink:
     registered via ``allow_current_thread()`` or ``wrap()``, preventing
     cross-session log leakage. ``wrap()`` also tags the call's log context
     with this sink, so threads the call spawns in a copy of its context (the
-    BLAST batch workers, see ``run_blast_batches``) are accepted too.
+    BLAST batch workers, see ``stop.run_threads``) are accepted too.
     """
 
     def __init__(self, container=None, prefix=""):

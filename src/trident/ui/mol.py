@@ -35,6 +35,7 @@ from trident.ui.ui import (
 )
 
 from trident.ui.defaults import (
+    BLAST_MAX_THREADS,
     NCBI_MAX_HITS_DEFAULT,
     NCBI_EV_EXPONENT_DEFAULT,
     NCBI_NUM_THREADS_DEFAULT,
@@ -128,10 +129,14 @@ def display_ncbi_parameters():
             save_widget("ncbi_batch_size")
         with tcol2:
             persist_value("ncbi_num_threads", NCBI_NUM_THREADS_DEFAULT)
+            # A value saved before the cap would be out of the widget's range.
+            st.session_state.ncbi_num_threads = min(
+                st.session_state.ncbi_num_threads, BLAST_MAX_THREADS
+            )
             threads = st.number_input(
                 "Parallel Threads",
                 1,
-                10,
+                BLAST_MAX_THREADS,
                 help=BLAST_HELP["n_threads"],
                 key="ncbi_num_threads",
             )

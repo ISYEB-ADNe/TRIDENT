@@ -31,6 +31,7 @@ from trident.core.constants import (
     HYPO_IDENTITY,
     HYPO_CHECK_EV_EXPONENT,
 )
+from trident.core import stop
 from trident.core.database import save_to_db, FullCache, CustomCache
 from trident.core.utils import (
     preserve_sequence_order,
@@ -42,8 +43,9 @@ from trident.core.utils import (
 from trident.clients.ncbi import (
     BLAST_HIT_COLUMNS,
     BlastCircuit,
+    blast_batch,
     create_sequence_batches,
-    run_blast_batches,
+    log_batch_failures,
     process_blast_results,
     submit_blast_batch,
 )
@@ -162,7 +164,7 @@ def _hypo_search_rebuild(input_selected, original_inputs):
 def run_hypo_search(
     sequences_dict,
     batch_size: int = 10,
-    num_threads: int = 3,
+    num_threads: int = 4,
     ev_exponent: int = HYPO_EV_EXPONENT,
     max_hits: int = HYPO_MAX_HITS,
     identity_cutoff: float = HYPO_IDENTITY_CUTOFF,
@@ -170,16 +172,18 @@ def run_hypo_search(
     progress_handler: dict | None = None,
     failure_sink: list | None = None,
 ) -> pd.DataFrame:
-    """NCBI BLAST search on proxy sequences grouped by seq_id.
+    """NCBI BLAST search on the proxy sequences of each seq_id, restricted to
+    its Entrez query.
 
     A proxy record shared by several seq_ids with the same Entrez query is
     searched once: (proxy record id, entrez_query) is one cache item, and its
-    hits are returned once.
+    hits are returned once. Batches are made per query across seq_ids, and all
+    of them run in one pool of num_threads threads.
 
     Args:
         sequences_dict: {seq_id: {'sequences': [SeqRecord], 'entrez_query': str}}.
         batch_size: Sequences per NCBI batch.
-        num_threads: Parallel threads.
+        num_threads: Parallel threads, shared by the batches of every seq_id.
         ev_exponent: Negative exponent for E-value threshold (e.g. 10 → 1e-10).
         max_hits: Maximum hits per query.
         identity_cutoff: Minimum identity percentage to retain.
@@ -196,39 +200,62 @@ def run_hypo_search(
     seq_word = "sequence" if len(sequences_dict) == 1 else "sequences"
     logger.info(f"Starting HYPO search: {len(sequences_dict)} {seq_word}")
 
-    all_results = []
-    searched = set()  # (proxy record id, entrez_query) already searched
-    circuit = BlastCircuit()  # shared by every MOTU of this run
+    # Batches are made per Entrez query, across MOTUs: MOTUs with the same MOL
+    # species fill one batch instead of sending one small job each. All batches
+    # run in one pool, so a slow NCBI job holds only its own thread.
+    by_query: dict[str, list[SeqRecord]] = {}
+    owner = {}  # (proxy record id, entrez_query) -> MOTU that queued it
+    n_records = 0
     for seq_id, seq_dict in sequences_dict.items():
         query = seq_dict["entrez_query"]
-        records = [r for r in seq_dict["sequences"] if (r.id, query) not in searched]
-        # A skipped record counts as done: progress totals every record.
-        notify_progress(progress_handler, len(seq_dict["sequences"]) - len(records))
-        if not records:
-            logger.debug(f"Skipping {seq_id}: its proxies were searched already")
-            continue
-        searched.update((r.id, query) for r in records)
-        logger.info(f"Processing {seq_id} ({len(records)} seqs)")
-        batches = create_sequence_batches(records, batch_size)
-        results, failed_ids = run_blast_batches(
-            batches,
-            n_threads=num_threads,
-            evalue=10 ** (-ev_exponent),
-            hitlist_size=max_hits,
-            entrez_query=query,
-            progress_handler=progress_handler,
-            circuit=circuit,
+        n_records += len(seq_dict["sequences"])
+        for rec in seq_dict["sequences"]:
+            if (rec.id, query) not in owner:
+                owner[(rec.id, query)] = seq_id
+                by_query.setdefault(query, []).append(rec)
+    # A skipped record counts as done: progress totals every record.
+    n_shared = n_records - len(owner)
+    notify_progress(progress_handler, n_shared)
+
+    batches = [
+        (batch, query)
+        for query, records in by_query.items()
+        for batch in create_sequence_batches(records, batch_size)
+    ]
+    logger.info(
+        f"{len(owner)} proxy searches in {len(batches)} batches "
+        f"({n_shared} shared proxies searched once)"
+    )
+
+    circuit = BlastCircuit()  # shared by every job of this run
+    blast_kwargs = {"evalue": 10 ** (-ev_exponent), "hitlist_size": max_hits}
+
+    def job(k, batch, query):
+        # The label names the MOTUs, so every log line of the batch says which.
+        motus = ", ".join(dict.fromkeys(owner[(r.id, query)] for r in batch))
+        seqs = "seq" if len(batch) == 1 else "seqs"
+        label = f"{k}/{len(batches)} ({len(batch)} {seqs}: {motus})"
+        return blast_batch(
+            batch, label, circuit, progress_handler, entrez_query=query, **blast_kwargs
         )
-        # Report the proxy records whose BLAST errored, with this MOTU's query:
+
+    jobs = [(k, batch, query) for k, (batch, query) in enumerate(batches, start=1)]
+
+    all_results = []
+    outcomes = stop.run_threads(job, jobs, num_threads)
+    log_batch_failures(outcomes)
+    for (_, batch, query), (dfs, failed_ids) in zip(jobs, outcomes):
+        # Report the proxy records whose BLAST errored, with the batch's query:
         # (proxy seq_id, entrez_query) is the cache key, so they are retried on
-        # the next run rather than cached as empty. A proxy shared by several
-        # MOTUs stays cached for those where it succeeded.
+        # the next run rather than cached as empty. The same proxy under another
+        # query stays cached where it succeeded.
         if failed_ids and failure_sink is not None:
             failure_sink.extend((rid, query) for rid in failed_ids)
-        if not results.empty:
-            results = process_blast_results(results, fasta_sequences=records)
-            results["entrez_query"] = query
-            all_results.append(results)
+        for df in dfs:
+            if not df.empty:
+                results = process_blast_results(df, fasta_sequences=batch)
+                results["entrez_query"] = query
+                all_results.append(results)
 
     if all_results:
         search_df = pd.concat(all_results, ignore_index=True)
@@ -473,17 +500,21 @@ def _hypo_check_rebuild(input_selected, original_inputs):
 def run_hypo_check(
     hypo_filter_df: pd.DataFrame,
     ev_exponent: int = HYPO_CHECK_EV_EXPONENT,
+    num_threads: int = 4,
     progress_handler: dict | None = None,
     failure_sink: list | None = None,
 ) -> pd.DataFrame:
     """Per-species NCBI BLAST verification of HYPO candidates.
 
     BLASTs each target sequence against NCBI filtered to that species
-    to confirm the species has the target marker in GenBank.
+    to confirm the species has the target marker in GenBank. The checks are
+    independent jobs, run on up to num_threads threads.
 
     Args:
         hypo_filter_df: Filtered DataFrame from run_hypo_filter.
         ev_exponent: Negative exponent for E-value threshold.
+        num_threads: Parallel threads (NCBI's request spacing makes more than
+            about 6 useless).
         progress_handler: Optional progress tracker.
         failure_sink: If provided, the (seq_id, scientificName) of each check
             whose BLAST errored is appended here, so the cache layer retries it
@@ -502,36 +533,23 @@ def run_hypo_check(
         f"(evalue=1e-{ev_exponent})"
     )
 
-    all_results = []
     circuit = BlastCircuit()  # one check per sequence: stop retrying if NCBI is down
-    for index, row in sequences_df.iterrows():
-        seq_id, sci_name, seq_dna = (
-            row["seq_id"],
-            row["scientificName"],
-            row["dna_sequence"],
-        )
 
+    def check(index, seq_id, sci_name, seq_dna) -> pd.DataFrame | None:
         sequence = SeqRecord(Seq(seq_dna), id=seq_id)
         blast_res = submit_blast_batch(
             [sequence],
             entrez_query=f'"{sci_name}"[orgn]',
             evalue=10 ** (-ev_exponent),
-            batch_id=index,
+            batch_id=f"{index + 1}/{len(sequences_df)} ({seq_id}: {sci_name})",
             hitlist_size=10,
             circuit=circuit,
         )
-
+        notify_progress(progress_handler)
         if blast_res is None:
-            # BLAST errored: report this (seq_id, species) so it is retried, not
-            # recorded as a (false) no-hit. The other species of the seq_id
-            # stay cached.
-            if failure_sink is not None:
-                failure_sink.append((seq_id, sci_name))
-            notify_progress(progress_handler)
-            continue
-
+            return None
         if blast_res.empty:
-            result = pd.DataFrame(
+            return pd.DataFrame(
                 {
                     "seq_id": [seq_id],
                     "scientificName": [sci_name],
@@ -539,24 +557,40 @@ def run_hypo_check(
                     "hit_found": [False],
                 }
             )
-        else:
-            ncbi_data = process_blast_results(blast_res, fasta_sequences=[sequence])
-            result = pd.DataFrame(
-                {
-                    "seq_id": seq_id,
-                    "scientificName": sci_name,
-                    "dna_sequence": seq_dna,
-                    "scientificName_NCBI": ncbi_data["scientificName"],
-                    "query_cover": ncbi_data["query_cover"],
-                    "identity_percentage": ncbi_data["identity_percentage"],
-                    "hit_found": True,
-                    "hit_def": ncbi_data["hit_def"],
-                    "hit_url": ncbi_data["hit_url"],
-                }
-            )
+        ncbi_data = process_blast_results(blast_res, fasta_sequences=[sequence])
+        return pd.DataFrame(
+            {
+                "seq_id": seq_id,
+                "scientificName": sci_name,
+                "dna_sequence": seq_dna,
+                "scientificName_NCBI": ncbi_data["scientificName"],
+                "query_cover": ncbi_data["query_cover"],
+                "identity_percentage": ncbi_data["identity_percentage"],
+                "hit_found": True,
+                "hit_def": ncbi_data["hit_def"],
+                "hit_url": ncbi_data["hit_url"],
+            }
+        )
 
-        all_results.append(result)
-        notify_progress(progress_handler)
+    calls = list(
+        zip(
+            sequences_df.index,
+            sequences_df["seq_id"],
+            sequences_df["scientificName"],
+            sequences_df["dna_sequence"],
+        )
+    )
+    outcomes = stop.run_threads(check, calls, num_threads)
+    all_results = []
+    for (_, seq_id, sci_name, _), result in zip(calls, outcomes):
+        if result is None:
+            # BLAST errored: report this (seq_id, species) so it is retried, not
+            # recorded as a (false) no-hit. The other species of the seq_id
+            # stay cached.
+            if failure_sink is not None:
+                failure_sink.append((seq_id, sci_name))
+        else:
+            all_results.append(result)
 
     # Every sequence may have errored (all reported to failure_sink).
     if not all_results:

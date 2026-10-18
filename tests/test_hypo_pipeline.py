@@ -3,14 +3,15 @@
 prepare_hypo_input (build per-seq BLAST inputs + Entrez query), run_hypo_merge
 (map proxy hits back to target species), run_hypo_filter (threshold), and
 finalize_hypo_results (attach the per-species NCBI check). The two network steps
-(run_hypo_search, run_hypo_check) are only tested for their failure handling,
-with BLAST stubbed out.
+(run_hypo_search, run_hypo_check) are tested for their failure handling and
+for running their BLAST jobs in parallel, with BLAST stubbed out.
 
 The cached steps are wrapped by @save_to_db (+ @preserve_sequence_order); we
 unwrap to the pure logic so no database is involved.
 """
 
 import inspect
+import threading
 
 import pandas as pd
 from Bio.Seq import Seq
@@ -257,12 +258,13 @@ def test_hypo_search_failed_proxy_blast_is_not_cached(tmp_path, monkeypatch):
     query_a, query_b = '"Gadus morhua"[orgn]', '"Gadus chalcogrammus"[orgn]'
     searched = []
 
-    def blast(batches, entrez_query=None, **kwargs):
-        searched.extend((r.id, entrez_query) for batch in batches for r in batch)
+    def blast(batch, batch_id, circuit, progress_handler=None, entrez_query=None, **kw):
+        searched.extend((r.id, entrez_query) for r in batch)
         # P1 errors under query A only; every other search returns no hits.
-        return pd.DataFrame(), ["P1"] if entrez_query == query_a else []
+        failed = [r.id for r in batch if r.id == "P1" and entrez_query == query_a]
+        return [], failed
 
-    monkeypatch.setattr(hypo_pipeline, "run_blast_batches", blast)
+    monkeypatch.setattr(hypo_pipeline, "blast_batch", blast)
     sequences = {
         "t1": {
             "sequences": [
@@ -294,6 +296,53 @@ def test_hypo_search_failed_proxy_blast_is_not_cached(tmp_path, monkeypatch):
     )
 
 
+# --- run_hypo_search: parallel jobs ---
+
+
+def test_hypo_search_runs_motus_in_parallel(tmp_path, monkeypatch):
+    """A slow BLAST job holds only its own thread: the next MOTU's job runs
+    meanwhile, instead of waiting for it."""
+    other_done = threading.Event()
+
+    def blast(batch, batch_id, circuit, progress_handler=None, **kwargs):
+        if batch[0].id == "P1":  # t1's job is slow until t2's job has run
+            assert other_done.wait(timeout=5), "t2 waited for t1's job"
+        else:
+            other_done.set()
+        return [], []
+
+    monkeypatch.setattr(hypo_pipeline, "blast_batch", blast)
+    sequences = {
+        "t1": {"sequences": [SeqRecord(Seq("ACGT"), id="P1")], "entrez_query": "a"},
+        "t2": {"sequences": [SeqRecord(Seq("TTGG"), id="P2")], "entrez_query": "b"},
+    }
+
+    run_hypo_search(sequences, num_threads=2, db_path=str(tmp_path / "hypo.db"))
+
+    assert other_done.is_set()
+
+
+def test_hypo_search_batches_motus_sharing_a_query(tmp_path, monkeypatch):
+    """MOTUs with the same Entrez query fill one batch instead of sending one
+    small NCBI job each; a different query gets its own batch."""
+    sent = []
+
+    def blast(batch, batch_id, circuit, progress_handler=None, entrez_query=None, **kw):
+        sent.append((entrez_query, [r.id for r in batch]))
+        return [], []
+
+    monkeypatch.setattr(hypo_pipeline, "blast_batch", blast)
+    sequences = {
+        "t1": {"sequences": [SeqRecord(Seq("ACGT"), id="P1")], "entrez_query": "a"},
+        "t2": {"sequences": [SeqRecord(Seq("TTGG"), id="P2")], "entrez_query": "a"},
+        "t3": {"sequences": [SeqRecord(Seq("GGCC"), id="P3")], "entrez_query": "b"},
+    }
+
+    run_hypo_search(sequences, batch_size=10, db_path=str(tmp_path / "hypo.db"))
+
+    assert sorted(sent) == [("a", ["P1", "P2"]), ("b", ["P3"])]
+
+
 # --- run_hypo_check: failure handling ---
 
 
@@ -321,3 +370,29 @@ def test_hypo_check_failed_species_does_not_evict_its_siblings(tmp_path, monkeyp
     assert list(zip(cached["seq_id"], cached["scientificName"])) == [
         ("t1", "Gadus morhua")
     ]
+
+
+def test_hypo_check_runs_checks_in_parallel(tmp_path, monkeypatch):
+    """A slow check holds only its own thread: the next species is checked
+    meanwhile."""
+    other_done = threading.Event()
+
+    def blast(batch, entrez_query=None, **kwargs):
+        if "Gadus morhua" in entrez_query:  # slow until the other check ran
+            assert other_done.wait(timeout=5), "the checks ran one at a time"
+        else:
+            other_done.set()
+        return pd.DataFrame()
+
+    monkeypatch.setattr(hypo_pipeline, "submit_blast_batch", blast)
+    filter_df = pd.DataFrame(
+        {
+            "seq_id": ["t1", "t2"],
+            "scientificName": ["Gadus morhua", "Gadus ogac"],
+            "dna_sequence": ["ACGT", "TTGG"],
+        }
+    )
+
+    run_hypo_check(filter_df, num_threads=2, db_path=str(tmp_path / "hypo.db"))
+
+    assert other_done.is_set()

@@ -1,5 +1,6 @@
 from functools import wraps
 import inspect
+import threading
 from typing import Callable
 
 import pandas as pd
@@ -73,17 +74,22 @@ def top_hit_per_group(
     return top
 
 
+_progress_lock = threading.Lock()
+
+
 def notify_progress(handler: dict | object | None, n: int = 1) -> None:
     """Increment a progress tracker by n steps.
 
     Supports dict-based trackers (Streamlit: handler["current"] += n)
     and object-based trackers (tqdm: handler.update(n)).
-    No-op if handler is None.
+    No-op if handler is None. Safe to call from worker threads: an increment
+    is a read then a write, so two threads could otherwise lose one.
     """
-    if isinstance(handler, dict) and "current" in handler:
-        handler["current"] += n
-    elif hasattr(handler, "update"):
-        handler.update(n)
+    with _progress_lock:
+        if isinstance(handler, dict) and "current" in handler:
+            handler["current"] += n
+        elif hasattr(handler, "update"):
+            handler.update(n)
 
 
 _TAXON_ORDER = [

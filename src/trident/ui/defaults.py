@@ -30,6 +30,9 @@ from trident.core.constants import (
 NCBI_MAX_HITS_DEFAULT = NCBI_MAX_HITS
 NCBI_EV_EXPONENT_DEFAULT = NCBI_EV_EXPONENT
 NCBI_NUM_THREADS_DEFAULT = 4
+# NCBI takes one request every 10 s and each running job is polled once a
+# minute, so beyond about 6 jobs at once the polls take every request slot.
+BLAST_MAX_THREADS = 6
 NCBI_BATCH_SIZE_DEFAULT = 10
 NCBI_METHOD_DEFAULT = NCBI_METHOD
 NCBI_QUERY_COVER_DEFAULT = NCBI_QUERY_COVER

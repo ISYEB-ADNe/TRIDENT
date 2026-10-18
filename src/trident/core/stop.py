@@ -43,14 +43,19 @@ def stoppable(event: threading.Event) -> Iterator[None]:
 
 
 def run_threads(fn: Callable, calls: Iterable[tuple], n_jobs: int) -> list:
-    """``[fn(*args) for args in calls]``, on up to *n_jobs* threads, each call
-    in a copy of the caller's context: the stop signal and the log context
-    (the UI log sink tag) then reach the threads. The copies are made here, in
-    the caller's thread (joblib would consume a generator from its own).
+    """``[fn(*args) for args in calls]``, on up to *n_jobs* threads (at most
+    one per call; joblib's -1 means one per core), each call in a copy of the
+    caller's context: the stop signal and the log context (the UI log sink tag)
+    then reach the threads. The copies are made here, in the caller's thread
+    (joblib would consume a generator from its own).
     """
     from joblib import Parallel, delayed
 
     tasks = [delayed(contextvars.copy_context().run)(fn, *args) for args in calls]
+    if not tasks:
+        return []
+    if n_jobs > 0:
+        n_jobs = min(n_jobs, len(tasks))
     return Parallel(n_jobs=n_jobs, backend="threading", verbose=0)(tasks)
 
 
