@@ -3,7 +3,12 @@
 import pandas as pd
 import pytest
 
-from trident.pipelines.mol_pipeline import build_mol_summary, finalize_mol_results
+from trident.clients.ncbi import filter_blast_results
+from trident.pipelines.mol_pipeline import (
+    build_mol_sequence_report,
+    build_mol_summary,
+    finalize_mol_results,
+)
 
 
 @pytest.fixture
@@ -121,3 +126,27 @@ class TestBuildMolSummary:
         summary = build_mol_summary(mol_df, sequences_df)
         s1 = summary[summary["seq_id"] == "s1"]
         assert s1.iloc[0]["low_identity_warning"] == True  # noqa: E712
+
+
+def test_sequence_report_finds_the_gap_on_all_hits():
+    # The MOL list holds only the hits above the gap: the report must look at
+    # the search hits to find it and the species matching on both sides
+    hits = pd.DataFrame(
+        {
+            "seq_id": "s1",
+            "scientificName": ["SpecA", "SpecA", "SpecB", "SpecA", "SpecC"],
+            "identity_percentage": [100.0, 99.5, 99.5, 96.0, 95.0],
+            "query_cover": 100,
+        }
+    )
+    mol_df = filter_blast_results(hits, query_cover=90, gap_size=2, gap_min_top=95)
+
+    report = build_mol_sequence_report(
+        mol_df, "s1", hits, query_cover=90, gap_size=2, gap_min_top=95
+    )
+
+    assert report["cut"].is_gap
+    assert (report["cut"].top, report["cut"].bottom) == (99.5, 96.0)
+    assert report["species_across_gap"] == {
+        "SpecA": {"before_gap": [100.0, 99.5], "after_gap": [96.0]}
+    }

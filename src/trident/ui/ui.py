@@ -24,7 +24,12 @@ from trident.clients.ncbi import BLAST_SLOW_THREADS
 from trident.core.utils import pluralize
 from trident.core import stop
 from trident.logging import get_log_level
-from trident.ui.defaults import NCBI_QUERY_COVER_DEFAULT
+from trident.ui.defaults import (
+    NCBI_GAP_MIN_TOP_DEFAULT,
+    NCBI_GAP_SIZE_DEFAULT,
+    NCBI_METHOD_DEFAULT,
+    NCBI_QUERY_COVER_DEFAULT,
+)
 
 
 # Suppress Streamlit's thread context warnings (Streamlit uses standard logging internally)
@@ -1119,6 +1124,21 @@ def mol_query_cover():
     best identity of a sequence also require (a partial hit says less)."""
     stored = (st.session_state.get("mol_params") or {}).get("ncbi_query_cover")
     return coerce_stored_value(stored, float(NCBI_QUERY_COVER_DEFAULT))
+
+
+def mol_filter_settings():
+    """The MOL filter settings of the current results, as filter arguments."""
+    stored = st.session_state.get("mol_params") or {}
+    return {
+        "query_cover": mol_query_cover(),
+        "gap_size": coerce_stored_value(
+            stored.get("ncbi_gap_size"), float(NCBI_GAP_SIZE_DEFAULT)
+        ),
+        "method": stored.get("ncbi_method") or NCBI_METHOD_DEFAULT,
+        "gap_min_top": coerce_stored_value(
+            stored.get("ncbi_gap_min_top"), float(NCBI_GAP_MIN_TOP_DEFAULT)
+        ),
+    }
 
 
 def highlight_empty_sequence(row):

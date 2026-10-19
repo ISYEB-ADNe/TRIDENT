@@ -1268,98 +1268,91 @@ def filter_blast_results(
 ### GAP ANALYSIS ###
 
 
-def check_species_across_gap(
-    df: pd.DataFrame, gap_size: float = NCBI_GAP_SIZE
-) -> dict[str, dict]:
-    """Identify species that appear on both sides of the barcoding gap per sequence.
+class FilterCut(NamedTuple):
+    """Where the MOL filter cut one sequence's hits: a barcoding gap or a range."""
 
-    For each seq_id, detects the first identity drop ≥ gap_size and checks
-    whether any species has hits both above and below that gap, which would indicate
-    an ambiguous taxonomic boundary.
+    top: float
+    bottom: float
+    label: str
+    is_gap: bool
 
-    Args:
-        df: Filtered BLAST DataFrame with seq_id, scientificName, and
-            identity_percentage columns. Should contain a single seq_id or
-            a pre-filtered subset.
-        gap_size: Minimum identity drop (percentage points) to qualify as a gap.
+
+def mol_filter_cut(
+    df: pd.DataFrame,
+    query_cover: float = NCBI_QUERY_COVER,
+    gap_size: float = NCBI_GAP_SIZE,
+    method: str = NCBI_METHOD,
+    gap_min_top: float = NCBI_GAP_MIN_TOP,
+) -> FilterCut | None:
+    """Locate the cut the MOL filter makes in one sequence's hits, for display.
+
+    Runs filter_blast_results on the hits with the MOL settings, so the Overview
+    and the plots show the gap or range the filter used, not one found by
+    another rule.
 
     Returns:
-        Dict mapping seq_id to a result dict with keys:
-        - 'gap_range': (identity_above_gap, identity_below_gap) tuple, or
-          (identity_above_gap, None) if the gap is at the last hit.
-        - 'gap_size': Size of the gap in percentage points, or None.
-        - 'species_details': Dict mapping species name to
-          {'before_gap': [...], 'after_gap': [...]} identity lists.
-          Only populated for species appearing on both sides of the gap.
-        Seq IDs with no detectable gap are absent from the result.
+        For a barcoding gap, its top is the lowest kept hit and its bottom the
+        next hit below that passed query cover; for the similarity range, the
+        best hit that passed query cover and *gap_size* below it. None when no
+        hit passes query cover.
     """
-    results = {}
+    covered = df.loc[df["query_cover"] >= query_cover, "identity_percentage"]
+    if covered.empty:
+        return None
+    kept = filter_blast_results(
+        df,
+        query_cover=query_cover,
+        gap_size=gap_size,
+        method=method,
+        gap_min_top=gap_min_top,
+    )
+    if (kept["filter_method"] == "barcoding_gap").any():
+        top = kept["identity_percentage"].min()
+        bottom = covered[covered < top].max()
+        return FilterCut(top, bottom, f"Gap<br>{top - bottom:.2f}%", True)
+    top = covered.max()
+    return FilterCut(top, top - gap_size, f"Range<br>{gap_size}%", False)
 
-    # Compute gaps
-    df_with_gaps = compute_barcoding_gap(df)
 
-    for seq_id, group in df_with_gaps.groupby("seq_id"):
-        group = group.reset_index(drop=True)
-        gap_rows = group[group["identity_drop"] >= gap_size]
+def species_across_gap(
+    df: pd.DataFrame, cut: FilterCut | None, query_cover: float = NCBI_QUERY_COVER
+) -> dict[str, dict]:
+    """List the species with hits on both sides of the MOL filter's barcoding gap.
 
-        if not gap_rows.empty:
-            first_gap_pos = gap_rows.index[0]
+    Such a species is kept above the gap but also matches below it, which
+    makes the boundary ambiguous. Hits below query cover are left out, as the
+    filter left them out.
 
-            identity_before_gap = group.iloc[first_gap_pos]["identity_percentage"]
-            identity_after_gap = (
-                group.iloc[first_gap_pos + 1]["identity_percentage"]
-                if first_gap_pos + 1 < len(group)
-                else None
-            )
+    Args:
+        df: One sequence's BLAST hits.
+        cut: The filter's cut, from mol_filter_cut; nothing is listed unless
+            it is a barcoding gap.
+        query_cover: The MOL filter's minimum query cover.
 
-            result = {
-                "gap_range": (identity_before_gap, identity_after_gap)
-                if identity_after_gap is not None
-                else (identity_before_gap, None),
-                "gap_size": (identity_before_gap - identity_after_gap)
-                if identity_after_gap is not None
-                else None,
-                "species_details": {},
-            }
-
-            before_gap_data = group.iloc[: first_gap_pos + 1]
-            after_gap_data = group.iloc[first_gap_pos + 1 :]
-
-            species_before = set(before_gap_data["scientificName"].unique())
-            species_after = set(after_gap_data["scientificName"].unique())
-            problematic_species = species_before & species_after
-
-            if problematic_species:
-                species_details = {}
-
-                for species in problematic_species:
-                    species_data = group[group["scientificName"] == species]
-                    before_identities = species_data[
-                        species_data.index <= first_gap_pos
-                    ]["identity_percentage"].tolist()
-                    after_identities = species_data[species_data.index > first_gap_pos][
-                        "identity_percentage"
-                    ].tolist()
-
-                    species_details[species] = {
-                        "before_gap": before_identities,
-                        "after_gap": after_identities,
-                    }
-
-                result["species_details"] = species_details
-
-            results[seq_id] = result
-
-    return results
+    Returns:
+        Dict mapping species name to {'before_gap': [...], 'after_gap': [...]}
+        identity lists, highest first.
+    """
+    if cut is None or not cut.is_gap:
+        return {}
+    covered = df[df["query_cover"] >= query_cover]
+    details = {}
+    for species, hits in covered.groupby("scientificName"):
+        identities = hits["identity_percentage"].sort_values(ascending=False)
+        before = identities[identities >= cut.top].tolist()
+        after = identities[identities < cut.top].tolist()
+        if before and after:
+            details[species] = {"before_gap": before, "after_gap": after}
+    return details
 
 
 def format_species_gap_details(species_details: dict[str, dict]) -> str:
-    """Format the species_details dict from check_species_across_gap as a readable string.
+    """Format the output of species_across_gap as a readable string.
 
     Args:
         species_details: Dict mapping species name to
             {'before_gap': [...], 'after_gap': [...]} identity lists, as
-            returned by check_species_across_gap()[seq_id]['species_details'].
+            returned by species_across_gap().
 
     Returns:
         Markdown-formatted string listing each problematic species with its
@@ -1435,51 +1428,6 @@ def _species_groups(df, filtered_species):
             legend,
         )
         filtered_out_shown = filtered_out_shown or not kept
-
-
-class FilterCut(NamedTuple):
-    """Where the MOL filter cut one sequence's hits: a barcoding gap or a range."""
-
-    top: float
-    bottom: float
-    label: str
-    is_gap: bool
-
-
-def mol_filter_cut(
-    df: pd.DataFrame,
-    query_cover: float = NCBI_QUERY_COVER,
-    gap_size: float = NCBI_GAP_SIZE,
-    method: str = NCBI_METHOD,
-    gap_min_top: float = NCBI_GAP_MIN_TOP,
-) -> FilterCut | None:
-    """Locate the cut the MOL filter makes in one sequence's hits, for the plots.
-
-    Runs filter_blast_results on the hits with the MOL settings, so the plots
-    show the gap or range the filter used, not one found by another rule.
-
-    Returns:
-        For a barcoding gap, its top is the lowest kept hit and its bottom the
-        next hit below that passed query cover; for the similarity range, the
-        best hit that passed query cover and *gap_size* below it. None when no
-        hit passes query cover.
-    """
-    covered = df.loc[df["query_cover"] >= query_cover, "identity_percentage"]
-    if covered.empty:
-        return None
-    kept = filter_blast_results(
-        df,
-        query_cover=query_cover,
-        gap_size=gap_size,
-        method=method,
-        gap_min_top=gap_min_top,
-    )
-    if (kept["filter_method"] == "barcoding_gap").any():
-        top = kept["identity_percentage"].min()
-        bottom = covered[covered < top].max()
-        return FilterCut(top, bottom, f"Gap<br>{top - bottom:.2f}%", True)
-    top = covered.max()
-    return FilterCut(top, top - gap_size, f"Range<br>{gap_size}%", False)
 
 
 def _apply_plot_layout(fig, title, **extra):

@@ -25,7 +25,7 @@ from trident.ui.ui import (
     get_recent_param_sets,
     param_preset_selector,
     coerce_stored_value,
-    mol_query_cover,
+    mol_filter_settings,
     persist_value,
     save_widget,
     reset_state_after,
@@ -687,17 +687,9 @@ def _style_slider(label, key, default, *args, **kwargs):
 
 
 def display_ncbi_sequence_plots(
-    selected_sequence, ncbi_full_df, ncbi_filtered_df, mol_params
+    selected_sequence, sequence_ncbi_data, ncbi_filtered_df, cut
 ):
-    """Display identity plot for a sequence."""
-    sequence_ncbi_data = ncbi_full_df[ncbi_full_df["seq_id"] == selected_sequence]
-    cut = ncbi.mol_filter_cut(
-        sequence_ncbi_data,
-        query_cover=mol_query_cover(),
-        gap_size=mol_params["ncbi_gap_size"],
-        method=mol_params["ncbi_method"],
-        gap_min_top=mol_params.get("ncbi_gap_min_top") or NCBI_GAP_MIN_TOP_DEFAULT,
-    )
+    """Display identity plot of a sequence's BLAST hits, with the MOL filter's *cut*."""
     filtered_species = set(
         ncbi_filtered_df[ncbi_filtered_df["seq_id"] == selected_sequence][
             "scientificName"
@@ -861,29 +853,22 @@ def display_ncbi_sequence_table(sequence_data):
     )
 
 
-def display_ncbi_filter_warnings(filter_method, gap_analysis, has_warnings):
-    """Display filtering method results and warnings"""
-    if filter_method == "barcoding_gap" and gap_analysis:
-        gap_range = gap_analysis["gap_range"]
-        species_details = gap_analysis["species_details"]
-
-        # Always show gap info (blue box)
-        if gap_range[1] is not None:
-            gap_size = gap_range[0] - gap_range[1]
-            st.info(
-                f"📊 **Barcoding Gap Detected**: Gap between {gap_range[0]:.2f}% and {gap_range[1]:.2f}% "
-                f"(gap size: {gap_size:.2f}%)"
+def display_ncbi_filter_warnings(cut, species_details):
+    """Display the gap or range the MOL filter used, and species across the gap."""
+    if cut is None:
+        return
+    if cut.is_gap:
+        st.info(
+            f"📊 **Barcoding Gap Detected**: Gap between {cut.top:.2f}% and "
+            f"{cut.bottom:.2f}% (gap size: {cut.top - cut.bottom:.2f}%)"
+        )
+        if species_details:
+            st.warning(
+                "⚠️ **Warning**, the following species appear both BEFORE and "
+                "AFTER the barcoding gap:\n\n"
+                + ncbi.format_species_gap_details(species_details)
             )
-        else:
-            st.info(f"📊 **Barcoding Gap Detected**: Gap at {gap_range[0]:.2f}%")
-
-        # Show warning only if there are problematic species (yellow box)
-        if has_warnings and species_details:
-            warning_msg = "⚠️ **Warning**, the following species appear both BEFORE and AFTER the barcoding gap:\n\n"
-            warning_msg += ncbi.format_species_gap_details(species_details)
-            st.warning(warning_msg)
-
-    elif filter_method == "similarity":
+    else:
         st.info(
             "ℹ️ **Similarity Filtering**: No barcoding gap > threshold found, top hits within similarity range retained"
         )
@@ -919,7 +904,8 @@ def display_ncbi_per_sequence():
     seq_analysis = pipe.build_mol_sequence_report(
         st.session_state.mol_df,
         selected_sequence,
-        gap_size=st.session_state.mol_params["ncbi_gap_size"],
+        st.session_state.ncbi_search_df,
+        **mol_filter_settings(),
     )
 
     tab_overview, tab_table, tab_plots = st.tabs(
@@ -929,9 +915,7 @@ def display_ncbi_per_sequence():
     with tab_overview:
         # Metrics + gap info + species list
         display_ncbi_filter_warnings(
-            seq_analysis["filter_method"],
-            seq_analysis["gap_analysis"],
-            seq_analysis["has_warnings"],
+            seq_analysis["cut"], seq_analysis["species_across_gap"]
         )
         display_ncbi_sequence_summary(seq_analysis["sequence_data"])
 
@@ -941,9 +925,9 @@ def display_ncbi_per_sequence():
     with tab_plots:
         display_ncbi_sequence_plots(
             selected_sequence,
-            ncbi_full_df=st.session_state.ncbi_search_df,
+            sequence_ncbi_data=seq_analysis["search_hits"],
             ncbi_filtered_df=st.session_state.mol_df,
-            mol_params=st.session_state.mol_params,
+            cut=seq_analysis["cut"],
         )
 
 

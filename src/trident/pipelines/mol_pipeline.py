@@ -8,7 +8,7 @@ Step order:
 
 Exploration:
     build_mol_summary(mol_df)
-    build_mol_sequence_report(mol_df, seq_id)
+    build_mol_sequence_report(mol_df, seq_id, ncbi_search_df, ...)
 """
 
 from typing import Any
@@ -21,11 +21,12 @@ from loguru import logger
 from trident.clients.fasta import dataframe_to_records
 from trident.clients.ncbi import (
     BLAST_GIVE_UP,
-    check_species_across_gap,
     create_sequence_batches,
     filter_blast_results,
+    mol_filter_cut,
     process_blast_results,
     run_blast_batches,
+    species_across_gap,
 )
 from trident.core.constants import (
     NCBI_EV_EXPONENT,
@@ -385,25 +386,35 @@ def build_mol_summary(
 def build_mol_sequence_report(
     mol_df: pd.DataFrame,
     seq_id: str,
-    gap_size: float = 2.0,
+    ncbi_search_df: pd.DataFrame,
+    query_cover: float = NCBI_QUERY_COVER,
+    gap_size: float = NCBI_GAP_SIZE,
+    method: str = NCBI_METHOD,
+    gap_min_top: float = NCBI_GAP_MIN_TOP,
 ) -> dict:
     """Build a detailed per-sequence analysis report from the MOL list.
+
+    The gap is located on all the sequence's BLAST hits with the MOL filter
+    settings: the MOL list only holds the hits above it.
 
     Args:
         mol_df: Finalized MOL DataFrame from finalize_mol_results().
         seq_id: Sequence identifier to report on.
-        gap_size: Identity drop threshold used for gap analysis.
+        ncbi_search_df: All BLAST hits, from run_ncbi_search().
+        query_cover, gap_size, method, gap_min_top: The MOL filter settings
+            (see run_ncbi_filter).
 
     Returns:
         Dict with keys:
         - 'seq_id': The sequence identifier.
         - 'sequence_data': DataFrame of hits for this sequence (with hit_count column).
-        - 'filter_method': 'barcoding_gap' or 'similarity'.
-        - 'gap_analysis': Output from check_species_across_gap() for this seq_id,
-          or None if similarity filtering was used.
+        - 'search_hits': All BLAST hits of this sequence.
+        - 'cut': The filter's gap or range, from mol_filter_cut(); its
+          is_gap says which method the filter used for this sequence.
+        - 'species_across_gap': Output of species_across_gap(): species with
+          hits on both sides of the gap (empty without a gap).
         - 'summary_stats': Dict with total_hits, unique_species, top_identity,
           and top_species.
-        - 'has_warnings': True if any species appear on both sides of the gap.
 
     Raises:
         ValueError: If seq_id is not found in mol_df.
@@ -417,21 +428,21 @@ def build_mol_sequence_report(
         "scientificName"
     ].transform("count")
 
-    filter_method = sequence_data["filter_method"].iloc[0]
-
-    gap_analysis = None
-    has_warnings = False
-    if filter_method == "barcoding_gap":
-        gap_analysis = check_species_across_gap(sequence_data, gap_size)
-        has_warnings = seq_id in gap_analysis and bool(
-            gap_analysis[seq_id].get("species_details", {})
-        )
+    search_hits = ncbi_search_df[ncbi_search_df["seq_id"] == seq_id]
+    cut = mol_filter_cut(
+        search_hits,
+        query_cover=query_cover,
+        gap_size=gap_size,
+        method=method,
+        gap_min_top=gap_min_top,
+    )
 
     return {
         "seq_id": seq_id,
         "sequence_data": sequence_data,
-        "filter_method": filter_method,
-        "gap_analysis": gap_analysis.get(seq_id) if gap_analysis else None,
+        "search_hits": search_hits,
+        "cut": cut,
+        "species_across_gap": species_across_gap(search_hits, cut, query_cover),
         "summary_stats": {
             "total_hits": len(sequence_data),
             "unique_species": sequence_data["scientificName"].nunique(),
@@ -440,5 +451,4 @@ def build_mol_sequence_report(
                 sequence_data["identity_percentage"].idxmax(), "scientificName"
             ],
         },
-        "has_warnings": has_warnings,
     }
