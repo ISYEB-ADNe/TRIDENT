@@ -111,7 +111,7 @@ Set your contact email in the **Settings** panel on first launch, or pre-fill it
 CONTACT_EMAIL = "your-email@example.com"
 ```
 
-You can also use a `.env` file at the project root:
+You can also use a `.env` file at the project root (copy `.env.example`):
 
 ```env
 CONTACT_EMAIL=your-email@example.com
