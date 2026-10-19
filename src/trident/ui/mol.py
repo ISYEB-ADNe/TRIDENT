@@ -4,6 +4,8 @@ NCBI Analysis UI Module
 This module handles only UI rendering and user interaction.
 """
 
+import math
+
 import streamlit as st
 
 
@@ -23,6 +25,7 @@ from trident.ui.ui import (
     get_recent_param_sets,
     param_preset_selector,
     coerce_stored_value,
+    mol_query_cover,
     persist_value,
     save_widget,
     reset_state_after,
@@ -675,66 +678,115 @@ def display_ncbi_sequence_summary(sequence_data):
     )
 
 
-def display_ncbi_sequence_plots(selected_sequence, ncbi_full_df, ncbi_filtered_df, gap):
+def _style_slider(label, key, default, *args, **kwargs):
+    """A plot style slider whose value is kept across sequences and tabs."""
+    persist_value(key, default)
+    value = st.slider(label, *args, key=key, **kwargs)
+    save_widget(key)
+    return value
+
+
+def display_ncbi_sequence_plots(
+    selected_sequence, ncbi_full_df, ncbi_filtered_df, mol_params
+):
     """Display identity plot for a sequence."""
-
-    if not st.checkbox(
-        f"📊 Show Plot for {selected_sequence}",
-        value=False,
-        key=f"plot_{selected_sequence}",
-    ):
-        return
-
     sequence_ncbi_data = ncbi_full_df[ncbi_full_df["seq_id"] == selected_sequence]
+    cut = ncbi.mol_filter_cut(
+        sequence_ncbi_data,
+        query_cover=mol_query_cover(),
+        gap_size=mol_params["ncbi_gap_size"],
+        method=mol_params["ncbi_method"],
+        gap_min_top=mol_params.get("ncbi_gap_min_top") or NCBI_GAP_MIN_TOP_DEFAULT,
+    )
     filtered_species = set(
         ncbi_filtered_df[ncbi_filtered_df["seq_id"] == selected_sequence][
             "scientificName"
         ].unique()
     )
 
-    # Compute default y-range from data
+    # The identity range starts just below the sequence's lowest hit; it is
+    # kept per sequence, the style settings below are shared by all sequences
     all_identities = sequence_ncbi_data["identity_percentage"]
-    data_min = float(all_identities.min()) if not all_identities.empty else 80.0
-    data_max = float(all_identities.max()) if not all_identities.empty else 100.0
-    default_min = max(data_min - 1, 0.0)
-    default_max = min(data_max + 1, 100.0)
+    range_min = (
+        max(math.floor(all_identities.min()) - 1, 0) if not all_identities.empty else 80
+    )
+
+    persist_value("mol_plot_view", "Bars")
+    view = st.radio(
+        "View",
+        ["Bars", "Points"],
+        horizontal=True,
+        key="mol_plot_view",
+        help="Bars: number of hits per identity bin, stacked by species. "
+        "Points: one point per hit.",
+    )
+    save_widget("mol_plot_view")
 
     # Plot style controls
     with st.expander("Plot settings", expanded=False):
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            font_size = st.slider(
-                "Axis text", 8, 24, 14, key=f"font_{selected_sequence}"
-            )
+            font_size = _style_slider("Axis text", "mol_plot_font", 14, 8, 24)
         with col2:
-            legend_size = st.slider(
-                "Legend text", 6, 20, 12, key=f"legend_{selected_sequence}"
-            )
+            legend_size = _style_slider("Legend text", "mol_plot_legend", 12, 6, 20)
         with col3:
-            marker_size = st.slider(
-                "Marker size", 4, 20, 10, key=f"marker_{selected_sequence}"
-            )
+            if view == "Bars":
+                bin_width = _style_slider(
+                    "Bin width (%)",
+                    "mol_plot_bin",
+                    0.2,
+                    0.1,
+                    1.0,
+                    step=0.1,
+                    help="A bin merges identities closer than its width. Below "
+                    "one mismatch (about 0.25% on 400 bp), it only merges hits "
+                    "with the same number of mismatches.",
+                )
+            else:
+                marker_size = _style_slider("Marker size", "mol_plot_marker", 10, 4, 20)
         with col4:
-            plot_height = st.slider(
-                "Plot height", 300, 900, 500, step=50, key=f"height_{selected_sequence}"
+            plot_height = _style_slider(
+                "Plot height", "mol_plot_height", 500, 300, 900, step=50
             )
 
+        range_key = f"yrange_{selected_sequence}"
+        stored_range = st.session_state.get(range_key)
+        # The hits can change under a kept range (a new search): start again
+        if stored_range and stored_range[0] < range_min:
+            del st.session_state[range_key]
         y_range = st.slider(
             "Identity range (%)",
-            0.0,
+            float(range_min),
             100.0,
-            (default_min, default_max),
-            step=0.5,
-            key=f"yrange_{selected_sequence}",
+            (float(range_min), 100.0),
+            step=0.1,
+            key=range_key,
         )
 
-    fig_identity = ncbi.plot_identity_percentage(
-        sequence_ncbi_data,
-        threshold=gap,
-        filtered_species=filtered_species,
-        title="",
-        marker_size=marker_size,
-    )
+    # Only the hits in the identity range are plotted, so the hit axis fits
+    # them; the bracket still comes from all the hits (cut above)
+    shown_hits = sequence_ncbi_data[
+        sequence_ncbi_data["identity_percentage"].between(*y_range)
+    ]
+    if view == "Bars":
+        fig_identity = ncbi.plot_identity_bars(
+            shown_hits,
+            cut=cut,
+            filtered_species=filtered_species,
+            title="",
+            bin_width=bin_width,
+        )
+        # Bars are centred on their identity: half a bin more keeps 100% whole
+        y_axis_range = [y_range[0] - bin_width / 2, y_range[1] + bin_width / 2]
+    else:
+        fig_identity = ncbi.plot_identity_percentage(
+            shown_hits,
+            cut=cut,
+            filtered_species=filtered_species,
+            title="",
+            marker_size=marker_size,
+        )
+        y_axis_range = list(y_range)
     fig_identity.update_layout(
         margin=dict(t=20),
         height=plot_height,
@@ -745,7 +797,7 @@ def display_ncbi_sequence_plots(selected_sequence, ncbi_full_df, ncbi_filtered_d
         yaxis=dict(
             title=dict(font=dict(size=font_size + 1)),
             tickfont=dict(size=font_size),
-            range=[y_range[0], y_range[1]],
+            range=y_axis_range,
         ),
         legend=dict(font=dict(size=legend_size)),
         modebar=dict(orientation="v"),
@@ -887,12 +939,11 @@ def display_ncbi_per_sequence():
         # Detailed table
         display_ncbi_sequence_table(seq_analysis["sequence_data"])
     with tab_plots:
-        # Gap + Identity plots
         display_ncbi_sequence_plots(
             selected_sequence,
             ncbi_full_df=st.session_state.ncbi_search_df,
             ncbi_filtered_df=st.session_state.mol_df,
-            gap=st.session_state.mol_params["ncbi_gap_size"],
+            mol_params=st.session_state.mol_params,
         )
 
 

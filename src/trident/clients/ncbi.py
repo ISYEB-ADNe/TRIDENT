@@ -9,6 +9,7 @@ import time
 import zipfile
 from collections.abc import Callable
 from functools import wraps
+from typing import NamedTuple
 
 import pandas as pd
 import requests
@@ -1379,76 +1380,106 @@ def format_species_gap_details(species_details: dict[str, dict]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _add_species_traces(
-    fig,
-    df_plot,
-    y_col,
-    filtered_species,
-    hover_kwargs,
-    marker_size=10,
-    show_filtered_out=True,
-):
-    """Add one scatter trace per species, highlighting filtered ones.
+FILTERED_OUT_COLOR = "darkgrey"
 
-    Args:
-        fig: Plotly Figure to add traces to.
-        df_plot: DataFrame with 'scientificName', 'x_position', and *y_col*.
-        y_col: Column name for the y-axis values.
-        filtered_species: Species names to highlight (or None).
-        hover_kwargs: ``(species_name, species_df) -> dict`` returning extra
-            kwargs for ``go.Scatter`` (e.g. customdata, hovertemplate).
-        marker_size: Marker size for highlighted species (filtered-out species
-            are drawn smaller).
-        show_filtered_out: Unused; retained for call-site compatibility.
-    """
+
+def _species_colors(filtered_species):
+    """Map each species kept by the MOL filter to a palette color."""
     import plotly.express as px
-    import plotly.graph_objects as go
 
-    color_map = {}
-    if filtered_species:
-        n = len(filtered_species)
-        if n <= 10:
-            palette = px.colors.qualitative.Plotly
-        elif n <= 24:
-            palette = px.colors.qualitative.Light24
-        else:
-            palette = px.colors.qualitative.Light24 + px.colors.qualitative.Dark24
-        color_map = {
-            sp: palette[i % len(palette)]
-            for i, sp in enumerate(sorted(filtered_species))
-        }
+    if not filtered_species:
+        return {}
+    n = len(filtered_species)
+    if n <= 10:
+        palette = px.colors.qualitative.Plotly
+    elif n <= 24:
+        palette = px.colors.qualitative.Light24
+    else:
+        palette = px.colors.qualitative.Light24 + px.colors.qualitative.Dark24
+    return {
+        sp: palette[i % len(palette)] for i, sp in enumerate(sorted(filtered_species))
+    }
 
-    filtered_out_added = False
 
-    for species in df_plot["scientificName"].unique():
-        sp_data = df_plot[df_plot["scientificName"] == species]
+def _name_unnamed_hits(df):
+    """Copy of the hits where a hit without a species name gets one to show."""
+    return df.assign(scientificName=df["scientificName"].fillna("No species name"))
 
-        if species in color_map:
-            color, name, showlegend = color_map[species], species, True
-            opacity, size = 0.9, marker_size
-        else:
-            color, name = "lightgrey", "Filtered out"
-            showlegend = not filtered_out_added
-            filtered_out_added = True
-            opacity, size = 0.5, max(marker_size - 4, 4)
 
-        fig.add_trace(
-            go.Scatter(
-                x=sp_data["x_position"],
-                y=sp_data[y_col],
-                mode="markers",
-                marker=dict(
-                    size=size,
-                    color=color,
-                    opacity=opacity,
-                    line=dict(width=0.5, color="white"),
-                ),
-                name=name,
-                showlegend=showlegend,
-                legendgroup="filtered_out" if color == "lightgrey" else species,
-                **hover_kwargs(species, sp_data),
-            )
+def _species_groups(df, filtered_species):
+    """Split hits by species, kept species first, with their color and legend.
+
+    Yields:
+        (species, rows, kept, color, legend): *legend* holds the name,
+        legendgroup and showlegend of the species' trace; every filtered-out
+        species shares one "Filtered out" legend entry.
+    """
+    colors = _species_colors(filtered_species)
+    groups = dict(tuple(df.groupby("scientificName", sort=False)))
+    order = sorted(sp for sp in groups if sp in colors) + sorted(
+        sp for sp in groups if sp not in colors
+    )
+    filtered_out_shown = False
+    for species in order:
+        kept = species in colors
+        legend = dict(
+            name=species if kept else "Filtered out",
+            legendgroup=species if kept else "filtered_out",
+            showlegend=kept or not filtered_out_shown,
         )
+        yield (
+            species,
+            groups[species],
+            kept,
+            colors.get(species, FILTERED_OUT_COLOR),
+            legend,
+        )
+        filtered_out_shown = filtered_out_shown or not kept
+
+
+class FilterCut(NamedTuple):
+    """Where the MOL filter cut one sequence's hits: a barcoding gap or a range."""
+
+    top: float
+    bottom: float
+    label: str
+    is_gap: bool
+
+
+def mol_filter_cut(
+    df: pd.DataFrame,
+    query_cover: float = NCBI_QUERY_COVER,
+    gap_size: float = NCBI_GAP_SIZE,
+    method: str = NCBI_METHOD,
+    gap_min_top: float = NCBI_GAP_MIN_TOP,
+) -> FilterCut | None:
+    """Locate the cut the MOL filter makes in one sequence's hits, for the plots.
+
+    Runs filter_blast_results on the hits with the MOL settings, so the plots
+    show the gap or range the filter used, not one found by another rule.
+
+    Returns:
+        For a barcoding gap, its top is the lowest kept hit and its bottom the
+        next hit below that passed query cover; for the similarity range, the
+        best hit that passed query cover and *gap_size* below it. None when no
+        hit passes query cover.
+    """
+    covered = df.loc[df["query_cover"] >= query_cover, "identity_percentage"]
+    if covered.empty:
+        return None
+    kept = filter_blast_results(
+        df,
+        query_cover=query_cover,
+        gap_size=gap_size,
+        method=method,
+        gap_min_top=gap_min_top,
+    )
+    if (kept["filter_method"] == "barcoding_gap").any():
+        top = kept["identity_percentage"].min()
+        bottom = covered[covered < top].max()
+        return FilterCut(top, bottom, f"Gap<br>{top - bottom:.2f}%", True)
+    top = covered.max()
+    return FilterCut(top, top - gap_size, f"Range<br>{gap_size}%", False)
 
 
 def _apply_plot_layout(fig, title, **extra):
@@ -1465,122 +1496,51 @@ def _apply_plot_layout(fig, title, **extra):
     fig.update_layout(**layout)
 
 
-def plot_identity_percentage(
-    df,
-    threshold=2,
-    filtered_species=None,
-    title="Identity Percentage Distribution",
-    marker_size=10,
-    show_filtered_out=True,
-):
-    """Plot identity percentages, highlighting filtered species.
+def _add_gap_bracket(fig, cut, x, cap, label_offset):
+    """Draw the MOL filter's cut (from mol_filter_cut) as a red bracket at *x*.
 
-    Points at the same identity level are spread horizontally.
-    Shows the barcoding gap location (if detected) or similarity range.
-
-    Args:
-        df: DataFrame with 'scientificName' and 'identity_percentage' columns.
-        threshold: Minimum gap size or similarity range width.
-        filtered_species: Set/list of species names to highlight.
-        title: Plot title (empty string to hide).
-        marker_size: Size of scatter markers for filtered species.
-        show_filtered_out: Forwarded to ``_add_species_traces`` (currently unused).
-
-    Returns:
-        Plotly Figure.
+    *cap* is the half-width of the bracket ends and *label_offset* the distance
+    of the label to the left of the bracket, both in x-axis units. Nothing is
+    drawn when *cut* is None.
     """
-    import plotly.graph_objects as go
-
-    fig = go.Figure()
-
-    df_plot = df.copy()
-    df_plot["x_position"] = df_plot.groupby("identity_percentage").cumcount() * 1.5
-
-    _add_species_traces(
-        fig,
-        df_plot,
-        y_col="identity_percentage",
-        filtered_species=filtered_species,
-        marker_size=marker_size,
-        show_filtered_out=show_filtered_out,
-        hover_kwargs=lambda sp, _: {
-            "hovertemplate": f"<b>{sp}</b><br>Identity: %{{y:.2f}}%<extra></extra>"
-        },
-    )
-
-    # Find barcoding gap or fall back to similarity range
-    by_identity = df.sort_values("identity_percentage", ascending=False).copy()
-    by_identity["drop"] = by_identity["identity_percentage"].diff(-1)
-    gap_rows = by_identity[by_identity["drop"] >= threshold]
-
-    if not gap_rows.empty:
-        first_gap_idx = gap_rows.index[0]
-        bracket_top = by_identity.loc[first_gap_idx, "identity_percentage"]
-        next_pos = by_identity.index.get_loc(first_gap_idx) + 1
-        bracket_bottom = (
-            by_identity.iloc[next_pos]["identity_percentage"]
-            if next_pos < len(by_identity)
-            else bracket_top
-        )
-        bracket_label = f"Gap<br>{bracket_top - bracket_bottom:.2f}%"
-    else:
-        bracket_top = df["identity_percentage"].max()
-        bracket_bottom = bracket_top - threshold
-        bracket_label = f"Range<br>{threshold}%"
-
-    # Draw bracket (vertical line + horizontal caps + label)
-    bracket_x = -1.5
-    bracket_style = dict(color="red", width=2)
-    fig.add_shape(
-        type="line",
-        x0=bracket_x,
-        y0=bracket_top,
-        x1=bracket_x,
-        y1=bracket_bottom,
-        line=bracket_style,
-    )
-    fig.add_shape(
-        type="line",
-        x0=bracket_x - 0.4,
-        y0=bracket_top,
-        x1=bracket_x + 0.4,
-        y1=bracket_top,
-        line=bracket_style,
-    )
-    fig.add_shape(
-        type="line",
-        x0=bracket_x - 0.4,
-        y0=bracket_bottom,
-        x1=bracket_x + 0.4,
-        y1=bracket_bottom,
-        line=bracket_style,
-    )
+    if cut is None:
+        return
+    top, bottom, label, _ = cut
+    style = dict(color="red", width=2)
+    fig.add_shape(type="line", x0=x, y0=top, x1=x, y1=bottom, line=style)
+    for y in (top, bottom):
+        fig.add_shape(type="line", x0=x - cap, y0=y, x1=x + cap, y1=y, line=style)
     fig.add_annotation(
-        x=bracket_x - 0.7,
-        y=(bracket_top + bracket_bottom) / 2,
-        text=bracket_label,
+        x=x - label_offset,
+        y=(top + bottom) / 2,
+        text=label,
         showarrow=False,
         font=dict(color="red", size=10),
         xanchor="right",
         align="center",
     )
 
-    _apply_plot_layout(fig, title, xaxis_title="Hits", yaxis_title="Identity (%)")
-    return fig
 
-
-def plot_barcoding_gap(
-    df, threshold=2, filtered_species=None, title="Barcoding Gap Analysis"
+def plot_identity_percentage(
+    df,
+    cut=None,
+    filtered_species=None,
+    title="Identity Percentage Distribution",
+    marker_size=10,
 ):
-    """Plot barcoding gap values, highlighting filtered species.
+    """Plot one point per hit at its identity, highlighting filtered species.
 
-    Points at the same identity level share the same gap value.
+    The hits of one identity level are lined up from x = 1, so the last point
+    of a level sits at its number of hits. Shows the barcoding gap or the
+    similarity range the MOL filter used.
 
     Args:
         df: DataFrame with 'scientificName' and 'identity_percentage' columns.
-        threshold: Gap threshold displayed as a horizontal line.
+        cut: The MOL filter's cut, from mol_filter_cut (None: no bracket).
         filtered_species: Set/list of species names to highlight.
         title: Plot title (empty string to hide).
+        marker_size: Size of scatter markers for filtered species (filtered-out
+            species are drawn smaller).
 
     Returns:
         Plotly Figure.
@@ -1589,50 +1549,187 @@ def plot_barcoding_gap(
 
     fig = go.Figure()
 
-    # Compute gap between consecutive identity levels
-    identity_levels = df["identity_percentage"].sort_values(ascending=False).unique()
-    gap_by_identity = {
-        identity_levels[i]: identity_levels[i] - identity_levels[i + 1]
-        for i in range(len(identity_levels) - 1)
-    }
-    if len(identity_levels) > 0:
-        gap_by_identity[identity_levels[-1]] = 0.0
+    df_plot = _name_unnamed_hits(df)
+    df_plot["x_position"] = df_plot.groupby("identity_percentage").cumcount() + 1
 
-    df_plot = df.copy()
-    df_plot["gap"] = df_plot["identity_percentage"].map(gap_by_identity)
-    df_plot["x_position"] = df_plot.groupby("gap").cumcount() * 1.5
+    for species, sp_data, kept, color, legend in _species_groups(
+        df_plot, filtered_species
+    ):
+        fig.add_trace(
+            go.Scatter(
+                x=sp_data["x_position"],
+                y=sp_data["identity_percentage"],
+                mode="markers",
+                marker=dict(
+                    size=marker_size if kept else max(marker_size - 4, 4),
+                    color=color,
+                    opacity=0.9 if kept else 0.6,
+                    line=dict(width=0.5, color="white"),
+                ),
+                hovertemplate=f"<b>{species}</b><br>Identity: %{{y:.2f}}%<extra></extra>",
+                **legend,
+            )
+        )
 
-    _add_species_traces(
-        fig,
-        df_plot,
-        y_col="gap",
-        filtered_species=filtered_species,
-        hover_kwargs=lambda _, sp_data: {
-            "customdata": sp_data[["scientificName", "identity_percentage"]].values,
-            "hovertemplate": (
-                "<b>%{customdata[0]}</b><br>"
-                "Identity: %{customdata[1]:.2f}%<br>"
-                "Gap: %{y:.2f}%<extra></extra>"
+    _add_gap_bracket(fig, cut, x=0, cap=0.4, label_offset=0.7)
+
+    _apply_plot_layout(fig, title, xaxis_title="Hits", yaxis_title="Identity (%)")
+    return fig
+
+
+HOVER_SPECIES_MAX = 10
+
+
+def _hover_species_list(names):
+    """List species with their hit counts, most hits first, for a bar hover.
+
+    Capped at HOVER_SPECIES_MAX lines: a low-identity bin can hold over a
+    hundred species, more than a hover box can show.
+    """
+    counts = names.value_counts()
+    lines = [f"{name} ({n})" for name, n in counts.head(HOVER_SPECIES_MAX).items()]
+    if len(counts) > HOVER_SPECIES_MAX:
+        lines.append(f"+{len(counts) - HOVER_SPECIES_MAX} more species")
+    return "<br>".join(lines)
+
+
+def _bin_positions(levels, bin_width):
+    """Map each identity level to its bin, in the order of *levels*.
+
+    A bin starts at a level and takes the following levels less than
+    *bin_width* away from it; every level maps to that first level.
+    """
+    positions, start = {}, None
+    for level in levels:
+        # The tolerance keeps a level exactly one bin width away out of the bin
+        if start is None or abs(start - level) >= bin_width - 1e-9:
+            start = level
+        positions[level] = start
+    return positions
+
+
+def plot_identity_bars(
+    df,
+    cut=None,
+    filtered_species=None,
+    title="Hits per Identity Bin",
+    bin_width=0.2,
+):
+    """Plot the number of hits per identity bin, stacked by species.
+
+    Bins are built from the hits, on a true identity scale, and each bar sits
+    at a real identity: the one of its bin nearest the barcoding gap, so the
+    two bars around the gap sit at its ends (with a similarity range, the best
+    one of the bin). A small bin only merges levels a fraction of a mismatch
+    apart (98.87, 98.86 and 98.85 differ by alignment length); the hover lists
+    the exact identities of each segment.
+
+    Args:
+        df: DataFrame with 'scientificName' and 'identity_percentage' columns.
+        cut: The MOL filter's cut, from mol_filter_cut (None: no bracket).
+        filtered_species: Set/list of species names to highlight.
+        title: Plot title (empty string to hide).
+        bin_width: Bin height in identity percent.
+
+    Returns:
+        Plotly Figure.
+    """
+    import plotly.graph_objects as go
+
+    fig = go.Figure()
+
+    df = _name_unnamed_hits(df)
+    levels = df["identity_percentage"].unique()
+    if cut is not None and cut.is_gap:
+        # Bins grow away from the gap: upwards above it, downwards below it.
+        # Hits inside it (below query cover) less than a bin from one end join
+        # that end's bar, the others get their own bins: no two bars overlap
+        def near(level, end):
+            return abs(level - end) < bin_width - 1e-9
+
+        above = sorted(level for level in levels if level >= cut.top)
+        below = sorted((level for level in levels if level <= cut.bottom), reverse=True)
+        inside = [level for level in levels if cut.bottom < level < cut.top]
+        positions = (
+            _bin_positions(above, bin_width)
+            | _bin_positions(below, bin_width)
+            | _bin_positions(
+                sorted(
+                    (
+                        level
+                        for level in inside
+                        if not near(level, cut.top) and not near(level, cut.bottom)
+                    ),
+                    reverse=True,
+                ),
+                bin_width,
+            )
+            | {level: cut.top for level in inside if near(level, cut.top)}
+            | {
+                level: cut.bottom
+                for level in inside
+                if near(level, cut.bottom) and not near(level, cut.top)
+            }
+        )
+    else:
+        positions = _bin_positions(sorted(levels, reverse=True), bin_width)
+    # One grey segment per bin for every filtered-out species, named in its
+    # hover: one outlined segment each would only add stripes
+    kept = df["scientificName"].isin(filtered_species or [])
+    binned = df.assign(
+        bin_y=df["identity_percentage"].map(positions),
+        species=df["scientificName"],
+        scientificName=df["scientificName"].where(kept, "Filtered out"),
+    )
+    counts = (
+        binned.groupby(["bin_y", "scientificName"])
+        .agg(
+            hits=("identity_percentage", "size"),
+            identities=(
+                "identity_percentage",
+                lambda ids: ", ".join(
+                    dict.fromkeys(f"{i:.2f}" for i in sorted(ids, reverse=True))
+                ),
             ),
-        },
+            species=("species", _hover_species_list),
+        )
+        .reset_index()
     )
 
-    # Threshold line
-    fig.add_hline(y=threshold, line_dash="dash", line_color="red", line_width=2)
-    fig.add_annotation(
-        x=df_plot["x_position"].max() * 0.95,
-        y=threshold,
-        text=f"Threshold: {threshold}%",
-        showarrow=False,
-        font=dict(color="red", size=11),
-        bgcolor="rgba(255, 255, 255, 0.8)",
-        bordercolor="red",
-        borderwidth=1,
-        xanchor="right",
-        yanchor="middle",
+    for species, sp_counts, sp_kept, color, legend in _species_groups(
+        counts, filtered_species
+    ):
+        species_line = "" if sp_kept else "<br>%{customdata[1]}"
+        fig.add_trace(
+            go.Bar(
+                x=sp_counts["hits"],
+                y=sp_counts["bin_y"],
+                width=bin_width * 0.9,
+                orientation="h",
+                marker=dict(color=color, line=dict(width=1, color="black")),
+                customdata=sp_counts[["identities", "species"]].values,
+                hovertemplate=(
+                    f"<b>{species}</b><br>Identity: %{{customdata[0]}}%<br>"
+                    f"Hits: %{{x}}{species_line}<extra></extra>"
+                ),
+                **legend,
+            )
+        )
+
+    widest = binned.groupby("bin_y").size().max() if not df.empty else 1
+    _add_gap_bracket(
+        fig,
+        cut,
+        x=-0.02 * widest,
+        cap=0.01 * widest,
+        label_offset=0.02 * widest,
     )
 
     _apply_plot_layout(
-        fig, title, xaxis_title="Hits", yaxis_title="Identity Difference (%)"
+        fig,
+        title,
+        barmode="stack",
+        xaxis_title="Number of hits",
+        yaxis_title="Identity (%)",
     )
     return fig
