@@ -9,8 +9,6 @@ from trident.pipelines.results_pipeline import (
     build_results_df,
     find_sequence_exclusion_step,
     filter_excluded_results,
-    add_below_mol,
-    get_rejected_max_identity,
     build_gbif_export_df,
 )
 
@@ -158,6 +156,25 @@ class TestBuildResultsDf:
         ]
         assert s1_specA.iloc[0]["ncbi_top_identity_percentage"] == 99.0
 
+    def test_hypo_species_carries_its_mol_link(self, sequences_df, geo_df, mol_df):
+        """A HYPO species gets the MOL species its proxy matched and the
+        sequence's MOL identity to it, found under the NCBI name or the WoRMS
+        accepted name of that species."""
+        mol_df = mol_df.assign(acceptedName=["SpecA", "SpecB", "SpecC accepted"])
+        hypo_df = pd.DataFrame(
+            {
+                "seq_id": ["s1", "s2"],
+                "scientificName": ["SpecX", "SpecY"],
+                "scientificName_hit": ["SpecB", "SpecC accepted"],
+                "identity_percentage": [97.0, 96.0],
+                "query_cover": [90, 90],
+            }
+        )
+        result = build_results_df(sequences_df, geo_df, mol_df, hypo_df=hypo_df)
+        hypo = result[result["validation_step"] == "HYPO"]
+        assert hypo["via_mol_species"].tolist() == ["SpecB", "SpecC accepted"]
+        assert hypo["via_mol_identity"].tolist() == [97.0, 95.0]
+
 
 # --- find_sequence_exclusion_step ---
 
@@ -187,70 +204,24 @@ class TestFindExclusionStep:
         assert result.empty
 
 
-# --- add_below_mol / get_rejected_max_identity ---
-#
-# below_mol flags a row when its identity is at or below the strongest hit that
-# MOL filtering rejected for that sequence (a hit NCBI found but MOL discarded).
+# --- check_hit flag ---
 
 
-def _mol_kept():
-    # MOL kept only SpecA @ 99 for s1.
-    return pd.DataFrame(
+def test_any_hypo_check_hit_is_flagged(sequences_df, geo_df, mol_df):
+    """A hypothetical species has no marker in GenBank, so any check hit flags
+    it, whatever its identity or cover; MOL+GEO species and empty sequences
+    are never flagged, although they carry an NCBI identity."""
+    hypo_df = pd.DataFrame(
         {
-            "seq_id": ["s1"],
-            "scientificName": ["SpecA"],
-            "identity_percentage": [99.0],
+            "seq_id": ["s1", "s2", "s2"],
+            "scientificName": ["SpecX", "SpecY", "SpecZ"],
+            "ncbi_top_identity_percentage": [80.0, None, 100.0],
+            "ncbi_top_query_cover": [60.0, None, 100.0],
         }
     )
-
-
-def _ncbi_all():
-    # NCBI also returned SpecX @ 96 and SpecY @ 90 for s1 (both rejected by MOL).
-    return pd.DataFrame(
-        {
-            "seq_id": ["s1", "s1", "s1"],
-            "scientificName": ["SpecA", "SpecX", "SpecY"],
-            "identity_percentage": [99.0, 96.0, 90.0],
-        }
-    )
-
-
-class TestBelowMol:
-    def test_rejected_max_is_strongest_rejected_hit(self):
-        s = get_rejected_max_identity(_mol_kept(), _ncbi_all())
-        assert s.loc["s1"] == 96.0  # SpecA(99) kept, so max rejected is SpecX(96)
-
-    def test_flags_at_or_below_rejected_max(self):
-        df = pd.DataFrame(
-            {
-                "seq_id": ["s1", "s1", "s1"],
-                "ncbi_top_identity_percentage": [95.0, 96.0, 99.0],
-            }
-        )
-        out = add_below_mol(df.copy(), _mol_kept(), _ncbi_all())
-        # rejected_max = 96: 95 <= 96 True, 96 <= 96 True (boundary), 99 > 96 False
-        assert out["below_mol"].tolist() == [True, True, False]
-
-    def test_no_rejected_hits_means_no_flags(self):
-        # mol == ncbi: nothing was rejected, so nothing is below_mol.
-        df = pd.DataFrame({"seq_id": ["s1"], "ncbi_top_identity_percentage": [50.0]})
-        out = add_below_mol(df.copy(), _ncbi_all(), _ncbi_all())
-        assert not out["below_mol"].any()
-
-    def test_missing_identity_column(self):
-        df = pd.DataFrame({"seq_id": ["s1"]})  # no identity column
-        out = add_below_mol(df.copy(), _mol_kept(), _ncbi_all())
-        assert out["below_mol"].tolist() == [False]
-
-    def test_empty_or_none_inputs(self):
-        df = pd.DataFrame({"seq_id": ["s1"], "ncbi_top_identity_percentage": [10.0]})
-        assert not add_below_mol(df.copy(), pd.DataFrame(), None)["below_mol"].any()
-        assert not add_below_mol(df.copy(), None, _ncbi_all())["below_mol"].any()
-
-    def test_nan_identity_not_flagged(self):
-        df = pd.DataFrame({"seq_id": ["s1"], "ncbi_top_identity_percentage": [pd.NA]})
-        out = add_below_mol(df.copy(), _mol_kept(), _ncbi_all())
-        assert out["below_mol"].tolist() == [False]
+    result = build_results_df(sequences_df, geo_df, mol_df, hypo_df=hypo_df)
+    flagged = result.loc[result["check_hit"], "scientificName"].tolist()
+    assert sorted(flagged) == ["SpecX", "SpecZ"]
 
 
 def test_empty_mol_list_flows_to_results(monkeypatch):
@@ -281,7 +252,7 @@ def test_empty_mol_list_flows_to_results(monkeypatch):
     for df in (tax_df, geo_df, extra_df, hypo_df):
         assert df.empty
         assert {"seq_id", "scientificName"} <= set(df.columns)
-    results = build_results_df(sequences_df, geo_df, mol_df, hypo_df, ncbi_search_df)
+    results = build_results_df(sequences_df, geo_df, mol_df, hypo_df)
     assert sorted(results["seq_id"]) == ["s1", "s2"]
     lost = find_sequence_exclusion_step(
         ["s1", "s2"], ncbi_search_df, mol_df, tax_df, geo_df

@@ -1,6 +1,6 @@
 """Tests for the HYPO pipeline's network-free logic.
 
-prepare_hypo_input (build per-seq BLAST inputs + Entrez query), run_hypo_merge
+hypo_queries and prepare_hypo_input (Entrez query of the MOL list, per-seq BLAST inputs), run_hypo_merge
 (map proxy hits back to target species), run_hypo_filter (threshold), and
 finalize_hypo_results (attach the per-species NCBI check). The two network steps
 (run_hypo_search, run_hypo_check) are tested for their failure handling and
@@ -20,6 +20,8 @@ from Bio.SeqRecord import SeqRecord
 import trident.pipelines.hypo_pipeline as hypo_pipeline
 from trident.core.database import view_cached_runs
 from trident.pipelines.hypo_pipeline import (
+    count_hypo_searches,
+    hypo_queries,
     prepare_hypo_input,
     run_hypo_check,
     run_hypo_search,
@@ -36,40 +38,45 @@ _finalize = inspect.unwrap(finalize_hypo_results)
 # --- prepare_hypo_input ---
 
 
-def test_prepare_builds_seqrecords_and_entrez_from_mol_species():
+def test_prepare_constrains_the_search_to_the_mol_list():
+    """The proxies of a sequence are BLASTed against its MOL species that WoRMS
+    kept in the TAX list, whether or not they passed GEO, by their accepted
+    name and the NCBI synonyms they were hit under. A sequence without such
+    species is not searched: unconstrained, a proxy would match its own
+    species."""
     extra_df = pd.DataFrame(
         {
-            "seq_id": ["t1", "t1"],
-            "dna_sequence_extra": ["ACGT", "TTGG"],
-            "seq_id_extra": ["P1", "P2"],
+            "seq_id": ["t1", "t1", "t2"],
+            "dna_sequence_extra": ["ACGT", "TTGG", "AAAA"],
+            "seq_id_extra": ["P1", "P2", "P3"],
         }
     )
-    # Only the in_mol species constrains the BLAST (Entrez organism query).
-    geo_df = pd.DataFrame(
+    tax_df = pd.DataFrame(
         {
-            "seq_id": ["t1", "t1"],
-            "scientificName": ["Gadus morhua", "Other species"],
-            "in_mol": [True, False],
+            "seq_id": ["t1", "t1", "t1", "t2"],
+            "scientificName": [
+                "Omobranchus ferox",
+                "Omobranchus fasciolatus",
+                "Caranx ruber",
+                "Caranx ignobilis",
+            ],
+            "in_mol": [True, False, True, False],
+            "verbatimIdentification": [None, None, "Carangoides ruber", None],
         }
     )
-    out = prepare_hypo_input(extra_df, geo_df)
+    queries_df = hypo_queries(tax_df)
+    out = prepare_hypo_input(extra_df, queries_df)
 
     assert list(out.keys()) == ["t1"]
     assert [r.id for r in out["t1"]["sequences"]] == ["P1", "P2"]
-    q = out["t1"]["entrez_query"]
-    assert '"Gadus morhua"[orgn]' in q
-    assert "Other species" not in q  # not in_mol -> excluded
-
-
-def test_prepare_empty_entrez_when_no_mol_species():
-    extra_df = pd.DataFrame(
-        {"seq_id": ["t1"], "dna_sequence_extra": ["ACGT"], "seq_id_extra": ["P1"]}
+    assert out["t1"]["entrez_query"] == (
+        '("Carangoides ruber"[orgn] OR "Caranx ruber"[orgn] OR '
+        '"Omobranchus ferox"[orgn])'
     )
-    geo_df = pd.DataFrame(
-        {"seq_id": ["t1"], "scientificName": ["X"], "in_mol": [False]}
-    )
-    out = prepare_hypo_input(extra_df, geo_df)
-    assert out["t1"]["entrez_query"] == ""
+    assert count_hypo_searches(extra_df, queries_df) == (2, 1)
+    # No synonym at all: the column is blank (float NaN) or absent.
+    no_synonym = tax_df.assign(verbatimIdentification=float("nan"))
+    assert len(hypo_queries(no_synonym)) == 1
 
 
 # --- run_hypo_merge: proxy hit -> target species ---
@@ -78,7 +85,8 @@ def test_prepare_empty_entrez_when_no_mol_species():
 def test_merge_maps_proxy_to_target_under_its_own_query():
     """Each target gets the hits of its proxy found under its own Entrez query:
     for proxy P1, shared by t1 and t2, t1 does not get the hit found under t2's
-    query."""
+    query. A hit NCBI returned outside the MOL list (here the target species
+    itself) is dropped."""
     extra_df = pd.DataFrame(
         {
             "seq_id": ["t1", "t2"],
@@ -87,25 +95,29 @@ def test_merge_maps_proxy_to_target_under_its_own_query():
             "dna_sequence_extra": ["ACGT", "ACGT"],
         }
     )
-    geo_df = pd.DataFrame(
+    queries_df = pd.DataFrame(
         {
             "seq_id": ["t1", "t2"],
-            "scientificName": ["Gadus macrocephalus", "Gadus ogac"],
-            "in_mol": [True, True],
+            "entrez_query": ['("Gadus macrocephalus"[orgn])', '("Gadus ogac"[orgn])'],
+            "mol_species": ["Gadus macrocephalus", "Gadus ogac"],
         }
     )
     hypo_search_df = pd.DataFrame(
         {
-            "seq_id": ["P1", "P1"],
-            "scientificName": ["Gadus macrocephalus", "Gadus ogac"],
-            "query_cover": [80.0, 70.0],
-            "identity_percentage": [92.0, 90.0],
-            "hit_def": ["def", "def"],
-            "hit_url": ["url", "url"],
-            "entrez_query": ['("Gadus macrocephalus"[orgn])', '("Gadus ogac"[orgn])'],
+            "seq_id": ["P1", "P1", "P1"],
+            "scientificName": ["Gadus macrocephalus", "Gadus ogac", "Gadus morhua"],
+            "query_cover": [80.0, 70.0, 99.0],
+            "identity_percentage": [92.0, 90.0, 100.0],
+            "hit_def": ["def", "def", "def"],
+            "hit_url": ["url", "url", "url"],
+            "entrez_query": [
+                '("Gadus macrocephalus"[orgn])',
+                '("Gadus ogac"[orgn])',
+                '("Gadus macrocephalus"[orgn])',
+            ],
         }
     )
-    out = _merge(hypo_search_df, extra_df, geo_df)
+    out = _merge(hypo_search_df, extra_df, queries_df)
     assert list(zip(out["seq_id"], out["scientificName_hit"])) == [
         ("t1", "Gadus macrocephalus"),
         ("t2", "Gadus ogac"),
@@ -146,22 +158,24 @@ def test_finalize_keeps_best_proxy_and_attaches_check():
             "query_cover": [100.0, 100.0],
         }
     )
-    # The per-species NCBI check found the marker at 90% identity.
+    # The per-species NCBI check found the marker at 90% over the whole
+    # sequence, and at 100% over a short part of it.
     hypo_check_df = pd.DataFrame(
         {
-            "seq_id": ["t1"],
-            "scientificName": ["Gadus morhua"],
-            "identity_percentage": [90.0],
-            "query_cover": [100.0],
-            "hit_url": ["nurl"],
-            "hit_found": [True],
+            "seq_id": ["t1", "t1"],
+            "scientificName": ["Gadus morhua", "Gadus morhua"],
+            "identity_percentage": [100.0, 90.0],
+            "query_cover": [40.0, 100.0],
+            "hit_url": ["purl", "nurl"],
+            "hit_found": [True, True],
         }
     )
     out = _finalize(hypo_filter_df, hypo_check_df)
     assert len(out) == 1
     row = out.iloc[0]
     assert row["identity_percentage"] == 95.0  # best proxy
-    assert row["ncbi_top_identity_percentage"] == 90.0  # from the check
+    # The best check hit is the one covering the MOL query cover.
+    assert row["ncbi_top_identity_percentage"] == 90.0
 
 
 def test_finalize_check_absent_leaves_ncbi_stats_na():

@@ -22,7 +22,8 @@ from trident.ui.ui import (
     styled_or_plain,
     COL,
     highlight_low_identity,
-    highlight_below_mol,
+    highlight_check_hit,
+    CHECK_HIT_LEGEND,
     highlight_empty_sequence,
     sequence_selector,
 )
@@ -64,7 +65,7 @@ RESULTS_COLUMN_CONFIG = {
     "gbif_occurrences": COL["gbif_occurrences"],
     "gbif_taxonURL": COL["gbif_taxonURL"],
     "low_identity_warning": None,
-    "below_mol": None,
+    "check_hit": None,
     "dna_sequence": None,
 }
 
@@ -95,10 +96,10 @@ def show_results_overview(results_df):
 
         display_df = add_low_identity_warning(results_df.copy(), low_identity)
 
-        # Apply highlights: below_mol first, then low_identity and empty_sequence
+        # Apply highlights: check_hit first, then low_identity and empty_sequence
         # override (red takes priority over orange)
         styled_df = (
-            styled_or_plain(display_df, highlight_below_mol)
+            styled_or_plain(display_df, highlight_check_hit)
             .apply(highlight_low_identity, axis=1)
             .apply(highlight_empty_sequence, axis=1)
         )
@@ -106,10 +107,8 @@ def show_results_overview(results_df):
         legends = []
         if display_df["low_identity_warning"].any():
             legends.append(f":red[■] Low identity (<{low_identity}%)")
-        if display_df["below_mol"].any():
-            legends.append(
-                ":orange[■] Found in NCBI but would not have passed the MOL filter"
-            )
+        if display_df["check_hit"].any():
+            legends.append(CHECK_HIT_LEGEND)
         if display_df["scientificName"].isna().any():
             legends.append(":gray[■] No species assigned")
         if legends:
@@ -152,7 +151,7 @@ def show_results_per_sequence(results_df):
             )
             if identity.notna().any() and identity.min() < low_identity_seq:
                 flags += " ⚠"
-            if sdf.get("below_mol") is not None and sdf["below_mol"].any():
+            if sdf.get("check_hit") is not None and sdf["check_hit"].any():
                 flags += " ⚠"
             return f"{seq_id}{flags}" if flags else seq_id
 
@@ -187,15 +186,13 @@ def show_results_per_sequence(results_df):
         legends = []
         if display_df["low_identity_warning"].any():
             legends.append(f":red[■] Low Identity (<{low_identity_seq}%)")
-        if display_df["below_mol"].any():
-            legends.append(
-                ":orange[■] Found in NCBI but would not have passed the MOL filter"
-            )
+        if display_df["check_hit"].any():
+            legends.append(CHECK_HIT_LEGEND)
         if legends:
             st.caption(" · ".join(legends))
 
         styled_df = styled_or_plain(
-            display_df, highlight_below_mol, highlight_low_identity
+            display_df, highlight_check_hit, highlight_low_identity
         )
 
         st.dataframe(
@@ -212,7 +209,7 @@ def show_results_per_sequence(results_df):
             .groupby(["scientificName", "validation_step"], sort=False)
             .agg(
                 low_id=("low_identity_warning", "any"),
-                below=("below_mol", "any"),
+                below=("check_hit", "any"),
             )
             .reset_index()
             .sort_values("scientificName")
@@ -304,17 +301,15 @@ def show_curated_results(results_df):
         legends = []
         if display_df["low_identity_warning"].any():
             legends.append(f":red[■] Low Identity (<{low_identity_curated}%)")
-        if display_df["below_mol"].any():
-            legends.append(
-                ":orange[■] Found in NCBI but would not have passed the MOL filter"
-            )
+        if display_df["check_hit"].any():
+            legends.append(CHECK_HIT_LEGEND)
         if display_df["scientificName"].isna().any():
             legends.append(":gray[■] No species assigned")
         if legends:
             st.caption(" · ".join(legends))
 
         styled_df = (
-            styled_or_plain(display_df, highlight_below_mol)
+            styled_or_plain(display_df, highlight_check_hit)
             .apply(highlight_low_identity, axis=1)
             .apply(highlight_empty_sequence, axis=1)
         )
@@ -425,9 +420,9 @@ def _species_breakdown_columns(sp_df, is_hypo):
 def _show_species_breakdown_table(df, is_hypo, threshold):
     """Render a styled breakdown table for a subset of species rows."""
     col_order, col_config = _species_breakdown_columns(df, is_hypo)
-    col_config["below_mol"] = None
+    col_config["check_hit"] = None
     display_df = add_low_identity_warning(df.copy(), threshold)
-    styled_df = styled_or_plain(display_df, highlight_below_mol, highlight_low_identity)
+    styled_df = styled_or_plain(display_df, highlight_check_hit, highlight_low_identity)
     st.dataframe(
         styled_df,
         width="stretch",
@@ -687,7 +682,6 @@ def results_main():
         geo_df=st.session_state.geo_df,
         mol_df=st.session_state.mol_df,
         hypo_df=st.session_state.get("hypo_df"),
-        ncbi_search_df=st.session_state.get("ncbi_search_df"),
     )
 
     if results_df.empty:

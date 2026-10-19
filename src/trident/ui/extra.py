@@ -295,6 +295,7 @@ def bold_filter_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     bold_merge_df, bold_merge_params = pipe.run_bold_merge(
         bold_filter_df,
         geo_df,
+        ncbi_search_df=st.session_state.ncbi_search_df,
         bold_filter_params=bold_filter_params,
         geo_params=st.session_state.geo_params,
         db_path=st.session_state.db_path,
@@ -312,7 +313,7 @@ def bold_filter_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     progress_bar.empty()
 
     extra_summary_df = pipe.build_extra_summary(
-        extra_df, geo_df, bold_input_species=st.session_state.bold_input_species
+        extra_df, geo_df, ncbi_search_df=st.session_state.ncbi_search_df
     )
 
     st.session_state.bold_filter_df = bold_filter_df
@@ -399,7 +400,7 @@ def display_bold_input_summary():
     if not bold_input:
         return
 
-    non_mol_df = geo_df[geo_df["scientificName"].isin(bold_input)]
+    non_mol_df = geo_df[pipe.needs_proxy(geo_df, st.session_state.ncbi_search_df)]
     n_to_query = len(bold_input)
 
     with st.container(border=True):
@@ -517,14 +518,10 @@ def display_extra_summary():
 
 def display_bold_sequence_metrics(seq_df, selected_seq):
     # Species queried for this seq_id but not found in BOLD
-    bold_input = set(st.session_state.bold_input_species)
     geo_df = st.session_state.geo_df
+    queried = geo_df[pipe.needs_proxy(geo_df, st.session_state.ncbi_search_df)]
     queried_for_seq = set(
-        geo_df.loc[
-            (geo_df["seq_id"] == selected_seq)
-            & (geo_df["scientificName"].isin(bold_input)),
-            "scientificName",
-        ]
+        queried.loc[queried["seq_id"] == selected_seq, "scientificName"]
     )
     found_for_seq = set(seq_df["scientificName"].unique())
     missing_for_seq = sorted(queried_for_seq - found_for_seq)

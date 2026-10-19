@@ -5,7 +5,6 @@ import pandas as pd
 from trident.core.utils import (
     extract_specific_epithet,
     find_exclusion_pipeline_step,
-    group_species_by_flag,
     notify_progress,
     preserve_sequence_order,
     reorder_taxonomy_columns,
@@ -163,21 +162,6 @@ def test_reorder_no_taxonomy_cols():
     df = pd.DataFrame({"a": [1], "b": [2]})
     result = reorder_taxonomy_columns(df)
     assert list(result.columns) == ["a", "b"]
-
-
-# --- group_species_by_flag ---
-
-
-def test_group_species_by_flag():
-    df = pd.DataFrame(
-        {
-            "seq_id": ["s1", "s1", "s2"],
-            "scientificName": ["A", "B", "C"],
-            "in_mol": [True, False, True],
-        }
-    )
-    result = group_species_by_flag(df, "in_mol")
-    assert result == {"s1": ["A"], "s2": ["C"]}
 
 
 # --- find_exclusion_pipeline_step ---

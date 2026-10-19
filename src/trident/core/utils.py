@@ -174,27 +174,6 @@ def reorder_taxonomy_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[before_taxon + taxon_cols + after_taxon]
 
 
-def group_species_by_flag(
-    df: pd.DataFrame,
-    flag_col: str,
-    seq_id_col: str = "seq_id",
-    name_col: str = "scientificName",
-) -> dict[str, list[str]]:
-    """Group species per seq_id where a boolean flag is True.
-
-    Args:
-        df: DataFrame with seq_id, scientificName, and a boolean flag column.
-        flag_col: Name of the boolean column to filter on.
-        seq_id_col: Name of the sequence ID column.
-        name_col: Name of the species name column.
-
-    Returns:
-        Dict mapping each seq_id to its list of species where flag is True.
-    """
-    flagged = df[df[flag_col].astype(bool)]
-    return flagged.groupby(seq_id_col)[name_col].apply(list).to_dict()
-
-
 def find_exclusion_pipeline_step(
     all_ids: list[str],
     steps: list[tuple[str, set[str]]],

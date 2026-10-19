@@ -39,6 +39,9 @@ BLAST_MAX_THREADS = 6
 BLAST_GIVE_UP_MINUTES_DEFAULT = round(BLAST_GIVE_UP / 60)
 # Below this, healthy jobs on a busy NCBI would be given up too.
 BLAST_GIVE_UP_MINUTES_MIN = 5
+# HYPO searches are limited to a few species and come back within about 2 min;
+# a job waiting longer is stuck at NCBI and comes back soon once resubmitted.
+HYPO_GIVE_UP_MINUTES_DEFAULT = BLAST_GIVE_UP_MINUTES_MIN
 NCBI_BATCH_SIZE_DEFAULT = 50
 NCBI_METHOD_DEFAULT = NCBI_METHOD
 NCBI_QUERY_COVER_DEFAULT = NCBI_QUERY_COVER

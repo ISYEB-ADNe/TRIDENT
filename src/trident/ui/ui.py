@@ -24,6 +24,7 @@ from trident.clients.ncbi import BLAST_SLOW_THREADS
 from trident.core.utils import pluralize
 from trident.core import stop
 from trident.logging import get_log_level
+from trident.ui.defaults import NCBI_QUERY_COVER_DEFAULT
 
 
 # Suppress Streamlit's thread context warnings (Streamlit uses standard logging internally)
@@ -284,6 +285,8 @@ class AppState:
     hypo_df: "pd.DataFrame | None" = None
 
     excluded_results: list[str] = field(default_factory=list)
+    # The keys each bulk button excluded, so a second click restores them.
+    bulk_excluded: dict[str, list[str]] = field(default_factory=dict)
 
     # reset=False: not a pipeline output, so reset_state_after leaves it intact
     # (it is the cross-tab widget persistence store).
@@ -1099,10 +1102,23 @@ def highlight_low_identity(row):
     return [style] * len(row)
 
 
-def highlight_below_mol(row):
-    """Apply highlight style for species that would not have passed the MOL filter."""
-    style = "background-color: #ffe0b2;" if row.get("below_mol", False) else ""
+# What the check_hit flag means (see add_check_hit), and the legend of the
+# rows highlight_check_hit colours.
+CHECK_HIT_NOTE = "HYPO species whose marker the HYPO check found in NCBI"
+CHECK_HIT_LEGEND = f":orange[■] {CHECK_HIT_NOTE}"
+
+
+def highlight_check_hit(row):
+    """Apply highlight style for HYPO species with a check hit (see add_check_hit)."""
+    style = "background-color: #ffe0b2;" if row.get("check_hit", False) else ""
     return [style] * len(row)
+
+
+def mol_query_cover():
+    """The MOL filter's query cover, which the best HYPO check hit and the
+    best identity of a sequence also require (a partial hit says less)."""
+    stored = (st.session_state.get("mol_params") or {}).get("ncbi_query_cover")
+    return coerce_stored_value(stored, float(NCBI_QUERY_COVER_DEFAULT))
 
 
 def highlight_empty_sequence(row):

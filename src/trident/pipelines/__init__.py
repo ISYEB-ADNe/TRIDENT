@@ -38,6 +38,7 @@ from .geo_pipeline import (
 )
 
 from .extra_pipeline import (
+    needs_proxy,
     prepare_bold_input,
     run_bold_search,
     run_bold_filter,
@@ -49,6 +50,8 @@ from .extra_pipeline import (
 )
 
 from .hypo_pipeline import (
+    count_hypo_searches,
+    hypo_queries,
     prepare_hypo_input,
     run_hypo_search,
     run_hypo_merge,
@@ -64,9 +67,8 @@ from .results_pipeline import (
     build_results_df,
     find_sequence_exclusion_step,
     build_gbif_export_df,
-    add_below_mol,
+    add_check_hit,
     add_low_identity_warning,
-    get_rejected_max_identity,
     RESULT_COLS,
     EXPORT_COLS,
     GBIF_EXPORT_COLS,
@@ -103,6 +105,7 @@ __all__ = [
     "empty_geo_results",
     "build_geo_summary",
     "classify_gbif_extents",
+    "needs_proxy",
     "prepare_bold_input",
     "run_bold_search",
     "run_bold_filter",
@@ -111,6 +114,8 @@ __all__ = [
     "empty_extra_results",
     "build_extra_summary",
     "build_extra_seq_summary",
+    "count_hypo_searches",
+    "hypo_queries",
     "prepare_hypo_input",
     "run_hypo_search",
     "run_hypo_merge",
@@ -123,9 +128,8 @@ __all__ = [
     "build_results_df",
     "find_sequence_exclusion_step",
     "build_gbif_export_df",
-    "add_below_mol",
+    "add_check_hit",
     "add_low_identity_warning",
-    "get_rejected_max_identity",
     "RESULT_COLS",
     "EXPORT_COLS",
     "GBIF_EXPORT_COLS",

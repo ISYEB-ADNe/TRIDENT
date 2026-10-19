@@ -6,12 +6,12 @@ via CO1 proxy (BOLD sequences BLASTed against NCBI) and confirmed as
 geographically plausible.
 
 Steps:
-    1. prepare_hypo_input       — build per-seq_id BLAST inputs from EXTRA + GEO
-    2. run_hypo_search          — NCBI BLAST on proxy sequences          [CustomCache]
-    3. run_hypo_merge           — map proxy IDs back to targets (EXTRA)   [FullCache]
-    4. run_hypo_filter          — threshold on identity / query cover     [FullCache]
-    5. run_hypo_check           — per-species NCBI BLAST verification     [CustomCache]
-    6. finalize_hypo_results    — label, merge check results, final df    [FullCache]
+    1. prepare_hypo_input       build per-seq_id BLAST inputs from EXTRA + MOL/TAX
+    2. run_hypo_search          NCBI BLAST on proxy sequences            [CustomCache]
+    3. run_hypo_merge           map proxy IDs back to targets (EXTRA)     [FullCache]
+    4. run_hypo_filter          threshold on identity / query cover       [FullCache]
+    5. run_hypo_check           per-species NCBI BLAST verification       [CustomCache]
+    6. finalize_hypo_results    label, merge check results, final df      [FullCache]
 """
 
 import numpy as np
@@ -30,13 +30,14 @@ from trident.core.constants import (
     HYPO_QUERY_COVER,
     HYPO_IDENTITY,
     HYPO_CHECK_EV_EXPONENT,
+    NCBI_QUERY_COVER,
 )
 from trident.core.database import save_to_db, FullCache, CustomCache
 from trident.core.utils import (
+    normalize_name,
     pluralize,
     preserve_sequence_order,
     notify_progress,
-    group_species_by_flag,
     ensure_columns,
     top_hit_per_group,
 )
@@ -58,39 +59,88 @@ from trident.clients.ncbi import (
 ### DATA PREPARATION ###
 
 
-def hypo_queries(geo_df) -> dict[str, str]:
-    """Entrez organism query of each seq_id, from its MOL-validated species.
+def hypo_queries(tax_df) -> pd.DataFrame:
+    """Entrez organism query of each seq_id: the species of its MOL list.
 
-    The query restricts the BLAST of the seq_id's proxy sequences; a seq_id
-    without MOL species is absent (no restriction, query ""). Used by
-    prepare_hypo_input and run_hypo_merge, so both see the same query.
+    A hypothetical species is compared with the species that passed the MOL
+    filter for the sequence, whether or not they passed GEO, among those WoRMS
+    kept in the TAX list (in_mol). That leaves out what WoRMS does not list
+    there (terrestrial contaminants with "Marine only", "cf." and "sp." hits,
+    "unidentified"). Species go by name, the WoRMS accepted one and the NCBI
+    synonyms it was hit under (verbatimIdentification): [orgn] matches a name
+    with its subspecies but not hybrid records (they hold the other parent's
+    mitogenome).
+
+    Returns:
+        DataFrame with columns seq_id, entrez_query and mol_species (the
+        names, joined by "; "), one row per seq_id that has such species.
+        prepare_hypo_input and run_hypo_merge both take it, so search and
+        merge see the same species.
     """
-    if geo_df.empty:
-        return {}
-    return {
-        seq_id: "(" + " OR ".join(f'"{sp}"[orgn]' for sp in species) + ")"
-        for seq_id, species in group_species_by_flag(geo_df, "in_mol").items()
-        if species
-    }
+    columns = ["seq_id", "entrez_query", "mol_species"]
+    if tax_df.empty:
+        return pd.DataFrame(columns=columns)
+    mol = tax_df[tax_df["in_mol"].astype(bool)]
+    # Blank (all NaN, so float) when no MOL hit used a synonym.
+    synonyms = mol.get("verbatimIdentification", pd.Series(index=mol.index))
+    names = pd.concat(
+        [
+            mol[["seq_id", "scientificName"]],
+            mol[["seq_id"]]
+            .assign(scientificName=synonyms.astype(object).str.split(", "))
+            .explode("scientificName")
+            .dropna(),
+        ]
+    )
+    species = names.groupby("seq_id")["scientificName"].agg(lambda s: sorted(set(s)))
+    return pd.DataFrame(
+        {
+            "seq_id": species.index,
+            "entrez_query": [
+                "(" + " OR ".join(f'"{n}"[orgn]' for n in s) + ")" for s in species
+            ],
+            "mol_species": ["; ".join(s) for s in species],
+        }
+    )[columns]
 
 
-def prepare_hypo_input(extra_df, geo_df):
-    """Build per-seq_id BLAST inputs from EXTRA proxy sequences and GEO validation status.
+def count_hypo_searches(extra_df, queries_df) -> tuple[int, int]:
+    """Searches a HYPO run makes, and the seq_ids they cover.
 
-    For each seq_id, creates SeqRecords from EXTRA sequences and an Entrez
-    organism query from MOL-validated species to constrain the BLAST search.
+    A proxy shared by seq_ids with the same query is searched once (the
+    search's cache item is the proxy record and its query).
+    """
+    searched = extra_df.merge(queries_df, on="seq_id")
+    n_searches = len(searched[["seq_id_extra", "entrez_query"]].drop_duplicates())
+    return n_searches, searched["seq_id"].nunique()
+
+
+def _query_map(queries_df):
+    """{seq_id: entrez_query} of a hypo_queries table."""
+    return dict(zip(queries_df["seq_id"], queries_df["entrez_query"]))
+
+
+def prepare_hypo_input(extra_df, queries_df):
+    """Build per-seq_id BLAST inputs from EXTRA proxy sequences.
+
+    For each seq_id, creates SeqRecords from EXTRA sequences, with its Entrez
+    organism query to constrain the BLAST search. A seq_id without a query
+    gets no input: an unconstrained search would let a proxy match its own
+    species.
 
     Args:
         extra_df: EXTRA DataFrame with proxy sequences (seq_id_extra, dna_sequence_extra).
-        geo_df: GEO DataFrame with 'in_mol' flag per species.
+        queries_df: Entrez query of each seq_id (see hypo_queries).
 
     Returns:
         dict: {seq_id: {'sequences': [SeqRecord, ...], 'entrez_query': str}, ...}
     """
-    queries = hypo_queries(geo_df)
+    queries = _query_map(queries_df)
 
     input_data = {}
     for seq_id, group in extra_df.groupby("seq_id", observed=False):
+        if seq_id not in queries:
+            continue
         seq_records = [
             SeqRecord(Seq(seq.replace("-", "N")), id=seq_id_extra)
             for seq, seq_id_extra in zip(
@@ -99,7 +149,7 @@ def prepare_hypo_input(extra_df, geo_df):
         ]
         input_data[seq_id] = {
             "sequences": seq_records,
-            "entrez_query": queries.get(seq_id, ""),
+            "entrez_query": queries[seq_id],
         }
 
     n_seq = sum(len(v["sequences"]) for v in input_data.values())
@@ -291,14 +341,14 @@ def run_hypo_search(
     table_name="hypo_merge",
     cache=FullCache(
         inherit_from=["hypo_search_params", "extra_params"],
-        fingerprint_on=["hypo_search_df", "geo_df"],
+        fingerprint_on=["hypo_search_df", "queries_df"],
     ),
 )
 @preserve_sequence_order("seq_id", "extra_df")
 def run_hypo_merge(
     hypo_search_df: pd.DataFrame,
     extra_df: pd.DataFrame,
-    geo_df: pd.DataFrame,
+    queries_df: pd.DataFrame,
     hypo_search_params: dict | None = None,
     extra_params: dict | None = None,
 ) -> pd.DataFrame:
@@ -312,8 +362,8 @@ def run_hypo_merge(
     Args:
         hypo_search_df: Search results from run_hypo_search.
         extra_df: EXTRA DataFrame with proxy-to-target mapping.
-        geo_df: GEO DataFrame the search input was prepared from, for the
-            Entrez query of each seq_id (see hypo_queries).
+        queries_df: The Entrez query of each seq_id the search input was
+            prepared with (see hypo_queries).
         hypo_search_params: Params from run_hypo_search (for caching).
         extra_params: Params from finalize_extra_results (for caching).
 
@@ -334,7 +384,7 @@ def run_hypo_merge(
         "hit_url",
         "entrez_query",
     ]
-    queries = hypo_queries(geo_df)
+    queries = _query_map(queries_df)
     merge_df = extra_df.assign(
         entrez_query=pd.Series(
             [queries.get(s, "") for s in extra_df["seq_id"]],
@@ -355,7 +405,22 @@ def run_hypo_merge(
     cols_to_drop = [col for col in merge_df.columns if col.endswith("_blast")]
     merge_df = merge_df.drop(columns=cols_to_drop)
 
-    return merge_df
+    # NCBI's [orgn] also matches other nodes (e.g. "Gerres sp." records for
+    # "Gerres oyena", records named after the hypothetical species itself):
+    # only hits on a species of the sequence's MOL list count.
+    mol_species = {
+        seq_id: {normalize_name(n) for n in names.split("; ")}
+        for seq_id, names in zip(queries_df["seq_id"], queries_df["mol_species"])
+    }
+    in_list = pd.Series(
+        [
+            normalize_name(hit) in mol_species.get(seq_id, set())
+            for seq_id, hit in zip(merge_df["seq_id"], merge_df["scientificName_hit"])
+        ],
+        index=merge_df.index,
+        dtype=bool,
+    )
+    return merge_df[in_list]
 
 
 ### FILTER ###
@@ -628,10 +693,27 @@ def run_hypo_check(
 ### FINALIZE HYPO RESULTS (final) ###
 
 
+def best_check_hits(hypo_check_df, query_cover, columns=None):
+    """Best check hit of each (seq_id, scientificName).
+
+    Hits covering at least the MOL query cover rank first: the best hit is the
+    highest identity among hits as long as the MOL filter requires, so it is
+    comparable with the MOL hits; a partial hit only when there is no other.
+    """
+    cover = pd.to_numeric(hypo_check_df["query_cover"], errors="coerce")
+    return top_hit_per_group(
+        hypo_check_df.assign(_full_cover=cover >= query_cover),
+        keys=["seq_id", "scientificName"],
+        sort=["_full_cover", "identity_percentage", "query_cover"],
+        columns=columns,
+    )
+
+
 @save_to_db(
     table_name="results_hypo",
     cache=FullCache(
         inherit_from=["hypo_check_params", "hypo_filter_params"],
+        local={"hypo_check_query_cover": "query_cover"},
         fingerprint_on=["hypo_check_df"],
     ),
 )
@@ -639,6 +721,7 @@ def run_hypo_check(
 def finalize_hypo_results(
     hypo_filter_df: pd.DataFrame,
     hypo_check_df: pd.DataFrame,
+    query_cover: float = NCBI_QUERY_COVER,
     hypo_filter_params: dict | None = None,
     hypo_check_params: dict | None = None,
 ) -> pd.DataFrame:
@@ -651,6 +734,8 @@ def finalize_hypo_results(
     Args:
         hypo_filter_df: Filtered results from run_hypo_filter (has taxonomy from GEO).
         hypo_check_df: Check results from run_hypo_check.
+        query_cover: The MOL filter's minimum query cover, for the best check
+            hit (see best_check_hits).
         hypo_filter_params: Params from run_hypo_filter (for caching).
         hypo_check_params: Params from run_hypo_check (for caching).
 
@@ -663,10 +748,9 @@ def finalize_hypo_results(
         hypo_check_params = {}
 
     # Best check hit per (seq_id, scientificName)
-    check_hits = top_hit_per_group(
+    check_hits = best_check_hits(
         hypo_check_df[hypo_check_df["hit_found"].astype(bool)],
-        keys=["seq_id", "scientificName"],
-        sort=["identity_percentage", "query_cover"],
+        query_cover,
         columns=[
             "seq_id",
             "scientificName",
@@ -703,11 +787,15 @@ def finalize_hypo_results(
 
 
 @preserve_sequence_order("seq_id", "hypo_check_df")
-def build_hypo_check_summary(hypo_check_df: pd.DataFrame) -> pd.DataFrame:
+def build_hypo_check_summary(
+    hypo_check_df: pd.DataFrame, query_cover: float = NCBI_QUERY_COVER
+) -> pd.DataFrame:
     """Summarize check results: best hit and count per (seq_id, scientificName).
 
     Args:
         hypo_check_df: Check results from run_hypo_check.
+        query_cover: The MOL filter's minimum query cover, for the best hit
+            (see best_check_hits).
 
     Returns:
         Summary DataFrame with columns: seq_id, scientificName, hit_count,
@@ -722,13 +810,7 @@ def build_hypo_check_summary(hypo_check_df: pd.DataFrame) -> pd.DataFrame:
         "hit_url",
     ]
 
-    best_hits = (
-        hypo_check_df.sort_values(
-            ["identity_percentage", "query_cover"], ascending=[False, False]
-        )
-        .groupby(["seq_id", "scientificName"], as_index=False, observed=False)
-        .first()
-    )
+    best_hits = best_check_hits(hypo_check_df, query_cover)
 
     hit_counts = (
         hypo_check_df[hypo_check_df["hit_found"].astype(bool)]
@@ -754,7 +836,7 @@ def empty_hypo_results(extra_df: pd.DataFrame) -> pd.DataFrame:
     """
     search_df, _ = run_hypo_search({}, db_path=None)
     merge_df, _ = run_hypo_merge(
-        search_df, extra_df, pd.DataFrame(), extra_params={}, db_path=None
+        search_df, extra_df, hypo_queries(pd.DataFrame()), extra_params={}, db_path=None
     )
     filter_df, _ = run_hypo_filter(merge_df, db_path=None)
     check_df, _ = run_hypo_check(filter_df, db_path=None)

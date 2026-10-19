@@ -8,7 +8,7 @@ which does WoRMS lookups for higher-level taxa).
     find_sequence_exclusion_step(all_seq_ids, ...) → DataFrame
     build_gbif_export_df(results_df) → DataFrame (one row per MOTU/ASV)
     resolve_sequences(results_df) → DataFrame (species count and shared rank per MOTU/ASV)
-    add_below_mol(df, mol_df, ncbi_search_df) → DataFrame
+    add_check_hit(df) → DataFrame
     add_low_identity_warning(df, threshold) → DataFrame
 """
 
@@ -24,6 +24,7 @@ from trident.clients.worms import (
 from trident.core.utils import (
     ensure_columns,
     find_exclusion_pipeline_step,
+    normalize_name,
     preserve_sequence_order,
 )
 
@@ -48,6 +49,10 @@ RESULT_COLS = [
     "bold_seq_url",
     "gbif_occurrences",
 ]
+
+# HYPO only, shown in the app but not exported: the MOL species a HYPO
+# species' CO1 proxy matched, and the sequence's NCBI identity to it.
+VIA_COLS = ["via_mol_species", "via_mol_identity"]
 
 # Column order for CSV/file export
 EXPORT_COLS = [
@@ -78,54 +83,18 @@ EXPORT_COLS = [
 ]
 
 
-def get_rejected_max_identity(mol_df, ncbi_search_df) -> pd.Series:
-    """Return max identity among MOL-rejected hits, per seq_id."""
-    if ncbi_search_df is None or ncbi_search_df.empty or mol_df is None or mol_df.empty:
-        return pd.Series(dtype=float, name="_rejected_max")
-    mol_keys = set(
-        zip(mol_df["seq_id"], mol_df["scientificName"], mol_df["identity_percentage"])
-    )
-    # Same set-membership test as a row-wise apply, but iterate columns directly
-    # to avoid building a Series per row. Semantics are identical (same tuples,
-    # same NaN != NaN behaviour as the set of tuples).
-    in_mol = [
-        (seq_id, name, identity) in mol_keys
-        for seq_id, name, identity in zip(
-            ncbi_search_df["seq_id"],
-            ncbi_search_df["scientificName"],
-            ncbi_search_df["identity_percentage"],
-        )
-    ]
-    rejected = ncbi_search_df[~pd.Series(in_mol, index=ncbi_search_df.index)]
-    if rejected.empty:
-        return pd.Series(dtype=float, name="_rejected_max")
-    return (
-        rejected.groupby("seq_id")["identity_percentage"].max().rename("_rejected_max")
-    )
+def add_check_hit(df, identity_col="ncbi_top_identity_percentage"):
+    """Flag the HYPO species whose target marker the HYPO check found in NCBI.
 
+    A hypothetical species is one whose marker is absent from GenBank, so any
+    check hit puts it up for review, whatever its identity or cover.
 
-def add_below_mol(
-    df,
-    mol_df,
-    ncbi_search_df,
-    identity_col="ncbi_top_identity_percentage",
-):
-    """Flag rows where identity is at or below the highest rejected MOL hit."""
-    df["below_mol"] = False
-    if identity_col not in df.columns:
-        return df
-    rejected_max = get_rejected_max_identity(mol_df, ncbi_search_df)
-    if rejected_max.empty:
-        return df
-    df = df.merge(rejected_max, on="seq_id", how="left")
-    df[identity_col] = pd.to_numeric(df[identity_col], errors="coerce")
-    df["_rejected_max"] = pd.to_numeric(df["_rejected_max"], errors="coerce")
-    df["below_mol"] = (
-        df[identity_col].notna()
-        & df["_rejected_max"].notna()
-        & (df[identity_col] <= df["_rejected_max"])
-    )
-    return df.drop(columns="_rejected_max")
+    Args:
+        df: Rows with identity_col, the identity of the species' check hit.
+        identity_col: Empty where the check found no hit.
+    """
+    df["check_hit"] = pd.to_numeric(df[identity_col], errors="coerce").notna()
+    return df
 
 
 def add_low_identity_warning(
@@ -177,10 +146,36 @@ def _build_mol_geo_part(geo_df, mol_df):
     return mol_geo.merge(best_mol, on=["seq_id", "scientificName"], how="left")
 
 
-def _build_hypo_part(hypo_df, geo_df):
-    """Build HYPO rows: species confirmed via BOLD/NCBI proxy."""
+def _build_hypo_part(hypo_df, geo_df, mol_df):
+    """Build HYPO rows: hypothetical species supported by a BOLD/NCBI proxy."""
     hypo = hypo_df.copy()
     hypo["validation_step"] = "HYPO"
+
+    # The sequence's own evidence for a HYPO species: how well it matched the
+    # MOL species the proxy links it to (its marker is not in GenBank).
+    # The proxy hit may carry the NCBI name or the WoRMS accepted one.
+    hypo["via_mol_species"] = hypo.get("scientificName_hit")
+    identity = pd.to_numeric(mol_df["identity_percentage"], errors="coerce")
+    names = [mol_df["scientificName"]]
+    if "acceptedName" in mol_df.columns:
+        names.append(mol_df["acceptedName"])
+    via_identity = (
+        pd.DataFrame(
+            {
+                "seq_id": pd.concat([mol_df["seq_id"]] * len(names)),
+                "_via": pd.concat(names).map(normalize_name),
+                "via_mol_identity": pd.concat([identity] * len(names)),
+            }
+        )
+        .groupby(["seq_id", "_via"])["via_mol_identity"]
+        .max()
+    )
+    hypo = hypo.merge(
+        via_identity,
+        left_on=["seq_id", hypo["via_mol_species"].map(normalize_name).rename("_via")],
+        right_index=True,
+        how="left",
+    )
 
     hypo = hypo.rename(
         columns={
@@ -204,7 +199,7 @@ def _build_hypo_part(hypo_df, geo_df):
 
 
 @preserve_sequence_order("seq_id", "sequences_df")
-def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None, ncbi_search_df=None):
+def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None):
     """Build combined results DataFrame from MOL+GEO and HYPO species.
 
     Progressive: works with just geo_df + mol_df, adds HYPO rows when available.
@@ -215,17 +210,17 @@ def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None, ncbi_search_df=
         geo_df: GEO results (must have 'in_mol' column).
         mol_df: MOL results (NCBI BLAST hits).
         hypo_df: HYPO results (optional, proxy-validated species).
-        ncbi_search_df: Raw NCBI search results (optional, used for below_mol flag).
     """
     parts = [_select_columns(_build_mol_geo_part(geo_df, mol_df))]
 
     if hypo_df is not None and not hypo_df.empty:
-        hypo_part = _select_columns(_build_hypo_part(hypo_df, geo_df))
-        hypo_part = add_below_mol(hypo_part, mol_df, ncbi_search_df)
+        hypo_part = _select_columns(
+            _build_hypo_part(hypo_df, geo_df, mol_df), extra=VIA_COLS
+        )
         parts.append(hypo_part)
 
     results = pd.concat(parts, ignore_index=True)
-    ensure_columns(results, EXPORT_COLS)
+    ensure_columns(results, EXPORT_COLS + VIA_COLS)
 
     # Cast numeric columns that may be strings from DB cache
     for col in (
@@ -234,17 +229,10 @@ def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None, ncbi_search_df=
         "proxy_identity_percentage",
         "proxy_query_cover",
         "gbif_occurrences",
+        "via_mol_identity",
     ):
         if col in results.columns:
             results[col] = pd.to_numeric(results[col], errors="coerce")
-
-    # Ensure below_mol is always a clean bool column
-    if "below_mol" not in results.columns:
-        results["below_mol"] = False
-    else:
-        results["below_mol"] = (
-            results["below_mol"].where(results["below_mol"].notna(), False).astype(bool)
-        )
 
     # Empty sequences — add rows for seq_ids with no species assigned
     all_seq_ids = sequences_df["seq_id"].unique()
@@ -256,6 +244,8 @@ def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None, ncbi_search_df=
         ].drop_duplicates(subset="seq_id")
         results = pd.concat([results, empty_rows], ignore_index=True)
 
+    add_check_hit(results)
+    results["check_hit"] &= results["validation_step"].eq("HYPO")
     return results
 
 
@@ -488,6 +478,11 @@ def resolve_sequences(results_df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def exclusion_keys(df: pd.DataFrame) -> pd.Series:
+    """The "{seq_id}||{scientificName}" key of each row, as exclusions store it."""
+    return df["seq_id"] + "||" + df["scientificName"]
+
+
 @preserve_sequence_order("seq_id", "results_df")
 def filter_excluded_results(
     results_df: pd.DataFrame, excluded: set[str] | None
@@ -505,13 +500,8 @@ def filter_excluded_results(
     if not excluded:
         return results_df
 
-    mask = results_df.apply(
-        lambda r: (
-            f"{r['seq_id']}||{r['scientificName']}" not in excluded
-            if pd.notna(r.get("scientificName"))
-            else True
-        ),
-        axis=1,
+    mask = results_df["scientificName"].isna() | ~exclusion_keys(results_df).isin(
+        excluded
     )
     filtered = results_df[mask].reset_index(drop=True)
 
