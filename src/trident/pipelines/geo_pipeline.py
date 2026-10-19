@@ -21,13 +21,17 @@ from trident.clients.gbif import (
     match_taxon_names,
     filter_taxon_matches,
     counts_for_area,
+    area_label,
     get_extent_column_name,
 )
 
 from trident.core.constants import GBIF_MIN_OCCURRENCES
 from trident.core.database import save_to_db, FullCache, CustomCache, warn_empty_params
 from trident.core.utils import (
+    StepLog,
+    name_list,
     pluralize,
+    species_for_sequences,
     ensure_columns,
     reorder_taxonomy_columns,
     preserve_sequence_order,
@@ -101,6 +105,7 @@ def _gbif_search_params_rebuild(input_selected, original_inputs):
         rebuild_fn=_gbif_search_params_rebuild,
         match_map_dict={"species": "scientificName", "gbif_extent": "gbif_extent"},
     ),
+    log_as=("GBIF search", "occurrence count"),
 )
 def run_gbif_search(
     species_list: list[str],
@@ -128,6 +133,8 @@ def run_gbif_search(
     Returns:
         DataFrame with GBIF taxon metadata and occurrence count columns.
     """
+    log = StepLog("GBIF search")
+    errored = []
 
     # 1. Taxon Matching (0% -> 30%)
     if progress_handler:
@@ -139,21 +146,8 @@ def run_gbif_search(
     ## genuine no-matches that need review.
     if "matchType" in matches_df.columns:
         errored = matches_df[matches_df["matchType"] == "ERROR"]["query"].tolist()
-        if errored:
-            logger.warning(f"{len(errored)} GBIF taxa errored during matching")
-            if failure_sink is not None:
-                failure_sink.extend(errored)
-
-    ## Log no-matches needing review
-    failed_matches = matches_df[
-        matches_df["needs_review"] | matches_df["taxonID"].isna()
-    ]["query"].tolist()
-    n_failed = len(failed_matches)
-    if n_failed:
-        logger.warning(
-            f"{n_failed} GBIF taxa need review or failed to match",
-            failed_taxa=failed_matches,
-        )
+        if errored and failure_sink is not None:
+            failure_sink.extend(errored)
 
     ## Filter to valid keys
     good_matches = filter_taxon_matches(matches_df)
@@ -182,9 +176,7 @@ def run_gbif_search(
         progress_handler(0.9, "Merging and finalizing GBIF data...")
 
     if not results:
-        logger.warning(
-            "No extent results to merge: returning empty GEO search DataFrame"
-        )
+        log.done("no area searched", errored, "species")
         return ensure_columns(
             good_matches.iloc[:0].copy(), ["occurrences", "gbif_extent"]
         )
@@ -215,21 +207,19 @@ def run_gbif_search(
         errored_inputs = sorted(
             s for s in species_list if normalize_name(s) in errored_norm
         )
-        if errored_inputs:
-            logger.warning(
-                f"{len(errored_inputs)} GBIF taxa errored during occurrence fetch "
-                "(will retry on next run)"
-            )
-            if failure_sink is not None:
-                failure_sink.extend(errored_inputs)
+        errored += errored_inputs
+        if errored_inputs and failure_sink is not None:
+            failure_sink.extend(errored_inputs)
 
     n_species = (
         gbif_search_df["scientificName"].nunique()
         if "scientificName" in gbif_search_df.columns
         else len(gbif_search_df)
     )
-    logger.info(
-        f"GBIF search complete: {n_species} species, {len(results)} extents, {len(gbif_search_df)} rows"
+    log.done(
+        f"{n_species} species, {len(results)} {pluralize(len(results), 'area')}",
+        errored,
+        "species",
     )
 
     if progress_handler:
@@ -312,8 +302,9 @@ def run_gbif_merge(
         .unique()
     )
     if unmatched:
-        logger.warning(
-            f"{len(unmatched)} TAX names had no GBIF match: {unmatched[:20]}"
+        logger.info(
+            f"GEO list: {len(unmatched)} TAX {pluralize(len(unmatched), 'species')} "
+            f"without GBIF data ({name_list(unmatched)})"
         )
 
     merged_df = (
@@ -335,13 +326,6 @@ def run_gbif_merge(
         gbif_suffix_cols.remove("taxonURL_gbif")
     merged_df = merged_df.drop(columns=gbif_suffix_cols)
     merged_df = reorder_taxonomy_columns(merged_df)
-
-    n_tax = merged_df["scientificName"].nunique()
-    n_gbif = gbif_search_df["scientificName"].nunique()
-    n_unmatched = n_tax - n_gbif
-    logger.info(
-        f"Merged GBIF+TAX: {n_tax} species ({n_gbif} matched, {n_unmatched} without GBIF data)"
-    )
 
     # TAX species without GBIF data have no extent, so no cache entry can hold
     # them. Drop them here, so the result is the same with or without a
@@ -384,10 +368,6 @@ def run_gbif_filter(
     if gbif_merge_params is None:
         gbif_merge_params = {}
 
-    logger.info(
-        f"Filtering GBIF data for extent={extent} and min_occurrences={min_occurrences}"
-    )
-
     # 1. Validation
     if (
         "gbif_extent" not in gbif_merge_df.columns
@@ -409,7 +389,9 @@ def run_gbif_filter(
     filtered_df = filtered_df.drop(columns=["gbif_extent"])
 
     logger.info(
-        f"Filtered GBIF data to {len(filtered_df)} species (threshold: {min_occurrences})"
+        f"GEO filter: {filtered_df['scientificName'].nunique()} species with at "
+        f"least {min_occurrences} GBIF {pluralize(min_occurrences, 'occurrence')} "
+        f"{area_label(extent)}"
     )
 
     return filtered_df
@@ -440,7 +422,7 @@ def finalize_geo_results(
         gbif_filter_params = {}
 
     geo_df = gbif_filter_df.copy()
-    logger.success(f"Finalized GEO list: {len(geo_df)} rows")
+    logger.success(f"GEO list: {species_for_sequences(geo_df)}")
     return geo_df
 
 
@@ -490,7 +472,7 @@ def build_geo_summary(
     summary_pivot.columns = [get_extent_column_name(c) for c in summary_pivot.columns]
 
     seq_word = pluralize(len(summary_pivot), "sequence")
-    logger.info(f"Generated GEO summary for {len(summary_pivot)} unique {seq_word}.")
+    logger.debug(f"Generated GEO summary for {len(summary_pivot)} unique {seq_word}.")
 
     return summary_pivot
 

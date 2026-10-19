@@ -1,9 +1,15 @@
+import contextlib
+from collections.abc import Sequence
 from functools import wraps
 import inspect
 import threading
+import time
 from typing import Callable
 
 import pandas as pd
+from loguru import logger
+
+from trident.core.http import request_label
 
 
 ##### MISCELLANEOUS UTILITIES #####
@@ -74,10 +80,30 @@ def top_hit_per_group(
     return top
 
 
+# Plurals that are not the word + "s", so each is written once.
+_PLURALS = {
+    "batch": "batches",
+    "genus": "genera",
+    "is": "are",
+    "query": "queries",
+    "search": "searches",
+    "species": "species",
+}
+
+
 def pluralize(n: int, one: str, many: str | None = None) -> str:
-    """The word for *n* items: *one* for exactly 1, else *many* (default
-    *one* + "s"), e.g. ``f"{n} {pluralize(n, 'genus', 'genera')}"``."""
-    return one if n == 1 else many or one + "s"
+    """The word for *n* items: *one* for exactly 1, else its plural
+    (``_PLURALS``, or *one* + "s"), e.g. ``f"{n} {pluralize(n, 'genus')}"``.
+    A word of several takes the plural on its last one ("BLAST search" ->
+    "BLAST searches"); *many* gives it when that rule cannot ("names or
+    genera")."""
+    if n == 1:
+        return one
+    if many:
+        return many
+    head, _, last = one.rpartition(" ")
+    plural = _PLURALS.get(last, last + "s")
+    return f"{head} {plural}" if head else plural
 
 
 _progress_lock = threading.Lock()
@@ -107,6 +133,92 @@ def notify_progress(handler: dict | object | None, n: int = 1) -> None:
             handler["current"] += n
         elif hasattr(handler, "update"):
             handler.update(n)
+
+
+def duration(seconds: float) -> str:
+    """A duration as the log shows it: seconds under 2 minutes, then minutes."""
+    return f"{seconds:.0f} s" if seconds < 120 else f"{seconds / 60:.0f} min"
+
+
+def species_for_sequences(df: pd.DataFrame) -> str:
+    """Size of a species list as the log shows it: "12 species for 5
+    sequences" (the eDNA sequences of the ``seq_id`` column)."""
+    n_species = df["scientificName"].nunique() if "scientificName" in df else 0
+    n_seqs = df["seq_id"].nunique() if "seq_id" in df else 0
+    return f"{n_species} species for {n_seqs} {pluralize(n_seqs, 'sequence')}"
+
+
+def name_list(names: Sequence, shown: int = 5) -> str:
+    """Names as a log line lists them: the first *shown*, then "and N more"."""
+    text = ", ".join(str(name) for name in names[:shown])
+    if len(names) > shown:
+        text += f" and {len(names) - shown} more"
+    return text
+
+
+class StepLog:
+    """Log lines of one search step, the same for every source: a line per
+    item it queries ("BOLD search 12/33: Gadus morhua, 45 records") and an end
+    line ("BOLD search done after 6 min: 1240 records").
+
+    An item is logged at INFO when the last line is at least ITEM_INTERVAL
+    seconds old, otherwise at DEBUG: a slow source (BOLD takes about 10 s per
+    species) shows every item, a fast one (WoRMS, GBIF) one line every few
+    seconds, so a long step is never silent and a quick one does not flood the
+    log. A failed item, or one worth a look (*notable*: not found, doubtful
+    match), is always shown. Safe to call from worker threads.
+    """
+
+    ITEM_INTERVAL = 10.0
+
+    def __init__(self, step: str, total: int = 0):
+        self.step = step
+        self.total = total
+        self._start = self._last = time.monotonic()
+        self._count = 0
+        self._lock = threading.Lock()
+
+    def _next(self) -> tuple[str, bool]:
+        """The next item's prefix, and whether it is due at INFO."""
+        with self._lock:
+            self._count += 1
+            now = time.monotonic()
+            due = now - self._last >= self.ITEM_INTERVAL
+            if due:
+                self._last = now
+            return f"{self.step} {self._count}/{self.total}", due
+
+    @contextlib.contextmanager
+    def query(self, name: str):
+        """Label the requests made for item *name*, for their retry lines."""
+        with request_label(f"{self.step}: {name}"):
+            yield
+
+    def item(self, name: str, outcome: str, notable: bool = False) -> None:
+        prefix, due = self._next()
+        level = "INFO" if due or notable else "DEBUG"
+        logger.log(level, f"{prefix}: {name}, {outcome}")
+
+    def failed(self, name: str, error: object) -> None:
+        prefix, _ = self._next()
+        logger.warning(f"{prefix}: {name} failed: {error}")
+
+    def done(
+        self,
+        summary: str,
+        failed: Sequence[str] = (),
+        noun: str = "item",
+    ) -> None:
+        """Log the end of the step: *summary* of its results, then the
+        *failed* items (by name; *noun* is what an item is), which the next
+        run queries again."""
+        elapsed = duration(time.monotonic() - self._start)
+        logger.info(f"{self.step} done after {elapsed}: {summary}")
+        if failed:
+            logger.warning(
+                f"{self.step}: {len(failed)} {pluralize(len(failed), noun)} "
+                f"failed ({name_list(failed)}). Run the step again to retry them."
+            )
 
 
 _TAXON_ORDER = [

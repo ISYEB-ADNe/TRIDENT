@@ -334,3 +334,21 @@ def test_give_up_while_splitting_sends_nothing_more(ncbi_fake, monkeypatch):
     assert sorted(df["seq_id"]) == ["s0", "s1"]
     assert sorted(failed) == ["s2", "s3"]
     assert ["s3"] not in submitted  # never sent alone
+
+
+def test_batches_are_submitted_in_queue_order(ncbi_fake, monkeypatch):
+    """A freed place goes to the waiting batch first in the queue, not to the
+    thread that freed it, so no batch is passed over."""
+    submitted = []
+    fake_post = ncbi.requests.post
+
+    def post(url, data, **kwargs):
+        if data["CMD"] == "Put":
+            submitted.append(_query_ids(data["QUERY"])[0])
+        return fake_post(url, data, **kwargs)
+
+    monkeypatch.setattr(ncbi.requests, "post", post)
+
+    ncbi.run_blast_batches([_batch(i, 1) for i in range(12)], n_threads=1)
+
+    assert submitted == [f"s{i}" for i in range(12)]

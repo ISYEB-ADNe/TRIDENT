@@ -6,7 +6,8 @@ Two retry levels exist, and a client needs exactly one of them:
   ``requests`` session whose transport retries one request on connection
   errors, read timeouts and HTTP 429/500/502/503/504, with exponential backoff
   and ``Retry-After`` support. Used by the WoRMS, BOLD and GBIF clients. Retries
-  are fast (seconds) and invisible to the calling code.
+  are fast (seconds) and invisible to the calling code, but each one is logged
+  (labelled by ``request_label``).
 - Per call (``retry_call``): re-runs a whole function when it raises. For
   clients whose unit of work is a long job rather than one request: NCBI BLAST
   (a job is submitted, then polled for minutes; the client tolerates a few
@@ -17,6 +18,8 @@ the item to the cache's ``failure_sink`` so it is retried on the next run
 rather than cached as empty (see ``trident.core.database.save_to_db``).
 """
 
+import contextlib
+import contextvars
 from functools import wraps
 from typing import Callable
 
@@ -27,12 +30,63 @@ from urllib3.util.retry import Retry
 
 from trident.core import config, stop
 
+# What the current thread's requests are for ("BOLD Gadus morhua"), set by the
+# clients with request_label, so a retry line says which item it is about.
+_request_label: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "request_label", default=None
+)
+
+# Statuses by which a server asks clients to slow down: retrying them is
+# routine, so they are logged at DEBUG only.
+_SLOW_DOWN_STATUSES = {429, 503}
+
+
+@contextlib.contextmanager
+def request_label(label: str):
+    """Label the requests made in this block, for their retry lines."""
+    token = _request_label.set(label)
+    try:
+        yield
+    finally:
+        _request_label.reset(token)
+
 
 class _StoppableRetry(Retry):
     """urllib3 retries whose wait (backoff or Retry-After) is cut short by a
     stop, which then ends the request instead of retrying it. urllib3 calls
     ``sleep`` once the failed response is released, so no connection is left
-    checked out."""
+    checked out. Each retry is logged, so a source answering slowly does not
+    look stuck."""
+
+    def increment(
+        self,
+        method=None,
+        url=None,
+        response=None,
+        error=None,
+        _pool=None,
+        _stacktrace=None,
+    ):
+        # Raises once the retries are used up: the caller reports the failure.
+        new = super().increment(method, url, response, error, _pool, _stacktrace)
+        what = _request_label.get() or (_pool.host if _pool else "Request")
+        if response is not None:
+            reason = f"HTTP {response.status}"
+            wait = new.get_retry_after(response) or new.get_backoff_time()
+        else:
+            # urllib3 errors start with the connection pool: keep what follows.
+            reason = str(error).split(": ", 1)[-1].rstrip(".")
+            wait = new.get_backoff_time()
+        attempt = len(new.history)
+        attempts = attempt + 1 + new.total if isinstance(new.total, int) else None
+        of = f"/{attempts}" if attempts else ""
+        slow_down = response is not None and response.status in _SLOW_DOWN_STATUSES
+        logger.log(
+            "DEBUG" if slow_down else "WARNING",
+            f"{what} failed (attempt {attempt}{of}): {reason}. "
+            + (f"Retrying in {wait:g} s." if wait else "Retrying now."),
+        )
+        return new
 
     def sleep(self, response=None) -> None:
         seconds = 0.0
@@ -212,7 +266,7 @@ def retry_call(
                     what = describe() if describe else func.__name__
                     logger.warning(
                         f"{what} failed (attempt {attempt}/{attempts}): "
-                        f"{e}. Retrying in {delay:g} s."
+                        f"{str(e).rstrip('.')}. Retrying in {delay:g} s."
                     )
                     stop.wait(delay)
 

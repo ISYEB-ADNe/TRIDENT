@@ -93,8 +93,7 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
             percent = min(curr / total, 1.0)
             progress_bar.progress(
                 percent,
-                text=f"Search: {curr}/{total} {pluralize(total, 'genus', 'genera')} "
-                "expanded",
+                text=f"Search: {curr}/{total} {pluralize(total, 'genus')} expanded",
             )
 
     worms_search_df, worms_search_params = run_with_progress(
@@ -355,7 +354,7 @@ def display_genus_homonyms():
         return
     n_genera = homonyms["genus"].nunique()
     with st.expander(
-        f"⚠️ {n_genera} {pluralize(n_genera, 'genus', 'genera')} with homonyms in WoRMS",
+        f"⚠️ {n_genera} {pluralize(n_genera, 'genus')} with homonyms in WoRMS",
         expanded=False,
     ):
         st.caption(

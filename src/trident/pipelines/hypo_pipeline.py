@@ -34,8 +34,10 @@ from trident.core.constants import (
 )
 from trident.core.database import save_to_db, FullCache, CustomCache
 from trident.core.utils import (
+    StepLog,
     normalize_name,
     pluralize,
+    species_for_sequences,
     preserve_sequence_order,
     notify_progress,
     ensure_columns,
@@ -49,7 +51,6 @@ from trident.clients.ncbi import (
     BlastGaveUp,
     blast_batch,
     create_sequence_batches,
-    log_batch_failures,
     run_blast_pool,
     process_blast_results,
     submit_blast_batch,
@@ -153,7 +154,7 @@ def prepare_hypo_input(extra_df, queries_df):
         }
 
     n_seq = sum(len(v["sequences"]) for v in input_data.values())
-    logger.info(f"Prepared HYPO input: {n_seq} sequences to BLAST")
+    logger.debug(f"Prepared HYPO input: {n_seq} BOLD records")
     return input_data
 
 
@@ -214,6 +215,7 @@ def _hypo_search_rebuild(input_selected, original_inputs):
         rebuild_fn=_hypo_search_rebuild,
         match_map_dict={"seq_id": "seq_id", "entrez_query": "entrez_query"},
     ),
+    log_as=("HYPO search", "BLAST search"),
 )
 def run_hypo_search(
     sequences_dict,
@@ -255,44 +257,43 @@ def run_hypo_search(
     Returns:
         DataFrame with NCBI BLAST results for proxy sequences.
     """
-    seq_word = pluralize(len(sequences_dict), "sequence")
-    logger.info(f"Starting HYPO search: {len(sequences_dict)} {seq_word}")
+    log = StepLog("HYPO search")
 
     # Batches are made per Entrez query, across MOTUs: MOTUs with the same MOL
     # species fill one batch instead of sending one small job each. All batches
     # run in one pool, so a slow NCBI job holds back only its own batch.
     by_query: dict[str, list[SeqRecord]] = {}
     owner = {}  # (proxy record id, entrez_query) -> MOTU that queued it
-    n_records = 0
     for seq_id, seq_dict in sequences_dict.items():
         query = seq_dict["entrez_query"]
-        n_records += len(seq_dict["sequences"])
         for rec in seq_dict["sequences"]:
             if (rec.id, query) not in owner:
                 owner[(rec.id, query)] = seq_id
                 by_query.setdefault(query, []).append(rec)
-    n_shared = n_records - len(owner)
 
     batches = [
         (batch, query)
         for query, records in by_query.items()
         for batch in create_sequence_batches(records, batch_size)
     ]
-    logger.info(
-        f"{len(owner)} proxy searches in {len(batches)} batches "
-        f"({n_shared} shared proxies searched once)"
+    n_seqs = len(sequences_dict)
+    logger.debug(
+        f"HYPO search: {len(owner)} {pluralize(len(owner), 'search')} "
+        f"for {n_seqs} {pluralize(n_seqs, 'sequence')}, in {len(batches)} "
+        f"{pluralize(len(batches), 'batch')}"
     )
 
     circuit = BlastCircuit()  # shared by every job of this run
     blast_kwargs = {"evalue": 10 ** (-ev_exponent), "hitlist_size": max_hits}
 
     def job(k, batch, query):
-        # The label names the MOTUs, so every log line of the batch says which.
+        # The label names the sequences whose BOLD records the batch searches,
+        # so every log line of the batch says which.
         owners = list(dict.fromkeys(owner[(r.id, query)] for r in batch))
-        more = f" +{len(owners) - 3} more" if len(owners) > 3 else ""
-        motus = ", ".join(owners[:3]) + more
-        seqs = pluralize(len(batch), "seq")
-        label = f"{k}/{len(batches)} ({len(batch)} {seqs}: {motus})"
+        others = len(owners) - 1
+        more = f" and {others} {pluralize(others, 'other')}" if others else ""
+        records = pluralize(len(batch), "BOLD sequence")
+        label = f"{k}/{len(batches)} ({len(batch)} {records}, for {owners[0]}{more})"
         return blast_batch(
             batch, label, circuit, progress_handler, entrez_query=query, **blast_kwargs
         )
@@ -301,15 +302,18 @@ def run_hypo_search(
 
     all_results = []
     outcomes = run_blast_pool(job, jobs, num_threads, give_up_minutes * 60)
-    log_batch_failures(outcomes)
+    failed_records = []
+    n_hits = 0  # as the batch lines count them, before the cutoff and top N
     for (_, batch, query), (dfs, failed_ids) in zip(jobs, outcomes):
         # Report the proxy records whose BLAST errored, with the batch's query:
         # (proxy seq_id, entrez_query) is the cache key, so they are retried on
         # the next run rather than cached as empty. The same proxy under another
         # query stays cached where it succeeded.
+        failed_records.extend(f"{rid} for {owner[(rid, query)]}" for rid in failed_ids)
         if failed_ids and failure_sink is not None:
             failure_sink.extend((rid, query) for rid in failed_ids)
         for df in dfs:
+            n_hits += len(df)
             if not df.empty:
                 results = process_blast_results(df, fasta_sequences=batch)
                 results["entrez_query"] = query
@@ -330,7 +334,17 @@ def run_hypo_search(
     else:
         search_df = pd.DataFrame(columns=[*BLAST_HIT_COLUMNS, "entrez_query"])
 
-    logger.success(f"HYPO search completed: {len(search_df)} hits")
+    kept = []
+    if identity_cutoff > 0:
+        kept.append(f"identity ≥ {identity_cutoff}%")
+    if ntop > 0:
+        kept.append(f"best {ntop} per BOLD sequence and species")
+    rule = f" ({', '.join(kept)})" if kept else ""
+    log.done(
+        f"{len(search_df)} of {n_hits} {pluralize(n_hits, 'hit')} kept{rule}",
+        failed_records,
+        "BLAST search",
+    )
     return search_df
 
 
@@ -568,6 +582,7 @@ def _hypo_check_rebuild(input_selected, original_inputs):
         rebuild_fn=_hypo_check_rebuild,
         match_map_dict={"seq_id": "seq_id", "scientificName": "scientificName"},
     ),
+    log_as=("HYPO check", "species check"),
 )
 @preserve_sequence_order("seq_id", "hypo_filter_df")
 def run_hypo_check(
@@ -605,10 +620,7 @@ def run_hypo_check(
         .drop_duplicates()
         .reset_index(drop=True)
     )
-    logger.info(
-        f"Starting HYPO check for {len(sequences_df)} sequences "
-        f"(evalue=1e-{ev_exponent})"
-    )
+    log = StepLog("HYPO check")
 
     circuit = BlastCircuit()  # one check per sequence: stop retrying if NCBI is down
 
@@ -620,6 +632,7 @@ def run_hypo_check(
                 entrez_query=f'"{sci_name}"[orgn]',
                 evalue=10 ** (-ev_exponent),
                 batch_id=f"{index + 1}/{len(sequences_df)} ({seq_id}: {sci_name})",
+                job_name="Check",
                 hitlist_size=10,
                 circuit=circuit,
             )
@@ -662,8 +675,10 @@ def run_hypo_check(
     )
     outcomes = run_blast_pool(check, calls, num_threads, give_up_minutes * 60)
     all_results = []
+    failed = []
     for (_, seq_id, sci_name, _), result in zip(calls, outcomes):
         if result is None:
+            failed.append(f"{seq_id}: {sci_name}")
             # BLAST errored: report this (seq_id, species) so it is retried, not
             # recorded as a (false) no-hit. The other species of the seq_id
             # stay cached.
@@ -674,6 +689,7 @@ def run_hypo_check(
 
     # Every sequence may have errored (all reported to failure_sink).
     if not all_results:
+        log.done(f"0/{len(sequences_df)} checks with hits", failed, "check")
         return pd.DataFrame(columns=HYPO_CHECK_COLUMNS)
 
     # Missing hit columns are filled with NaN (float), not pd.NA (object): if
@@ -683,9 +699,12 @@ def run_hypo_check(
         pd.concat(all_results, ignore_index=True), HYPO_CHECK_COLUMNS, fill=np.nan
     )
 
-    n_with_hits = check_df.loc[check_df["hit_found"], "scientificName"].nunique()
-    logger.info(
-        f"HYPO check complete: {n_with_hits}/{len(sequences_df)} species with hits"
+    # Counted per (sequence, species), as the checks are.
+    hits = check_df.loc[check_df["hit_found"], ["seq_id", "scientificName"]]
+    log.done(
+        f"{len(hits.drop_duplicates())}/{len(sequences_df)} checks with hits",
+        failed,
+        "check",
     )
     return check_df
 
@@ -776,10 +795,7 @@ def finalize_hypo_results(
     # Merge check stats
     hypo_df = hypo_df.merge(check_hits, on=["seq_id", "scientificName"], how="left")
 
-    logger.success(
-        f"Finalized HYPO list: {len(hypo_df)} rows, "
-        f"{hypo_df['scientificName'].nunique()} species"
-    )
+    logger.success(f"HYPO list: {species_for_sequences(hypo_df)}")
     return hypo_df
 
 

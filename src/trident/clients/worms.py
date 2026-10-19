@@ -1,6 +1,7 @@
 """Client for the WoRMS (World Register of Marine Species) REST API."""
 
 import json
+from urllib.parse import quote
 
 import pandas as pd
 import requests
@@ -9,6 +10,7 @@ from loguru import logger
 from trident.core import stop
 from trident.core.http import create_session, with_optional_session
 from trident.core.utils import (
+    StepLog,
     pluralize,
     extract_specific_epithet,
     normalize_name,
@@ -20,6 +22,11 @@ from trident.core.utils import (
 ### WORMS API ###
 
 WORMS_API_BASE = "https://www.marinespecies.org/rest"
+
+
+def worms_search_url(name: str) -> str:
+    """WoRMS web search for a taxon name, for log lines to check it by hand."""
+    return f"https://www.marinespecies.org/aphia.php?p=taxlist&tName={quote(name)}"
 
 
 def _get_json(session: requests.Session, url: str, params: dict):
@@ -493,43 +500,52 @@ def get_species_from_genus_list(
         when its query errored (network/HTTP); a genus with no AphiaID or no
         children is a valid empty, not a failure.
     """
-    logger.debug(f"Starting to process {len(genus_list)} genera")
     all_records: list[dict] = []
     failed_genera: list[str] = []
     session = create_session(user_agent=user_agent)
+    log = StepLog("WoRMS search", len(genus_list))
 
     for genus in genus_list:
         try:
             # 1. Resolve the AphiaIDs of the genus (several for homonyms)
-            aphia_ids = get_genus_aphia_ids(genus, session=session)
+            with log.query(genus):
+                aphia_ids = get_genus_aphia_ids(genus, session=session)
             if not aphia_ids:
-                logger.warning(f"No AphiaID found for genus '{genus}'")
+                log.item(
+                    genus,
+                    f"not in WoRMS (check: {worms_search_url(genus)})",
+                    notable=True,
+                )
                 continue
 
             # 2. Retrieve all children with internal pagination. An error on
             # any homonym fails the whole genus, so no partial list is cached.
             children = []
             for aphia_id in aphia_ids:
-                children += [
-                    {**child, "genusID": aphia_id}
-                    for child in get_children_by_aphia_id(
-                        aphia_id, session=session, marine_only=marine_only
-                    )
-                ]
+                with log.query(genus):
+                    children += [
+                        {**child, "genusID": aphia_id}
+                        for child in get_children_by_aphia_id(
+                            aphia_id, session=session, marine_only=marine_only
+                        )
+                    ]
                 stop.wait(delay)
 
-            if not children:
-                logger.warning(f"No children found for genus '{genus}'")
-                continue
-
             all_records.extend(children)
-            record_word = pluralize(len(children), "record")
-            logger.info(f"Retrieved {len(children)} {record_word} for genus '{genus}'")
+            if children:
+                log.item(genus, f"{len(children)} {pluralize(len(children), 'record')}")
+            else:
+                marine = "marine " if marine_only else ""
+                log.item(
+                    genus,
+                    f"no {marine}species in WoRMS (check: {worms_search_url(genus)})",
+                    notable=True,
+                )
 
         except Exception as e:
             # An error (not a valid empty) — track so the caller can retry it
             # instead of caching the genus as empty.
-            logger.error(f"Unexpected error processing genus '{genus}': {e}")
+            log.failed(genus, f"{e} (check: {worms_search_url(genus)})")
             failed_genera.append(genus)
         finally:
             notify_progress(progress_handler)
@@ -538,8 +554,9 @@ def get_species_from_genus_list(
 
     # 3. Filter and build taxonomy DataFrame
     df, kept, skipped = _build_taxonomy_dataframe(all_records, accepted_only)
-    record_word = pluralize(len(all_records), "record")
-    logger.info(
-        f"Completed: {kept} species kept, {skipped} skipped from {len(all_records)} {record_word}"
+    log.done(
+        f"{kept} species kept, {skipped} skipped (not accepted species)",
+        failed_genera,
+        "genus",
     )
     return df, failed_genera

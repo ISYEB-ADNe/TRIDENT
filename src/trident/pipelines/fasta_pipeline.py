@@ -12,6 +12,7 @@ from loguru import logger
 
 from trident.clients.fasta import records_to_dataframe, load_fasta
 from trident.core.database import save_to_db, CustomCache
+from trident.core.utils import pluralize
 
 
 def _get_fasta_filename(fasta_file: Any) -> str:
@@ -56,14 +57,16 @@ def run_fasta_workflow(fasta_file: Any) -> pd.DataFrame:
         converts this to an empty DataFrame).
     """
     filename = _get_fasta_filename(fasta_file)
-    logger.info(f"Starting FASTA workflow: {filename}")
+    logger.debug(f"Starting FASTA workflow: {filename}")
 
     sequences = load_fasta(fasta_file)
 
     if not sequences:
-        logger.warning(f"No sequences found in {filename}. Aborting.")
+        logger.warning(f"FASTA: no sequence found in {filename}")
         return None
 
     df = records_to_dataframe(sequences)
-    logger.success(f"Read {len(df)} sequences from {filename}")
+    logger.success(
+        f"FASTA: {len(df)} {pluralize(len(df), 'sequence')} read from {filename}"
+    )
     return df

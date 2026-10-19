@@ -21,14 +21,20 @@ from loguru import logger
 from trident.core.database import save_to_db, PartialCache, FullCache
 from trident.core.http import create_session
 from trident.core.utils import (
+    StepLog,
     pluralize,
+    species_for_sequences,
     preserve_sequence_order,
     top_hit_per_group,
     normalize_name,
     notify_progress,
 )
 
-from trident.clients.worms import get_species_from_genus_list, resolve_accepted_name
+from trident.clients.worms import (
+    get_species_from_genus_list,
+    resolve_accepted_name,
+    worms_search_url,
+)
 
 
 ### DATA PREPARATION ###
@@ -56,7 +62,7 @@ def prepare_worms_input(df: pd.DataFrame) -> list[str]:
         genera = df["genus"]
     # A hit without a name has no genus to expand.
     genera = genera.dropna().unique().tolist()
-    genus_word = pluralize(len(genera), "genus", "genera")
+    genus_word = pluralize(len(genera), "genus")
     logger.debug(f"Prepared WoRMS input: {len(genera)} unique {genus_word}")
     return genera
 
@@ -87,6 +93,7 @@ def prepare_resolution_taxids(mol_df: pd.DataFrame) -> dict[str, int]:
 @save_to_db(
     table_name="name_resolution",
     cache=PartialCache(items_kwarg="names", item_key="scientificName"),
+    log_as=("WoRMS name check", "MOL name"),
 )
 def run_name_resolution(
     names: list[str],
@@ -116,23 +123,31 @@ def run_name_resolution(
         is_synonym, matchedBy ('name', 'ncbi_taxid', or empty when not found),
         one row per input name.
     """
-    logger.info(f"Resolving {len(names)} MOL names against WoRMS")
     session = create_session(user_agent=user_agent)
     ncbi_taxids = ncbi_taxids or {}
     rows: list[dict] = []
     failed: list[str] = []
+    log = StepLog("WoRMS name check", len(names))
     try:
         for name in names:
             try:
-                resolved = resolve_accepted_name(
-                    name, ncbi_taxid=ncbi_taxids.get(name), session=session
-                )
+                with log.query(name):
+                    resolved = resolve_accepted_name(
+                        name, ncbi_taxid=ncbi_taxids.get(name), session=session
+                    )
             except Exception as exc:
-                logger.warning(f"WoRMS resolution failed for '{name}': {exc}")
+                log.failed(name, f"{exc} (check: {worms_search_url(name)})")
                 failed.append(name)
                 continue
             finally:
                 notify_progress(progress_handler)
+            if not resolved["matched_by"]:
+                link = worms_search_url(name)
+                log.item(name, f"not in WoRMS (check: {link})", notable=True)
+            elif resolved["is_synonym"]:
+                log.item(name, f"synonym of {resolved['accepted_name']}")
+            else:
+                log.item(name, "accepted name")
             rows.append(
                 {
                     "scientificName": name,
@@ -145,16 +160,16 @@ def run_name_resolution(
     finally:
         session.close()
 
-    if failed:
-        logger.warning(f"{len(failed)} names failed WoRMS resolution")
-        if failure_sink is not None:
-            failure_sink.extend(failed)
+    if failed and failure_sink is not None:
+        failure_sink.extend(failed)
 
     n_syn = sum(1 for r in rows if r["is_synonym"])
     n_taxid = sum(1 for r in rows if r["matchedBy"] == "ncbi_taxid")
-    logger.info(
-        f"Resolved {len(rows)} names ({n_syn} synonyms canonicalised, "
-        f"{n_taxid} found through their NCBI taxid)"
+    log.done(
+        f"{len(rows)} {pluralize(len(rows), 'name')} checked ({n_syn} "
+        f"{pluralize(n_syn, 'synonym')}, {n_taxid} found through their NCBI taxid)",
+        failed,
+        "name",
     )
     return pd.DataFrame(
         rows,
@@ -300,6 +315,7 @@ def summarize_name_resolution(
         item_key="genus",
         params={"worms_marine_only": "marine_only"},
     ),
+    log_as=("WoRMS search", "genus"),
 )
 def run_worms_search(
     genera_list: list[str],
@@ -323,9 +339,6 @@ def run_worms_search(
     Returns:
         DataFrame with WoRMS species data for the requested genera.
     """
-    genus_word = pluralize(len(genera_list), "genus", "genera")
-    logger.info(f"Starting WoRMS search: {len(genera_list)} unique {genus_word}")
-
     worms_search_df, failed_genera = get_species_from_genus_list(
         genera_list,
         delay=0.1,
@@ -334,12 +347,9 @@ def run_worms_search(
         marine_only=marine_only,
     )
 
-    if failed_genera:
-        logger.warning(f"{len(failed_genera)} genera failed in WoRMS search")
-        if failure_sink is not None:
-            failure_sink.extend(failed_genera)
+    if failed_genera and failure_sink is not None:
+        failure_sink.extend(failed_genera)
 
-    logger.info(f"WoRMS search completed: retrieved {len(worms_search_df)} species")
     return worms_search_df
 
 
@@ -559,11 +569,6 @@ def run_worms_merge(
     remaining = [c for c in merged_df.columns if c not in first_cols]
     merged_df = merged_df[first_cols + remaining].rename(columns=rename_map)
 
-    logger.info(
-        f"Merged {len(merged_df)} rows. "
-        f"({merged_df['in_mol'].sum()} exact species matches found)"
-    )
-
     return merged_df.reset_index(drop=True)
 
 
@@ -676,13 +681,20 @@ def finalize_tax_results(
     if drop_mol_rejected:
         rejected = mol_rejected_rows(tax_df, ncbi_search_df, mol_df)
         if not rejected.empty:
+            n_rejected = rejected["scientificName"].nunique()
             logger.info(
-                f"Removed {len(rejected)} rows "
-                f"({rejected['scientificName'].nunique()} species) "
-                "returned by BLAST but rejected by MOL for that sequence"
+                f"TAX list: {n_rejected} {pluralize(n_rejected, 'species')} removed "
+                "where BLAST found them but the MOL filter rejected them"
             )
         tax_df = tax_df.drop(index=rejected.index).reset_index(drop=True)
-    logger.success(f"Finalized TAX list: {len(tax_df)} rows")
+    n_mol = (
+        tax_df.loc[tax_df["in_mol"].astype(bool), "scientificName"].nunique()
+        if "in_mol" in tax_df
+        else 0
+    )
+    logger.success(
+        f"TAX list: {species_for_sequences(tax_df)}, {n_mol} of them in the MOL list"
+    )
     return tax_df
 
 

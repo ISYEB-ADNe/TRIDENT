@@ -636,7 +636,7 @@ def record_empty_step(
     """
     failed = (st.session_state.get(failed_key) or []) if failed_key else []
     if failed:
-        query_word = pluralize(len(failed), "query", "queries")
+        query_word = pluralize(len(failed), "query")
         st.warning(
             f"⚠️ {len(failed)} {query_word} of the previous step failed, so its "
             "list may be empty only because of them. Re-run that step to retry "

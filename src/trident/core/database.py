@@ -14,7 +14,7 @@ import pandas as pd
 from loguru import logger
 
 from trident.core import config
-from trident.core.utils import ensure_columns, set_progress_total
+from trident.core.utils import ensure_columns, pluralize, set_progress_total
 
 
 # ---------------------------------------------------------------------------
@@ -378,9 +378,10 @@ def _next_run_id(conn: sqlite3.Connection, table_name: str) -> int:
 
 
 def warn_empty_params(params: dict, name: str) -> None:
-    """Warn when an upstream params dict is empty (weakens cache key)."""
+    """Log when an upstream params dict is empty (weakens cache key). At DEBUG:
+    it is for developers, and an empty upstream result also gives one."""
     if not params:
-        logger.warning(
+        logger.debug(
             f"'{name}' is empty! "
             "The cache will not be able to distinguish between different settings."
         )
@@ -545,7 +546,33 @@ class CustomCache(CacheStrategy):
 # ---------------------------------------------------------------------------
 
 
-def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
+def _log_cache_use(
+    name: str, log_as: tuple[str, str] | None, n_cached: int, n_new: int
+) -> None:
+    """First line of a step: its items found in the database, and the others,
+    which it queries (see ``save_to_db``)."""
+    if log_as is None:
+        logger.debug(f"{name}: {n_cached} cached, {n_new} to execute")
+        return
+    step, one = log_as
+    n = n_cached + n_new
+    noun = pluralize(n, one)
+    if not n_cached:
+        logger.info(f"{step}: {n} {noun} to query")
+    elif not n_new:
+        logger.info(f"{step}: all {n} {noun} already in the full analysis")
+    else:
+        logger.info(
+            f"{step}: {n} {noun}, {n_cached} already in the full analysis, "
+            f"{n_new} to query"
+        )
+
+
+def save_to_db(
+    table_name: str,
+    cache: CacheStrategy,
+    log_as: tuple[str, str] | None = None,
+) -> Callable:
     """Decorator that adds SQLite caching to a pipeline function.
 
     Always returns ``(DataFrame, params_dict)``.  When ``db_path`` is
@@ -576,6 +603,12 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
     function returns, and they are restored on a cache hit. With no items to
     look up (empty input), the function is called directly and nothing is
     cached.
+
+    *log_as* is (step name, what an item is), e.g. ``("BOLD search",
+    "species")``: the step's first log line then says how
+    many of its items are already in the database and how many it queries.
+    Without it (the steps that only process a previous step's results), that
+    line is logged at DEBUG.
     """
     match_map = cache.match_map
 
@@ -590,12 +623,6 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
             bound_kwargs = dict(bound.arguments)
             cache_items, params = cache.prepare(**bound_kwargs)
 
-            # Nothing to cache without a db_path or without items (empty
-            # input). The function is still called, so the caller gets its
-            # empty result with its columns.
-            if db_path is None or not cache_items:
-                return func(*args, **kwargs), params
-
             # One entry per distinct item: a duplicate would get its own inputs
             # row, while its result rows all go to one run_id, so a cache hit
             # could load the empty one.
@@ -605,6 +632,14 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
                     for item in cache_items
                 }.values()
             )
+
+            # Nothing to cache without a db_path or without items (empty
+            # input). The function is still called, so the caller gets its
+            # empty result with its columns.
+            if db_path is None or not cache_items:
+                if cache_items:
+                    _log_cache_use(func.__name__, log_as, 0, len(cache_items))
+                return func(*args, **kwargs), params
 
             with get_connection(db_path) as conn:
                 # 0. Clear empty cache entries so failed items get retried
@@ -633,9 +668,8 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
                             _delete_provenance(conn, table_name, [run_id])
                         uncached_items.append(item)
 
-                logger.info(
-                    f"{func.__name__}: {len(cached_dfs)} cached, "
-                    f"{len(uncached_items)} to execute"
+                _log_cache_use(
+                    func.__name__, log_as, len(cached_dfs), len(uncached_items)
                 )
                 # A progress tracker counts items as they are executed, so its
                 # total is what this call executes: a resumed run starts at 0
@@ -742,7 +776,7 @@ def save_to_db(table_name: str, cache: CacheStrategy) -> Callable:
                     ]
                     n_failed = len(failed_run_ids)
                     if n_failed:
-                        logger.warning(
+                        logger.debug(
                             f"{func.__name__}: {n_failed} item(s) failed and were "
                             "not cached (will retry on next run)"
                         )

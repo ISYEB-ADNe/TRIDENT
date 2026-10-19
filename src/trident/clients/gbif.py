@@ -1,10 +1,10 @@
 """Client for the GBIF (Global Biodiversity Information Facility) API
 and geographic bounding box calculations."""
 
-import functools
 import re
 from collections.abc import Callable
 from typing import Literal
+from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
@@ -13,10 +13,14 @@ from loguru import logger
 
 
 from trident.core.constants import GBIF_CONFIDENCE
-from trident.core.utils import pluralize
 from trident.core import stop
-from trident.core.http import create_session
-from trident.core.utils import ensure_columns, extract_specific_epithet
+from trident.core.http import create_session, request_label
+from trident.core.utils import (
+    StepLog,
+    ensure_columns,
+    extract_specific_epithet,
+    pluralize,
+)
 
 
 ### GEOGRAPHIC CALCULATIONS ###
@@ -251,7 +255,9 @@ def _match_single_taxon_name(
         return data
 
     except Exception as e:
-        logger.debug(f"Match failed for '{name}': {str(e)[:100]}")
+        logger.warning(
+            f"GBIF {name} failed: {str(e)[:100]} (check: {gbif_search_url(name)})"
+        )
         error_result = {
             "query": name,
             "confidence": 0,
@@ -266,6 +272,11 @@ def _match_single_taxon_name(
     finally:
         if own_session and session is not None:
             session.close()
+
+
+def gbif_search_url(name: str) -> str:
+    """GBIF web search for a taxon name, for log lines to check it by hand."""
+    return f"https://www.gbif.org/species/search?q={quote(name)}"
 
 
 # Columns of match_taxon_names for an empty names list. Every match result,
@@ -287,23 +298,51 @@ def match_taxon_names(
         DataFrame with one row per name containing GBIF match metadata.
     """
     if len(names) == 0:
-        logger.warning("Empty names list")
+        logger.debug("Empty names list")
         return pd.DataFrame(columns=GBIF_MATCH_COLUMNS)
 
-    # Each worker creates its own session: requests.Session is not thread-safe,
-    # so sharing one across the threading backend can corrupt the pool state.
-    results = stop.run_threads(
-        functools.partial(_match_single_taxon_name, user_agent=user_agent),
-        [(name,) for name in names],
-        n_jobs,
-    )
+    log = StepLog("GBIF name match", len(names))
+
+    def match(name):
+        # Each worker creates its own session: requests.Session is not
+        # thread-safe, so sharing one across the threading backend can corrupt
+        # the pool state.
+        with log.query(name):
+            result = _match_single_taxon_name(name, user_agent=user_agent)
+        match_type = str(result.get("matchType", "")).lower()
+        check = f"check: {gbif_search_url(name)}"
+        if match_type == "error":
+            log.item(name, "failed", notable=True)  # its error is logged by the match
+        elif match_type == "none":
+            log.item(name, f"not in GBIF ({check})", notable=True)
+        elif result["needs_review"]:
+            confidence = result.get("confidence")
+            log.item(
+                name,
+                f"needs review ({match_type} match, confidence {confidence}; {check})",
+                notable=True,
+            )
+        elif result["taxonID"] is None:  # e.g. matched to its genus only
+            rank = str(result.get("rank", "")).lower()
+            log.item(
+                name, f"no species in GBIF, matched as {rank} ({check})", notable=True
+            )
+        else:
+            log.item(name, f"{match_type} match")
+        return result
+
+    results = stop.run_threads(match, [(name,) for name in names], n_jobs)
 
     results_df = pd.DataFrame(results)
-    high_conf = len(results_df[results_df["confidence"] >= GBIF_CONFIDENCE])
-    review = len(results_df[results_df["needs_review"]])
-
-    logger.info(
-        f"Matched {high_conf}/{len(names)} species to GBIF backbone ({review} need review)"
+    errored = results_df["matchType"] == "ERROR"
+    matched = ~results_df["needs_review"] & results_df["taxonID"].notna()
+    n_failed = int(errored.sum())
+    n_other = len(names) - int(matched.sum()) - n_failed
+    failed = f", {n_failed} failed" if n_failed else ""
+    # The failed names are listed by the GBIF search, with its failed counts.
+    log.done(
+        f"{int(matched.sum())}/{len(names)} species matched, {n_other} not "
+        f"matched to a species{failed}"
     )
 
     return results_df
@@ -345,7 +384,7 @@ def filter_taxon_matches(
         the standardised taxonomy columns, even when empty.
     """
     if matches_df.empty:
-        logger.warning("Empty DataFrame provided to filter_taxon_matches")
+        logger.debug("Empty DataFrame provided to filter_taxon_matches")
         return pd.DataFrame(columns=_GBIF_TAXON_COLS)
 
     # Quality filters
@@ -375,7 +414,7 @@ def filter_taxon_matches(
     # row-wise steps below (apply(axis=1) on an empty frame yields a DataFrame,
     # which cannot be assigned back to a single column).
     if filtered_df.empty:
-        logger.warning("No matches passed quality filters")
+        logger.debug("No matches passed quality filters")
         return pd.DataFrame(columns=_GBIF_TAXON_COLS)
 
     # Drop redundant/internal columns (keep useful taxonomy!)
@@ -421,7 +460,8 @@ def filter_taxon_matches(
     dups_str = pluralize(dups_removed, "duplicate")
     dups_message = f" ({dups_removed} {dups_str} removed)" if dups_removed > 0 else ""
     logger.info(
-        f"Retained {len(filtered_df)}/{len(matches_df)} taxon keys after quality filtering{dups_message}"
+        f"GBIF search: {len(filtered_df)}/{len(matches_df)} species kept for the "
+        f"occurrence counts{dups_message}"
     )
 
     return filtered_df
@@ -513,9 +553,12 @@ def search_taxon_occurrences(
         params["taxonKey"] = batch
 
         try:
-            resp = session.get(
-                "https://api.gbif.org/v1/occurrence/search", params=params, timeout=30
-            )
+            with request_label(f"GBIF occurrences of {len(batch)} species"):
+                resp = session.get(
+                    "https://api.gbif.org/v1/occurrence/search",
+                    params=params,
+                    timeout=30,
+                )
             resp.raise_for_status()
             data = resp.json()
 
@@ -534,7 +577,9 @@ def search_taxon_occurrences(
                     expected_keys.discard(taxon_key)
 
         except Exception as e:
-            logger.error(f"Batch failed: {str(e)[:100]}")
+            logger.warning(
+                f"GBIF occurrences of {len(batch)} species failed: {str(e)[:100]}"
+            )
             # Report the batch's keys as failed (not as a count) so the caller
             # retries them instead of caching them as absent. Drop them from
             # expected_keys so the zero-fill below does not emit a misleading
@@ -556,6 +601,12 @@ def search_taxon_occurrences(
 
     df = pd.DataFrame(all_results, columns=["taxonID", "count"])
     return df, failed_keys
+
+
+def area_label(extent: int | float | str) -> str:
+    """A search area as the log names it: "within 250 km" or "worldwide"."""
+    name = get_extent_column_name(extent)
+    return "worldwide" if name == "global" else f"within {name}"
 
 
 def get_extent_column_name(extent: int | float | str) -> str:
@@ -638,7 +689,10 @@ def counts_for_area(
 
     n_present = int((df["occurrences"] > 0).sum())
     n_absent = len(df) - n_present
-    logger.info(f"Queried {col_name}: {n_present} present, {n_absent} absent")
+    logger.info(
+        f"GBIF occurrences {area_label(extent)}: {n_present} species present, "
+        f"{n_absent} absent"
+    )
 
     if progress_handler:
         progress_handler(1.0, f"Finished {col_name}")

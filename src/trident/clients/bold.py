@@ -1,6 +1,7 @@
 """Client for the BOLD (Barcode of Life Data Systems) API."""
 
 import json
+from urllib.parse import quote
 
 import pandas as pd
 import requests
@@ -8,13 +9,23 @@ from loguru import logger
 
 from trident.core import stop
 from trident.core.http import create_session, with_optional_session
-from trident.core.utils import extract_specific_epithet, notify_progress, pluralize
+from trident.core.utils import (
+    StepLog,
+    extract_specific_epithet,
+    notify_progress,
+    pluralize,
+)
 
 
 ### BOLD API ###
 
 BOLD_BASE_URL = "https://portal.boldsystems.org"
 API_BASE_URL = f"{BOLD_BASE_URL}/api"
+
+
+def bold_search_url(species: str) -> str:
+    """BOLD portal search for a species, for log lines to check it by hand."""
+    return f"{BOLD_BASE_URL}/result?query={quote(species + '[tax]')}"
 
 
 @with_optional_session(retries=5, backoff_factor=0.5)
@@ -206,7 +217,10 @@ def query_species(
         # Step 2: Get query ID
         query_id = _get_query_id(resolved_query, session=session)
         if not query_id:
-            logger.warning(f"Failed to obtain query ID for {species_name}")
+            logger.warning(
+                f"BOLD {species_name} failed: BOLD gave no query ID "
+                f"(check: {bold_search_url(species_name)})"
+            )
             return None
 
         # Step 3: Download and parse results
@@ -216,7 +230,9 @@ def query_species(
         return data
 
     except Exception as e:
-        logger.error(f"Query failed for {species_name}: {e}")
+        logger.warning(
+            f"BOLD {species_name} failed: {e} (check: {bold_search_url(species_name)})"
+        )
         return None
 
 
@@ -252,27 +268,31 @@ def get_records_from_species_list(
 
     all_records = []
     failed_species = []
+    log = StepLog("BOLD search", len(species_list))
 
     for i, species in enumerate(species_list):
         try:
-            logger.debug(f"Querying species {i + 1}/{len(species_list)}: {species}")
-            records = query_species(species, session=active_session)
+            with log.query(species):
+                records = query_species(species, session=active_session)
 
-            if records:
-                cleaned = _clean_records(
-                    records, keep_only_COI5P=keep_only_COI5P, keep_ncbi=keep_ncbi
-                )
-                if not cleaned.empty:
-                    all_records.append(cleaned)
-            elif records is None:
+            if records is None:
                 # None means the query errored (network/403/parse), as opposed
                 # to [] which is a genuine empty result. Only errors count as
                 # failures so the cache layer retries them instead of caching
                 # them as empty. Keep query_species returning None on error.
                 failed_species.append(species)
+                log.item(species, "failed", notable=True)  # its error is logged above
+            else:
+                cleaned = _clean_records(
+                    records, keep_only_COI5P=keep_only_COI5P, keep_ncbi=keep_ncbi
+                )
+                if not cleaned.empty:
+                    all_records.append(cleaned)
+                n = len(cleaned)
+                log.item(species, f"{n} BOLD {pluralize(n, 'sequence')}")
 
         except Exception as e:
-            logger.error(f"Error processing {species}: {e}")
+            log.failed(species, e)
             failed_species.append(species)
 
         finally:
@@ -292,8 +312,11 @@ def get_records_from_species_list(
         if all_records
         else pd.DataFrame(columns=BOLD_RECORD_COLUMNS)
     )
-    record_word = pluralize(len(bold_df), "record")
-    logger.info(
-        f"BOLD retrieval complete: {len(bold_df)} {record_word}, {len(failed_species)} failed"
+    # A record without a sequence is of no use as a proxy.
+    bold_df = bold_df.dropna(subset=["dna_sequence"])
+    log.done(
+        f"{len(bold_df)} BOLD {pluralize(len(bold_df), 'sequence')}",
+        failed_species,
+        "species",
     )
     return bold_df, failed_species

@@ -37,7 +37,12 @@ from trident.core.constants import (
     NCBI_LOW_IDENTITY_THRESHOLD,
 )
 from trident.core.database import save_to_db, PartialCache, FullCache
-from trident.core.utils import preserve_sequence_order, pluralize
+from trident.core.utils import (
+    StepLog,
+    preserve_sequence_order,
+    pluralize,
+    species_for_sequences,
+)
 
 
 ### DATA PREPARATION ###
@@ -69,6 +74,7 @@ def prepare_ncbi_input(sequences_df: pd.DataFrame) -> list[SeqRecord]:
             "ncbi_max_hits": "max_hits",
         },
     ),
+    log_as=("NCBI BLAST", "sequence"),
 )
 def run_ncbi_search(
     sequences: list[SeqRecord],
@@ -103,10 +109,12 @@ def run_ncbi_search(
     Returns:
         DataFrame of processed BLAST hits with taxonomy and alignment metrics.
     """
-    sequence_word = pluralize(len(sequences), "sequence")
-    logger.info(f"Starting NCBI BLAST: {len(sequences)} {sequence_word}")
-
+    log = StepLog("NCBI BLAST")
     batches = create_sequence_batches(sequences, batch_size)
+    logger.debug(
+        f"NCBI BLAST: {len(batches)} {pluralize(len(batches), 'batch')} "
+        f"of up to {batch_size} sequences"
+    )
     blast_results, failed_ids = run_blast_batches(
         batches,
         n_threads=num_threads,
@@ -120,7 +128,11 @@ def run_ncbi_search(
 
     ncbi_df = process_blast_results(blast_results, fasta_sequences=sequences)
 
-    logger.info(f"NCBI BLAST complete: {len(ncbi_df)} hits")
+    log.done(
+        f"{len(ncbi_df)} {pluralize(len(ncbi_df), 'hit')}",
+        failed_ids,
+        "sequence",
+    )
     return ncbi_df
 
 
@@ -167,10 +179,14 @@ def run_ncbi_filter(
     if search_params is None:
         search_params = {}
 
-    logger.info(
-        f"Filtering NCBI results: query_cover≥{query_cover}%, gap_size={gap_size}%, "
-        f"method={method}, gap_min_top={gap_min_top}%"
-    )
+    if method == "barcoding_gap":
+        rule = (
+            f"hits above a barcoding gap of at least {gap_size}% (gap top ≥ "
+            f"{gap_min_top}%), else hits within {gap_size}% of the best"
+        )
+    else:
+        rule = f"hits within {gap_size}% of the best"
+    logger.info(f"MOL filter: query cover ≥ {query_cover}%, {rule}")
 
     filtered_df = filter_blast_results(
         ncbi_search_df,
@@ -180,9 +196,10 @@ def run_ncbi_filter(
         gap_min_top=gap_min_top,
     )
 
+    n_seqs = filtered_df["seq_id"].nunique()
     logger.info(
-        f"NCBI filter done: {len(filtered_df)} hits from "
-        f"{filtered_df['seq_id'].nunique()} sequences"
+        f"MOL filter: {len(filtered_df)} {pluralize(len(filtered_df), 'hit')} kept "
+        f"for {n_seqs} {pluralize(n_seqs, 'sequence')}"
     )
     return filtered_df
 
@@ -234,10 +251,14 @@ def finalize_mol_results(
         n_removed = n_before - len(mol_df)
         if n_removed:
             logger.info(
-                f"Enforced low identity threshold: removed {n_removed} hits below {threshold}%"
+                f"MOL list: {n_removed} {pluralize(n_removed, 'hit')} below "
+                f"{threshold}% identity removed"
             )
 
-    logger.success(f"Finalized MOL list: {len(mol_df)} hits")
+    logger.success(
+        f"MOL list: {species_for_sequences(mol_df)} "
+        f"({len(mol_df)} {pluralize(len(mol_df), 'hit')})"
+    )
     return mol_df
 
 

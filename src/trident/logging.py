@@ -9,6 +9,11 @@ LOG_FORMAT = (
     "<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | "
     "<cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>"
 )
+# The console at INFO is read by users: the code location is only noise there.
+USER_LOG_FORMAT = (
+    "<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | "
+    "<level>{message}</level>"
+)
 
 LOG_LEVELS = ("INFO", "DEBUG")
 
@@ -60,7 +65,9 @@ def setup_logging(level: str | None = None, log_file: str | Path | None = None) 
     logger.add(
         sys.stderr,
         level=level,
-        format=LOG_FORMAT,
+        format=LOG_FORMAT
+        if str(level).upper() in ("DEBUG", "TRACE")
+        else USER_LOG_FORMAT,
         filter=stop.log_filter,
     )
 

@@ -41,7 +41,6 @@ def _db_path(base_name: str) -> str:
         path = f"./results/{sid}_{base_name}.db"
     else:
         path = f"./results/{base_name}.db"
-    logger.info(f"Database path: {path}")
     return path
 
 
@@ -73,8 +72,10 @@ def _start_fasta_analysis(file_name: str, data: bytes, settings: dict | None = N
     handle = io.StringIO(data.decode(), newline=None)
     handle.name = file_name
 
+    db_path = _db_path(base_name)
+    logger.info(f"Full analysis saved in {db_path}")
     with st.spinner(f"Processing {file_name}...", show_time=True):
-        seqs_df, _ = pipe.run_fasta_workflow(handle, db_path=_db_path(base_name))
+        seqs_df, _ = pipe.run_fasta_workflow(handle, db_path=db_path)
 
     if seqs_df.empty:
         st.error("❌ No valid sequences found.")
@@ -83,7 +84,7 @@ def _start_fasta_analysis(file_name: str, data: bytes, settings: dict | None = N
     st.session_state.sequences_df = seqs_df
     st.session_state.sequences_id = seqs_df["seq_id"].unique().tolist()
     st.session_state.analysis_name = base_name
-    st.session_state.db_path = _db_path(base_name)
+    st.session_state.db_path = db_path
 
     reset_for_new_analysis("sequences_df")
     if settings:
@@ -139,6 +140,7 @@ def _auto_restore_from_db():
                 # Restore the DB path too, otherwise later steps run with the
                 # empty default and fail to open the database.
                 st.session_state.db_path = str(db_path)
+                logger.info(f"Full analysis opened from {db_path}")
                 st.rerun()
         except Exception as e:
             st.error(f"Could not restore sequences: {e}")

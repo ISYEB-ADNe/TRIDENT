@@ -16,6 +16,9 @@ import pandas as pd
 from loguru import logger
 
 from trident.core.utils import (
+    name_list,
+    pluralize,
+    species_for_sequences,
     reorder_taxonomy_columns,
     preserve_sequence_order,
     notify_progress,
@@ -81,7 +84,7 @@ def prepare_bold_input(
     all_species = geo_df["scientificName"].unique()
     species_list = candidates["scientificName"].unique().tolist()
     n_excluded = len(all_species) - len(species_list)
-    logger.info(
+    logger.debug(
         f"Prepared BOLD input: {len(species_list)} species to query, "
         f"{n_excluded} excluded (already covered by NCBI BLAST)"
     )
@@ -101,6 +104,7 @@ def prepare_bold_input(
             "bold_keep_ncbi": "keep_ncbi",
         },
     ),
+    log_as=("BOLD search", "species"),
 )
 def run_bold_search(
     species_list: list[str],
@@ -125,8 +129,6 @@ def run_bold_search(
     Returns:
         DataFrame with BOLD records.
     """
-    logger.info(f"Starting BOLD search: {len(species_list)} unique species to query")
-
     bold_search_df, failed_species = get_records_from_species_list(
         species_list,
         keep_only_COI5P=keep_only_COI5P,
@@ -135,17 +137,8 @@ def run_bold_search(
         user_agent=user_agent,
     )
 
-    # Remove records with missing sequences (rare cases)
-    if not bold_search_df.empty:
-        bold_search_df = bold_search_df.dropna(subset=["dna_sequence"])
-
-    n_failed = len(failed_species)
-    if n_failed:
-        logger.warning(f"{n_failed} species failed in BOLD search: {failed_species}")
-        if failure_sink is not None:
-            failure_sink.extend(failed_species)
-
-    logger.info(f"Completed BOLD search: {len(bold_search_df)} records retrieved")
+    if failed_species and failure_sink is not None:
+        failure_sink.extend(failed_species)
 
     return bold_search_df
 
@@ -212,12 +205,11 @@ def run_bold_filter(
         Filtered DataFrame with representative sequences per species.
     """
 
-    msg = "Filtering BOLD sequences using 'longest' method"
-    if longest_n is not None:
-        msg += f" (keeping up to {longest_n} longest per species)"
-    else:
-        msg += " (keeping all non-redundant per species)"
-    logger.info(msg)
+    kept = f"the {longest_n} longest" if longest_n is not None else "all"
+    logger.info(
+        f"BOLD filter: per species, {kept} BOLD sequences less than {similarity}% "
+        "identical to a longer one"
+    )
 
     filtered_dfs = []
     total_original = len(bold_search_df)
@@ -251,8 +243,8 @@ def run_bold_filter(
     reduction = (1 - len(result_df) / total_original) * 100
 
     logger.info(
-        f"Completed BOLD filtering: {total_original} → {len(result_df)} sequences "
-        f"({reduction:.1f}% reduction)"
+        f"BOLD filter: {len(result_df)}/{total_original} BOLD sequences kept "
+        f"({reduction:.0f}% fewer)"
     )
 
     return result_df
@@ -337,8 +329,9 @@ def run_bold_merge(
         .unique()
     )
     if unmatched:
-        logger.warning(
-            f"{len(unmatched)} queried species had no BOLD match: {unmatched[:20]}"
+        logger.info(
+            f"EXTRA list: {len(unmatched)} {pluralize(len(unmatched), 'species')} "
+            f"without BOLD sequences ({name_list(unmatched)})"
         )
 
     merged_df = geo_left.merge(
@@ -364,7 +357,7 @@ def run_bold_merge(
     merged_df = merged_df.drop(columns=cols_to_drop)
     result_df = merged_df.drop_duplicates(keep="first").reset_index(drop=True)
 
-    logger.info(f"Completed BOLD merge: {len(result_df)} rows")
+    logger.debug(f"Completed BOLD merge: {len(result_df)} rows")
     return result_df
 
 
@@ -397,7 +390,11 @@ def finalize_extra_results(
             "dna_sequence_bold": "dna_sequence_extra",
         }
     )
-    logger.success(f"Finalized EXTRA list: {len(extra_df)} rows")
+    n_bold = extra_df["seq_id_extra"].nunique() if "seq_id_extra" in extra_df else 0
+    logger.success(
+        f"EXTRA list: {species_for_sequences(extra_df)} "
+        f"({n_bold} BOLD {pluralize(n_bold, 'sequence')})"
+    )
     return extra_df
 
 

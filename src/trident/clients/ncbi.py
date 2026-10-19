@@ -26,6 +26,7 @@ from trident.core.constants import (
     NCBI_METHOD,
 )
 from trident.core.utils import (
+    duration,
     extract_specific_epithet,
     notify_progress,
     to_binomial,
@@ -133,7 +134,7 @@ def create_sequence_batches(
         batches.append(sequences[start:end])
         start = end
 
-    batch_word = pluralize(len(batches), "batch", "batches")
+    batch_word = pluralize(len(batches), "batch")
     logger.debug(f"Created {len(batches)} {batch_word}: {[len(b) for b in batches]}")
     return batches
 
@@ -230,7 +231,9 @@ class _BlastRun:
     polled, less often, but its batch frees its place, so one of the
     BLAST_SLOW_THREADS spare threads can start the next batch. The batch takes
     a place again before it submits another job (a resubmission, a retry, a
-    split half). *give_up* is the run's give-up time in seconds (see
+    split half). A free place goes to the waiting batch first in the queue, so
+    batches start in queue order, and a batch resubmitting a job goes before
+    the batches after it. *give_up* is the run's give-up time in seconds (see
     ``BlastGaveUp``).
     """
 
@@ -240,13 +243,23 @@ class _BlastRun:
         self.pool_size = min(n_batches, self.n_threads + BLAST_SLOW_THREADS)
         self._changed = threading.Condition()
         self._normal = 0  # batches holding a place
+        self._waiting: set[int] = set()  # queue positions of waiting batches
 
-    def take_place(self) -> None:
-        """Wait for a place (or for a stop: the batch then fails at once)."""
+    def take_place(self, position: int) -> None:
+        """Wait for a place for the batch at *position* in the queue (or for a
+        stop: the batch then fails at once)."""
         with self._changed:
-            while self._normal >= self.n_threads and not stop.stop_requested():
+            # By queue position, not first come: otherwise the thread that
+            # freed a place takes it again for its next batch, and a waiting
+            # batch can be passed over for the whole run.
+            self._waiting.add(position)
+            while (
+                position != min(self._waiting) or self._normal >= self.n_threads
+            ) and not stop.stop_requested():
                 self._changed.wait(timeout=1.0)
+            self._waiting.discard(position)
             self._normal += 1
+            self._changed.notify_all()  # the next batch may have a place too
 
     def free_place(self) -> None:
         with self._changed:
@@ -257,13 +270,14 @@ class _BlastRun:
 class _Place:
     """The place of the batch run by the current thread, if it holds one."""
 
-    def __init__(self, run: _BlastRun):
+    def __init__(self, run: _BlastRun, position: int):
         self.run = run
+        self.position = position  # of the batch in the run's queue
         self.held = False
 
     def take(self) -> None:
         if not self.held:
-            self.run.take_place()
+            self.run.take_place(self.position)
             self.held = True
 
     def free(self) -> None:
@@ -313,13 +327,13 @@ def run_blast_pool(
     )
     spare = run.pool_size - min(run.n_threads, len(calls))
     logger.debug(
-        f"Starting {len(calls)} BLAST {pluralize(len(calls), 'batch', 'batches')} "
+        f"Starting {len(calls)} BLAST {pluralize(len(calls), 'batch')} "
         f"on {run.n_threads} {pluralize(run.n_threads, 'thread')}, "
         f"+{spare} while jobs are slow"
     )
 
-    def batch(*args):
-        place = _Place(run)
+    def batch(position, *args):
+        place = _Place(run, position)
         # Taken before the batch starts, so it reads the circuit and the clock
         # once it can run.
         place.take()
@@ -330,6 +344,7 @@ def run_blast_pool(
             _place.reset(token)
             place.free()
 
+    calls = [(position, *args) for position, args in enumerate(calls)]
     return stop.run_threads(batch, calls, run.pool_size)
 
 
@@ -565,11 +580,6 @@ def _submit_blast_job(
     return match.group(1), int(rtoe.group(1)) if rtoe else None
 
 
-def _duration(seconds: float) -> str:
-    """A wait as the log shows it: seconds under 2 minutes, then minutes."""
-    return f"{seconds:.0f} s" if seconds < 120 else f"{seconds / 60:.0f} min"
-
-
 def _poll_blast_job(rid: str, rtoe: int | None, job: _Job) -> bytes:
     """Poll a job until it is done and return its XML2 result (zip archive).
 
@@ -612,15 +622,15 @@ def _poll_blast_job(rid: str, rtoe: int | None, job: _Job) -> bytes:
         waited = time.monotonic() - start
         if waited > job.give_up:
             raise BlastGaveUp(
-                f"RID {rid} still waiting at NCBI after {_duration(waited)} "
+                f"RID {rid} still waiting at NCBI after {duration(waited)} "
                 f"(status: {status_link})"
             )
         if waited > job.slow_after and not job.slow:
             job.set_slow()
             logger.info(
                 f"{_job_label.get()} (RID {rid}) still waiting at NCBI after "
-                f"{_duration(waited)}; now polled every "
-                f"{_duration(BLAST_SLOW_POLL_INTERVAL)} (status: {status_link})"
+                f"{duration(waited)}; now polled every "
+                f"{duration(BLAST_SLOW_POLL_INTERVAL)} (status: {status_link})"
             )
         stop.wait(BLAST_SLOW_POLL_INTERVAL if job.slow else BLAST_POLL_INTERVAL)
 
@@ -634,8 +644,8 @@ def _run_blast_job_once(
     """Submit one BLASTn job to NCBI and parse its XML2 result (one attempt)."""
     job = _Job()
     rid, rtoe = _submit_blast_job(multi_fasta, evalue, hitlist_size, entrez_query)
-    estimate = f"NCBI estimate {rtoe} s" if rtoe is not None else "no NCBI estimate"
-    logger.info(f"{_job_label.get()} submitted: RID {rid}, {estimate}")
+    # RTOE is not shown: NCBI gives the same 30 s for jobs of a minute or an hour.
+    logger.info(f"{_job_label.get()} submitted: RID {rid}")
     return _read_job_result(_poll_blast_job(rid, rtoe, job), multi_fasta)
 
 
@@ -702,6 +712,7 @@ def submit_blast_batch(
     batch_id: int | str | None = None,
     retry: bool = True,
     circuit: BlastCircuit | None = None,
+    job_name: str = "Batch",
 ) -> pd.DataFrame | None:
     """Submit a BLASTn query for a single batch of sequences.
 
@@ -725,6 +736,8 @@ def submit_blast_batch(
             used when splitting a batch that already failed its retries.
         circuit: Optional run-wide ``BlastCircuit``. While it is open, the job
             gets a single attempt; its outcome is recorded when retries apply.
+        job_name: What the log lines call the job, before *batch_id*
+            ("Batch 3/40", "Check 2/5").
 
     Returns:
         DataFrame of raw BLAST hits, or None if the query failed.
@@ -738,7 +751,7 @@ def submit_blast_batch(
     """
     if circuit is not None and circuit.is_open:
         retry = False
-    label = f"Batch {batch_id}" if batch_id is not None else "BLAST job"
+    label = f"{job_name} {batch_id}" if batch_id is not None else "BLAST job"
     token = _job_label.set(label)
     start = time.monotonic()
     try:
@@ -757,7 +770,7 @@ def submit_blast_batch(
         df = parse_blast_records(records)
 
         logger.info(
-            f"{label} done after {_duration(time.monotonic() - start)}: {len(df)} hits"
+            f"{label} done after {duration(time.monotonic() - start)}: {len(df)} hits"
         )
         result = df
 
@@ -975,7 +988,6 @@ def run_blast_batches(
         worker, [(batch, i) for i, batch in enumerate(batches)], n_threads, give_up
     )
 
-    log_batch_failures(outcomes)
     successful = [df for dfs, _ in outcomes for df in dfs]
     # Ids of sequences whose query still errored after retries and splitting,
     # so the caller can retry them rather than cache them as empty (a failed
@@ -984,24 +996,6 @@ def run_blast_batches(
     if not successful:
         return pd.DataFrame(columns=BLAST_RAW_COLUMNS), failed_ids
     return pd.concat(successful, ignore_index=True), failed_ids
-
-
-def log_batch_failures(outcomes: list[tuple[list[pd.DataFrame], list[str]]]) -> None:
-    """Summarise the failures of a parallel run from its ``blast_batch``
-    outcomes: how many batches failed and sequences went unsearched, and an
-    error when every batch failed."""
-    failed_ids = [rec_id for _, ids in outcomes for rec_id in ids]
-    failed_count = sum(1 for _, ids in outcomes if ids)
-    if failed_count > 0:
-        logger.warning(
-            f"{failed_count}/{len(outcomes)} batches had failures: "
-            f"{len(failed_ids)} sequences not searched"
-        )
-    if failed_ids and not any(dfs for dfs, _ in outcomes):
-        logger.error("All NCBI batches failed: no results")
-    logger.debug(
-        f"Batches without failures: {len(outcomes) - failed_count}/{len(outcomes)}"
-    )
 
 
 ### RESULT PROCESSING ###
@@ -1223,7 +1217,7 @@ def filter_blast_results(
     """
     original_rows = len(df)
     df = df[df["query_cover"] >= query_cover]
-    logger.info(
+    logger.debug(
         f"Query cover filter (≥{query_cover}%): {original_rows} → {len(df)} rows"
     )
 
@@ -1248,14 +1242,14 @@ def filter_blast_results(
             else df_gap.iloc[:0]
         )
 
-        logger.info(
+        logger.debug(
             f"Final result: {len(df)} rows after barcoding gap + similarity filtering"
         )
 
     elif method == "similarity":
         df = filter_by_similarity(df, gap_size=gap_size)
         df["filter_method"] = "similarity"
-        logger.info(f"Similarity filtering: {len(df)} rows retained")
+        logger.debug(f"Similarity filtering: {len(df)} rows retained")
 
     else:
         raise ValueError(

@@ -217,7 +217,7 @@ def hypo_search_job(
             percent = min(curr / total, 1.0)
             progress_bar.progress(
                 percent,
-                text=f"Search: {curr} / {total} proxy searches done...",
+                text=f"Search: {curr} / {total} BOLD sequences blasted...",
             )
 
     hypo_search_df, hypo_search_params = run_with_progress(
@@ -292,7 +292,7 @@ def hypo_search_workflow():
         if n_skipped:
             ready += (
                 f" {n_skipped:,} {pluralize(n_skipped, 'sequence')} without a MOL "
-                f"species in the TAX list {pluralize(n_skipped, 'is', 'are')} "
+                f"species in the TAX list {pluralize(n_skipped, 'is')} "
                 "not searched."
             )
 
