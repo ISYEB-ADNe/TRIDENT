@@ -111,13 +111,11 @@ Set your contact email in the **Settings** panel on first launch, or pre-fill it
 CONTACT_EMAIL = "your-email@example.com"
 ```
 
-You can also use a `.env` file at the project root (copy `.env.example`):
+Copy `.streamlit/secrets.toml.example` to start; the notebooks and scripts read the same file.
 
-```env
-CONTACT_EMAIL=your-email@example.com
-```
+If BLAST searches start failing after a change on NCBI's side, `BLAST_CLIENT = "qblast"` in `secrets.toml` switches to Biopython's BLAST client.
 
-If BLAST searches start failing after a change on NCBI's side, `BLAST_CLIENT = "qblast"` in `secrets.toml` (or `BLAST_CLIENT=qblast` in `.env`) switches to Biopython's BLAST client.
+Each full analysis (`.db` file) is saved in the `results/` folder of TRIDENT, whatever folder you start it from; the Start tab shows its path. `RESULTS_DIR` in `secrets.toml` (an absolute path) sets another folder.
 
 </details>
 

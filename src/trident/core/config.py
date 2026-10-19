@@ -1,8 +1,11 @@
-"""Centralized configuration — resolves values from st.secrets, env vars, or .env."""
+"""Centralized configuration: resolves values from st.secrets, env vars, or the
+repository's .streamlit/secrets.toml."""
 
 import os
+import tomllib
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
+from pathlib import Path
 
 APP_NAME = "trident"
 
@@ -23,8 +26,7 @@ def app_version() -> str:
 # Config keys
 CONTACT_EMAIL = "CONTACT_EMAIL"
 TRIDENT_LOG_LEVEL = "TRIDENT_LOG_LEVEL"
-
-_dotenv_loaded = False
+RESULTS_DIR = "RESULTS_DIR"
 
 
 def _in_streamlit_run() -> bool:
@@ -34,7 +36,7 @@ def _in_streamlit_run() -> bool:
     Streamlit log "missing ScriptRunContext" / "Session state does not function"
     warnings. Config is also read at package import (setup_logging) and from
     notebooks/tests, where no session exists, so we skip the Streamlit lookups
-    there and fall back to env / .env.
+    there and fall back to env / secrets.toml.
     """
     try:
         from streamlit.runtime import exists
@@ -44,27 +46,32 @@ def _in_streamlit_run() -> bool:
         return False
 
 
-def _load_dotenv_once() -> None:
-    """Load .env file once if python-dotenv is installed."""
-    global _dotenv_loaded
-    if _dotenv_loaded:
-        return
-    _dotenv_loaded = True
-    try:
-        from dotenv import find_dotenv, load_dotenv
+def _source_root() -> Path | None:
+    """The repository root in a source checkout (git clone or downloaded
+    archive, as documented), None for an installed package (this file then
+    sits in site-packages)."""
+    root = Path(__file__).resolve().parents[3]
+    return root if (root / "pyproject.toml").exists() else None
 
-        dotenv_path = find_dotenv(usecwd=True)
-        if dotenv_path:
-            load_dotenv(dotenv_path)
-    except ImportError:
-        pass
+
+@lru_cache(maxsize=1)
+def _repo_secrets() -> dict:
+    """The repository's .streamlit/secrets.toml, read directly.
+
+    Streamlit reads it only from the folder the app starts in, and not at all
+    in notebooks or scripts: this makes the same file work for both.
+    """
+    root = _source_root()
+    path = root / ".streamlit" / "secrets.toml" if root else None
+    if not path or not path.exists():
+        return {}
+    with path.open("rb") as f:
+        return tomllib.load(f)
 
 
 def get(key: str, default: str | None = None) -> str | None:
-    """Get a config value: st.secrets → session_state → env var → default.
-
-    On first call, loads a .env file if python-dotenv is installed.
-    """
+    """Get a config value: st.secrets → session_state → env var → the
+    repository's secrets.toml → default."""
     if _in_streamlit_run():
         try:
             import streamlit as st
@@ -81,8 +88,9 @@ def get(key: str, default: str | None = None) -> str | None:
                     return val
         except Exception:
             pass
-    _load_dotenv_once()
-    return os.getenv(key, default)
+    if key in os.environ:
+        return os.environ[key]
+    return _repo_secrets().get(key, default)
 
 
 def set(key: str, value: str) -> None:
@@ -101,6 +109,19 @@ def set(key: str, value: str) -> None:
 def is_streamlit_cloud() -> bool:
     """Return True if running on Streamlit Cloud."""
     return os.path.exists("/mount/src")
+
+
+def results_dir() -> Path:
+    """Folder of the full analyses, the same whatever folder TRIDENT starts from.
+
+    The RESULTS_DIR setting wins. Otherwise it is results/ at the repository
+    root, or in the user's home for an installed package.
+    """
+    configured = get(RESULTS_DIR)
+    if configured:
+        return Path(configured).expanduser()
+    root = _source_root()
+    return root / "results" if root else Path.home() / "TRIDENT" / "results"
 
 
 def contact_email() -> str | None:

@@ -12,6 +12,9 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from trident.clients.gbif import get_extent_column_name
+from trident.core.utils import pluralize
+
 from trident.pipelines.results_pipeline import (
     build_results_df,
     exclusion_keys,
@@ -30,6 +33,7 @@ from trident.ui.results import (
     _species_breakdown_columns,
     show_provenance_section,
 )
+from trident.ui.geo import display_gbif_sequence_table
 from trident.ui.ui import (
     COL,
     SELECTED_SEQUENCE_KEY,
@@ -177,10 +181,11 @@ def _assignments(curated_df, results_df, threshold):
 
     unassigned = table.loc[table["n_species"] == 0, "seq_id"].tolist()
     lost = _lost_step(unassigned, results_df)
+    table["lost_at"] = table["seq_id"].map(lost)
     notes = []
     for _, row in table.iterrows():
         if row["n_species"] == 0:
-            notes.append(LOSS_REASONS.get(lost[row["seq_id"]], lost[row["seq_id"]]))
+            notes.append(LOSS_REASONS.get(row["lost_at"], row["lost_at"]))
             continue
         note = []
         if row["low_identity"]:
@@ -556,6 +561,72 @@ def show_assignments(assignments, curated_df, threshold):
         )
 
 
+# What an unassigned sequence had at the step that lost it: the session table
+# that step read, and the sentence above it.
+LOST_AT_TABLES = {
+    "MOL Filter": ("ncbi_search_df", "Its NCBI hits, none kept by the MOL filter:"),
+    "TAX": ("mol_df", "Its MOL hits, none giving a species at TAX:"),
+    "HYPO": ("geo_df", "Its expanded candidates, none confirmed by HYPO:"),
+    "HYPO not run": ("geo_df", "Its expanded candidates, not tested by HYPO yet:"),
+}
+LOST_AT_COLS = [
+    "scientificName",
+    "acceptedName",
+    "identity_percentage",
+    "query_cover",
+    "hit_def",
+    "hit_url",
+    "gbif_occurrences",
+    "gbif_taxonURL",
+    "taxonURL",
+]
+
+
+def _show_lost_at(seq_id, step):
+    """Show what an unassigned sequence had at the step that lost it, as
+    that step recorded it."""
+    if step == "GEO":
+        params = st.session_state.geo_params
+        min_occ = params["gbif_min_occurrences"]
+        extent = params["gbif_filter_extent"]
+        df = st.session_state.gbif_search_df
+        seq_df = df[df["seq_id"] == seq_id]
+        if seq_df.empty:
+            st.caption("GBIF returned no counts for its candidate species.")
+            return
+        area = get_extent_column_name(extent)
+        area = "worldwide" if area == "global" else f"within {area}"
+        st.caption(
+            f"Its candidate species and their GBIF occurrences. GEO keeps a species "
+            f"with at least {min_occ} {pluralize(min_occ, 'occurrence')} {area}."
+        )
+        display_gbif_sequence_table(
+            seq_df,
+            min_occ,
+            st.session_state.gbif_search_params["gbif_extents"],
+            extent,
+        )
+        return
+    if step not in LOST_AT_TABLES:
+        return
+    key, caption = LOST_AT_TABLES[step]
+    df = st.session_state[key]
+    rows = df[df["seq_id"] == seq_id]
+    if "identity_percentage" in rows.columns:
+        rows = rows.sort_values("identity_percentage", ascending=False)
+    st.caption(caption)
+    st.dataframe(
+        rows,
+        width="stretch",
+        hide_index=True,
+        column_order=[c for c in LOST_AT_COLS if c in rows.columns],
+        column_config={
+            **{c: COL[c] for c in LOST_AT_COLS if c in COL},
+            "acceptedName": st.column_config.TextColumn("Accepted name (WoRMS)"),
+        },
+    )
+
+
 def show_sequence_detail(results_df, assignments, threshold):
     """The selected sequence's assignment and candidates, with Keep checkboxes."""
     with st.container(border=True):
@@ -575,6 +646,7 @@ def show_sequence_detail(results_df, assignments, threshold):
         candidates = f", {n} candidate species" if n > 1 else ""
         if n == 0:
             st.info(f"Unassigned: {row['note']}.")
+            _show_lost_at(selected_seq, row["lost_at"])
         elif row["species_level"] or rank:
             st.markdown(
                 f"Assigned to **{row['scientificName']}** "

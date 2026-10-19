@@ -51,7 +51,7 @@ def _app_config():
             help=(
                 "Sent with every request to NCBI, GBIF, WoRMS and BOLD. "
                 "Required by these services to identify your application. "
-                "Pre-fill via CONTACT_EMAIL in secrets.toml or .env."
+                "Pre-fill via CONTACT_EMAIL in .streamlit/secrets.toml."
             ),
         )
         if not email_is_preset and email:

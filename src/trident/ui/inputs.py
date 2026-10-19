@@ -11,8 +11,8 @@ import streamlit as st
 from loguru import logger
 
 import trident.pipelines as pipe
-from trident.core.config import is_streamlit_cloud
-from trident.core.database import check_schema_version
+from trident.core.config import is_streamlit_cloud, results_dir
+from trident.core.database import check_schema_version, get_connection
 from trident.ui.ui import prefill_settings, reset_for_new_analysis, COL
 
 FASTA_EXTENSIONS = {"fasta", "fa", "txt", "fas"}
@@ -40,10 +40,8 @@ def _db_path(base_name: str) -> str:
         sid = st.session_state.setdefault(
             "_session_id", random.randint(100_000_000, 999_999_999)
         )
-        path = f"./results/{sid}_{base_name}.db"
-    else:
-        path = f"./results/{base_name}.db"
-    return path
+        base_name = f"{sid}_{base_name}"
+    return str(results_dir() / f"{base_name}.db")
 
 
 def display_fasta_sequence_table():
@@ -96,24 +94,52 @@ def _start_fasta_analysis(file_name: str, data: bytes, settings: dict | None = N
     st.rerun()
 
 
-def _restore_db(uploaded_file):
-    """Restore analysis from an uploaded .db file."""
-    name = Path(uploaded_file.name).stem
+def _free_name(name: str) -> str:
+    """*name*, or "name (2)", "name (3)"... when that analysis already exists."""
+    candidate, n = name, 1
+    while Path(_db_path(candidate)).exists():
+        n += 1
+        candidate = f"{name} ({n})"
+    return candidate
+
+
+def _has_sequences(db_path: Path) -> bool:
+    """Whether the database holds the sequences an analysis is restored from
+    (an empty file or another tool's SQLite file does not)."""
+    with get_connection(db_path) as conn:
+        return bool(
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sequences'"
+            ).fetchone()
+        )
+
+
+def _restore_db(uploaded_file, name: str):
+    """Restore analysis from an uploaded .db file, saved as *name*."""
     db = _db_path(name)
     target_path = Path(db)
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_bytes(uploaded_file.getvalue())
+    # Checked under another name first, so an incompatible file never
+    # replaces the analysis it was meant to overwrite.
+    upload_path = target_path.with_suffix(".upload")
+    upload_path.write_bytes(uploaded_file.getvalue())
 
-    compatible, message = check_schema_version(db)
+    compatible, message = check_schema_version(str(upload_path))
+    if compatible and not _has_sequences(upload_path):
+        compatible, message = False, "This file is not a TRIDENT full analysis."
     if not compatible:
-        target_path.unlink(missing_ok=True)
+        upload_path.unlink(missing_ok=True)
         st.error(message)
         return
+    upload_path.replace(target_path)
 
     reset_for_new_analysis("analysis_name")
     st.session_state.analysis_name = name
     st.session_state.db_path = db
     st.session_state.sequences_df = None  # Will trigger auto-restore on rerun
+    # A fresh uploader: the restored file would otherwise stay in it, offering
+    # to restore it again under a new name.
+    st.session_state.fasta_uploader_key += 1
     st.session_state.requested_tab = "start"
     st.rerun()
 
@@ -163,13 +189,29 @@ def handle_file_upload():
     name = Path(uploaded_file.name).stem
 
     if ext in DB_EXTENSIONS:
+        restore_name = st.text_input(
+            "Save as:",
+            value=_free_name(name),
+            key=f"restore_name_{st.session_state.fasta_uploader_key}",
+        ).strip()
+        if not restore_name:
+            st.error("Enter a name for the analysis.")
+            return
+        if Path(restore_name).name != restore_name:
+            st.error("Enter a name without folders.")
+            return
+        if Path(_db_path(restore_name)).exists():
+            st.warning(
+                f"A full analysis named **{restore_name}** already exists: "
+                "restoring replaces it. Change the name to keep both."
+            )
         if st.button(
             "Restore Analysis",
             icon=":material/restore:",
             type="primary",
             use_container_width=True,
         ):
-            _restore_db(uploaded_file)
+            _restore_db(uploaded_file, restore_name)
 
     elif ext in FASTA_EXTENSIONS:
         # Skip if already loaded
@@ -219,6 +261,9 @@ def display_analysis_status():
 
     with st.container(border=True):
         st.markdown(f"### 📊 Active Analysis: **{active_name}**")
+        # On Cloud the path is on the server, of no use to the user.
+        if not is_streamlit_cloud() and st.session_state.get("db_path"):
+            st.caption(f"Full analysis saved in `{st.session_state.db_path}`")
 
         display_fasta_sequence_table()
 

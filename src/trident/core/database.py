@@ -24,13 +24,16 @@ from trident.core.utils import ensure_columns, pluralize, set_progress_total
 
 @contextmanager
 def get_connection(
-    db_path: str | Path = "./results/trident_data.db",
+    db_path: str | Path | None = None,
 ) -> Iterator[sqlite3.Connection]:
-    """Open a SQLite connection, creating the file if needed.
+    """Open a SQLite connection, creating the file if needed (by default
+    trident_data.db in the results folder).
 
     Commits on clean exit, rolls back on exception, and always closes the
     connection so file handles are not leaked across cache calls.
     """
+    if db_path is None:
+        db_path = config.results_dir() / "trident_data.db"
     db_path = Path(db_path).absolute()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
@@ -89,12 +92,16 @@ def _set_schema_version(conn: sqlite3.Connection) -> None:
 def check_schema_version(db_path: str | Path) -> tuple[bool, str]:
     """Whether *db_path* can be read by this TRIDENT version.
 
-    Returns (compatible, message). A database written by a newer TRIDENT
-    (user_version > SCHEMA_VERSION) is refused; equal or older is accepted
-    (older databases re-run any steps whose columns changed).
+    Returns (compatible, message). A file that is not SQLite, or a database
+    written by a newer TRIDENT (user_version > SCHEMA_VERSION), is refused;
+    equal or older is accepted (older databases re-run any steps whose
+    columns changed).
     """
-    with get_connection(db_path) as conn:
-        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    try:
+        with get_connection(db_path) as conn:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+    except sqlite3.DatabaseError:
+        return False, "This file is not a TRIDENT full analysis."
     if version > SCHEMA_VERSION:
         return False, (
             f"This database was created by a newer version of TRIDENT "
