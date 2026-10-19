@@ -22,11 +22,13 @@ DB_EXTENSIONS = {"db", "sqlite", "sqlite3"}
 # documented install (git clone or downloaded archive).
 EXAMPLE_FASTA = Path(__file__).resolve().parents[3] / "example" / "example.fasta"
 # The example's sequences come from Svalbard: pre-fill the GEO window of the
-# paper's worked example, or GBIF would be searched around 0°, 0°.
+# paper's worked example (kept on the counts within 250 km), or GBIF would be
+# searched around 0°, 0°.
 EXAMPLE_SETTINGS = {
     "gbif_latitude": "78.5",
     "gbif_longitude": "14.5",
     "gbif_extent": "250, 500",
+    "gbif_filter_extent": 250,
 }
 
 
@@ -201,7 +203,8 @@ def load_example_button():
         disabled=active,
         help=(
             "The four Svalbard 16S sequences of the paper's worked example. "
-            "The GEO window is set to the sampling area (78.5° N, 14.5° E; 250 and 500 km)."
+            "The GEO window is set to the paper's (78.5° N, 14.5° E, 250 km; 500 km is "
+            "also searched for comparison)."
         ),
         use_container_width=True,
     ):
