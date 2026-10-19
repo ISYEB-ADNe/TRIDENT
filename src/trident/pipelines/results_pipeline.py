@@ -10,6 +10,9 @@ which does WoRMS lookups for higher-level taxa).
     resolve_sequences(results_df) → DataFrame (species count and shared rank per MOTU/ASV)
     add_check_hit(df) → DataFrame
     add_low_identity_warning(df, threshold) → DataFrame
+    build_species_flow(seq_id, ...) → list of (source, target, names) links
+    species_flow_table(seq_id, links, ...) → DataFrame (one row per name)
+    plot_species_flow(links) → Plotly Sankey figure
 """
 
 import pandas as pd
@@ -608,3 +611,255 @@ def _fill_worms_records(df: pd.DataFrame, mask: pd.Series) -> None:
         if key in cache:
             for col, val in cache[key].items():
                 df.at[idx, col] = val
+
+
+# ---------------------------------------------------------------------------
+# Species flow (one MOTU/ASV through the steps)
+# ---------------------------------------------------------------------------
+
+
+# Sankey of one sequence's candidates: each node's column (left to right),
+# label and RGB colour (losses grey, the MOL stream blue, TAX additions orange).
+FLOW_NODES = {
+    "ncbi": (0, "NCBI hits", "76, 120, 168"),
+    "filter_out": (1, "Removed by the MOL filter", "186, 176, 172"),
+    "mol": (1, "MOL list", "76, 120, 168"),
+    "tax_out": (2, "Not kept at TAX", "186, 176, 172"),
+    "tax_mol": (2, "MOL species (TAX)", "76, 120, 168"),
+    "tax_added": (2, "Added by TAX (congeners)", "245, 133, 24"),
+    "geo_out": (3, "Not in the GEO area", "186, 176, 172"),
+    "geo_not_run": (3, "GEO not run", "186, 176, 172"),
+    "mol_geo": (3, "MOL+GEO", "76, 120, 168"),
+    "added_geo": (3, "Added, in the GEO area", "245, 133, 24"),
+    "hypo": (4, "Confirmed by HYPO", "245, 133, 24"),
+    "no_proxy": (4, "No BOLD proxy (EXTRA)", "186, 176, 172"),
+    "hypo_out": (4, "Not confirmed by HYPO", "186, 176, 172"),
+    "extra_not_run": (4, "EXTRA not run", "186, 176, 172"),
+    "hypo_not_run": (4, "HYPO not run", "186, 176, 172"),
+    "excluded": (5, "Excluded by hand", "186, 176, 172"),
+    "kept": (5, "Kept", "84, 162, 75"),
+}
+FLOW_HOVER_NAMES = 25
+# Nodes of the TAX additions' stream; every other node is on the MOL stream.
+FLOW_ADDED = {"tax_added", "added_geo", "hypo"}
+
+
+def _names(df, seq_id, mask=None):
+    """Names of a sequence's rows in a step table, optionally masked."""
+    if df is None:
+        return set()
+    rows = df[df["seq_id"] == seq_id]
+    if mask is not None:
+        rows = rows[mask(rows)]
+    return set(rows["scientificName"].dropna())
+
+
+def _in_mol(rows):
+    """Rows of a species found by MOL itself."""
+    return rows["in_mol"].astype(bool)
+
+
+def _added(rows):
+    """Rows of a species TAX added (a congener of a MOL species)."""
+    return ~_in_mol(rows)
+
+
+def build_species_flow(
+    seq_id,
+    ncbi_search_df,
+    mol_df,
+    tax_df=None,
+    geo_df=None,
+    extra_df=None,
+    hypo_df=None,
+    excluded=(),
+):
+    """One sequence's candidates through the steps, for the steps run so far.
+
+    NCBI hits and the MOL list carry NCBI names; from TAX on, names are WoRMS
+    accepted names, so a MOL name merged as a synonym counts once at TAX.
+
+    Args:
+        excluded: "{seq_id}||{scientificName}" keys of the candidates excluded
+            by hand.
+
+    Returns:
+        List of (source, target, names) links between FLOW_NODES, each with
+        at least one name.
+    """
+    hits = _names(ncbi_search_df, seq_id)
+    mol = _names(mol_df, seq_id)
+    accepted = set()
+    if mol_df is not None and "acceptedName" in mol_df.columns:
+        accepted = _names(mol_df.assign(scientificName=mol_df["acceptedName"]), seq_id)
+    # A hit named after a species that MOL kept under a synonym is not a loss.
+    links = [("ncbi", "filter_out", hits - mol - accepted), ("ncbi", "mol", mol)]
+    if tax_df is None:
+        return _nonempty(links)
+
+    tax_mol = _names(tax_df, seq_id, _in_mol)
+    # A congener BLAST returned and the MOL filter rejected, which TAX keeps
+    # on request, stays a filter loss: EXTRA seeks no proxy for it.
+    tax_added = _names(tax_df, seq_id, _added) - hits
+    links += [
+        ("mol", "tax_out", (accepted or mol) - tax_mol),
+        ("mol", "tax_mol", tax_mol),
+    ]
+    if geo_df is None:
+        links += [
+            ("tax_mol", "geo_not_run", tax_mol),
+            ("tax_added", "geo_not_run", tax_added),
+        ]
+        return _nonempty(links)
+
+    mol_geo = _names(geo_df, seq_id, _in_mol)
+    added_geo = _names(geo_df, seq_id, _added) - hits
+    links += [
+        ("tax_mol", "geo_out", tax_mol - mol_geo),
+        ("tax_mol", "mol_geo", mol_geo),
+        ("tax_added", "geo_out", tax_added - added_geo),
+        ("tax_added", "added_geo", added_geo),
+    ]
+
+    names = sorted(mol_geo | added_geo)
+    candidates = pd.DataFrame(
+        {"seq_id": [seq_id] * len(names), "scientificName": names}, dtype=str
+    )
+    excluded = set(
+        candidates.loc[exclusion_keys(candidates).isin(excluded), "scientificName"]
+    )
+    links += [
+        ("mol_geo", "kept", mol_geo - excluded),
+        ("mol_geo", "excluded", mol_geo & excluded),
+    ]
+    if extra_df is None:
+        links.append(("added_geo", "extra_not_run", added_geo))
+        return _nonempty(links)
+    # HYPO tests only the added species EXTRA found a BOLD proxy for.
+    proxied = _names(extra_df, seq_id)
+    links.append(("added_geo", "no_proxy", added_geo - proxied))
+    if hypo_df is None:
+        links.append(("added_geo", "hypo_not_run", added_geo & proxied))
+        return _nonempty(links)
+    hypo = _names(hypo_df, seq_id) & added_geo & proxied
+    links += [
+        ("added_geo", "hypo_out", (added_geo & proxied) - hypo),
+        ("added_geo", "hypo", hypo),
+        ("hypo", "kept", hypo - excluded),
+        ("hypo", "excluded", hypo & excluded),
+    ]
+    return _nonempty(links)
+
+
+def _nonempty(links):
+    """The links that carry at least one name."""
+    return [link for link in links if link[2]]
+
+
+def _name_list(names):
+    """Names for a hover box, cut after FLOW_HOVER_NAMES."""
+    names = sorted(names)
+    shown = "<br>".join(names[:FLOW_HOVER_NAMES])
+    if len(names) > FLOW_HOVER_NAMES:
+        shown += f"<br>… and {len(names) - FLOW_HOVER_NAMES} more"
+    return shown
+
+
+def _is_end(node, links):
+    """Whether no flow leaves node: where its species ended."""
+    return not any(src == node for src, _, _ in links)
+
+
+def species_flow_table(seq_id, links, ncbi_search_df, mol_df):
+    """One row per name of build_species_flow's links: where it came from and
+    where it ended, with its best NCBI identity for a name the sequence's hits
+    carry."""
+    identity = {}
+    for df, name_col in (
+        (mol_df, "acceptedName"),
+        (ncbi_search_df, "scientificName"),
+    ):
+        if df is None or name_col not in df.columns:
+            continue
+        rows = df[df["seq_id"] == seq_id]
+        # Cached tables can return numbers as strings.
+        best_per_name = (
+            pd.to_numeric(rows["identity_percentage"], errors="coerce")
+            .groupby(rows[name_col])
+            .max()
+        )
+        for name, best in best_per_name.dropna().items():
+            identity[name] = max(best, identity.get(name, best))
+
+    order = list(FLOW_NODES)
+    rows = [
+        {
+            "species": name,
+            "origin": "Added by TAX" if src in FLOW_ADDED else "NCBI hit",
+            "outcome": FLOW_NODES[dst][1],
+            "identity": None if src in FLOW_ADDED else identity.get(name),
+            "_order": order.index(dst),
+        }
+        for src, dst, names in links
+        if _is_end(dst, links)
+        for name in names
+    ]
+    return (
+        pd.DataFrame(
+            rows, columns=["species", "origin", "outcome", "identity", "_order"]
+        )
+        .sort_values(["_order", "species"], ascending=[False, True])
+        .drop(columns="_order")
+    )
+
+
+def plot_species_flow(links):
+    """Sankey of build_species_flow's links, nodes placed by column."""
+    import plotly.graph_objects as go
+
+    used = list(dict.fromkeys(n for src, dst, _ in links for n in (src, dst)))
+    index = {node: i for i, node in enumerate(used)}
+
+    # A node's names: what flows into it, or out of it for a first node. The
+    # MOL list's names come in as NCBI names and leave as WoRMS names.
+    targets = {dst for _, dst, _ in links}
+    node_names = {node: set() for node in used}
+    for src, dst, names in links:
+        node_names[dst] |= names
+        if src not in targets:
+            node_names[src] |= names
+
+    columns = sorted({FLOW_NODES[n][0] for n in used})
+    x = {c: i / max(len(columns) - 1, 1) for i, c in enumerate(columns)}
+    by_column = {c: [n for n in used if FLOW_NODES[n][0] == c] for c in columns}
+    y = {
+        n: (i + 0.5) / len(nodes)
+        for nodes in by_column.values()
+        for i, n in enumerate(nodes)
+    }
+
+    fig = go.Figure(
+        go.Sankey(
+            arrangement="snap",
+            textfont=dict(shadow="none"),
+            node=dict(
+                label=[f"{FLOW_NODES[n][1]} ({len(node_names[n])})" for n in used],
+                color=[f"rgb({FLOW_NODES[n][2]})" for n in used],
+                x=[min(max(x[FLOW_NODES[n][0]], 0.001), 0.999) for n in used],
+                y=[min(max(y[n], 0.001), 0.999) for n in used],
+                customdata=[_name_list(node_names[n]) for n in used],
+                hovertemplate="%{customdata}<extra></extra>",
+                pad=20,
+            ),
+            link=dict(
+                source=[index[src] for src, _, _ in links],
+                target=[index[dst] for _, dst, _ in links],
+                value=[len(names) for _, _, names in links],
+                color=[f"rgba({FLOW_NODES[src][2]}, 0.35)" for src, _, _ in links],
+                customdata=[_name_list(names) for _, _, names in links],
+                hovertemplate="%{customdata}<extra></extra>",
+            ),
+        )
+    )
+    fig.update_layout(height=450, margin=dict(l=10, r=10, t=10, b=10))
+    return fig

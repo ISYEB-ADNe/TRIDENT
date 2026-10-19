@@ -10,6 +10,8 @@ from trident.pipelines.results_pipeline import (
     find_sequence_exclusion_step,
     filter_excluded_results,
     build_gbif_export_df,
+    build_species_flow,
+    species_flow_table,
 )
 
 
@@ -386,3 +388,87 @@ def test_resolve_sequences_matches_the_gbif_export(monkeypatch):
     }
     # A subspecies counts with its species.
     assert resolved.loc["lone", "species"] == resolved.loc["subspecies", "species"]
+
+
+# --- species flow ---
+
+
+def test_species_flow_ends_each_candidate_once():
+    """Each NCBI name and each species TAX added ends in exactly one place, from
+    TAX on under its WoRMS accepted name; other sequences do not leak in."""
+    ncbi_search_df = pd.DataFrame(
+        {
+            "seq_id": ["s1"] * 6 + ["s2"],
+            "scientificName": [
+                "Gadus ogac",
+                "Gadus macrocephalus",
+                "Gadus morhua",
+                "Salmo salar",
+                "Bad fish",
+                "Gadus rejected",
+                "Other fish",
+            ],
+            "identity_percentage": [99.0, 85.0, 98.0, 97.0, 80.0, 70.0, 99.0],
+        }
+    )
+    # Gadus ogac passes the filter and WoRMS accepts it as G. macrocephalus,
+    # whose own lower hit the filter rejected.
+    mol_df = pd.DataFrame(
+        {
+            "seq_id": ["s1"] * 3,
+            "scientificName": ["Gadus ogac", "Gadus morhua", "Salmo salar"],
+            "acceptedName": ["Gadus macrocephalus", "Gadus morhua", "Salmo salar"],
+            "identity_percentage": [99.0, 98.0, 97.0],
+        }
+    )
+    # TAX adds Gadus rejected back, as when it keeps MOL-rejected congeners.
+    tax_df = pd.DataFrame(
+        {
+            "seq_id": ["s1"] * 6,
+            "scientificName": [
+                "Gadus macrocephalus",
+                "Gadus morhua",
+                "Gadus chalcogrammus",
+                "Gadus nobold",
+                "Gadus rejected",
+                "Gadus extra",
+            ],
+            "in_mol": [True, True, False, False, False, False],
+        }
+    )
+    geo_df = tax_df.iloc[:5]
+    extra_df = pd.DataFrame(
+        {"seq_id": ["s1"], "scientificName": ["Gadus chalcogrammus"]}
+    )
+    hypo_df = extra_df.copy()
+
+    links = build_species_flow(
+        "s1",
+        ncbi_search_df,
+        mol_df,
+        tax_df=tax_df,
+        geo_df=geo_df,
+        extra_df=extra_df,
+        hypo_df=hypo_df,
+        excluded=["s1||Gadus macrocephalus", "s2||Gadus morhua"],
+    )
+    table = species_flow_table("s1", links, ncbi_search_df, mol_df)
+
+    assert dict(zip(table["species"], table["outcome"])) == {
+        "Bad fish": "Removed by the MOL filter",
+        "Gadus rejected": "Removed by the MOL filter",
+        "Salmo salar": "Not kept at TAX",
+        "Gadus extra": "Not in the GEO area",
+        "Gadus nobold": "No BOLD proxy (EXTRA)",
+        "Gadus macrocephalus": "Excluded by hand",
+        "Gadus morhua": "Kept",
+        "Gadus chalcogrammus": "Kept",
+    }
+    assert len(table) == table["species"].nunique()
+    added = table.set_index("species")["origin"].eq("Added by TAX")
+    assert set(added[added].index) == {
+        "Gadus chalcogrammus",
+        "Gadus nobold",
+        "Gadus extra",
+    }
+    assert table.set_index("species").loc["Gadus macrocephalus", "identity"] == 99.0

@@ -15,7 +15,7 @@ dependencies = [
     "loguru>=0.7.3",
     "numpy>=1.26",
     "pandas>=2.3.2",
-    "plotly>=5.0",
+    "plotly>=5.23",
     "requests>=2.32.5",
     "streamlit>=1.56.0",
 ]

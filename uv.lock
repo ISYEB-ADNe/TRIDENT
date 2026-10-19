@@ -1182,7 +1182,7 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pandas", specifier = ">=2.3.2" },
-    { name = "plotly", specifier = ">=5.0" },
+    { name = "plotly", specifier = ">=5.23" },
     { name = "requests", specifier = ">=2.32.5" },
     { name = "streamlit", specifier = ">=1.56.0" },
 ]
