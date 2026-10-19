@@ -24,7 +24,6 @@ TAB_CONFIG = {
     "extra": ("4 · EXTRA", "extra_df"),
     "hypo": ("5 · HYPO", "hypo_df"),
     "results": ("Results", None),
-    "results_old": ("Results (old)", None),
     "parameters": ("Parameters", None),
 }
 
@@ -170,11 +169,6 @@ def main():
         from trident.ui import results
 
         results.results_main()
-
-    elif current_tab == "results_old":
-        from trident.ui import results_old
-
-        results_old.results_main()
 
     elif current_tab == "parameters":
         from trident.ui import dashboard

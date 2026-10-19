@@ -1075,7 +1075,7 @@ def show_exports(curated_df):
                 file_name=f"{analysis_name}_results.csv",
                 mime="text/csv",
                 width="stretch",
-                key="new_results_csv",
+                key="results_csv",
             )
             with dl2:
                 # Built in the script run, where the session's contact email
@@ -1086,16 +1086,14 @@ def show_exports(curated_df):
                     )
                     return int(rows.sum())
 
-                if st.button(
-                    "📥 GBIF export (CSV)", width="stretch", key="new_gbif_csv"
-                ):
+                if st.button("📥 GBIF export (CSV)", width="stretch", key="gbif_csv"):
                     with st.spinner("Looking up higher-level taxa in WoRMS..."):
                         gbif_df = build_gbif_export_df(curated_df)
-                    st.session_state._gbif_export_new = (
+                    st.session_state._gbif_export = (
                         fingerprint(),
                         gbif_df.to_csv(index=False),
                     )
-                built = st.session_state.get("_gbif_export_new")
+                built = st.session_state.get("_gbif_export")
                 if built and built[0] == fingerprint():
                     st.download_button(
                         label="⬇️ Download GBIF export",
@@ -1103,7 +1101,7 @@ def show_exports(curated_df):
                         file_name=f"{analysis_name}_gbif_export.csv",
                         mime="text/csv",
                         width="stretch",
-                        key="new_gbif_download",
+                        key="gbif_download",
                     )
 
         db_path = st.session_state.get("db_path")
@@ -1120,7 +1118,7 @@ def show_exports(curated_df):
             file_name=f"{analysis_name}.db",
             mime="application/x-sqlite3",
             width="stretch",
-            key="new_db_download",
+            key="db_download",
         )
     show_provenance_section()
 
