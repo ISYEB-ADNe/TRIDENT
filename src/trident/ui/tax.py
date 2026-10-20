@@ -4,6 +4,7 @@ WoRMS Analysis UI Module
 This module handles only UI rendering and user interaction.
 """
 
+import pandas as pd
 import streamlit as st
 
 
@@ -44,11 +45,12 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
 
     # 2a. Name resolution (R3): canonicalise MOL names to WoRMS accepted names.
     # Cached per name (marine-independent), so re-runs reuse it. When the toggle
-    # is off, acceptedName falls back to the raw name and matching is unchanged.
+    # is off, the name table is empty and names match as they are.
     resolve = params["worms_resolve_names"]
     if resolve:
         status.update(label="🔤 Resolving names to WoRMS accepted...", state="running")
         res_names = pipe.prepare_resolution_input(mol_df)
+        ncbi_taxids = pipe.prepare_resolution_taxids(mol_df)
         res_info = {"current": 0, "total": len(res_names)}
 
         def _res_poll():
@@ -62,7 +64,7 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
         resolution_df, _ = run_with_progress(
             logsink.wrap(pipe.run_name_resolution),
             res_names,
-            ncbi_taxids=pipe.prepare_resolution_taxids(mol_df),
+            ncbi_taxids=ncbi_taxids,
             db_path=st.session_state.db_path,
             retry_empty=retry_empty,
             user_agent=config.user_agent(),
@@ -72,17 +74,13 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
             on_poll=_res_poll,
         )
     else:
-        resolution_df = None
-    failed_names = failed_items(resolution_df)
-    tax_failed = list(failed_names)
+        resolution_df, ncbi_taxids = None, None
+    tax_failed = failed_items(resolution_df)
 
-    # Attach acceptedName/acceptedNameUsageID (raw scientificName kept). Stored
-    # back so Results' MOL+GEO match also keys on the accepted name.
-    mol_df = pipe.apply_name_resolution(mol_df, resolution_df)
-    st.session_state.mol_df = mol_df
+    name_table = pipe.build_name_table(resolution_df, ncbi_taxids)
 
     # 2b. Prepare Inputs and Progress Tracker (accepted genera when resolved)
-    genera_list = pipe.prepare_worms_input(mol_df)
+    genera_list = pipe.prepare_worms_input(mol_df, name_table)
     total_names = len(genera_list)
     progress_info = {"current": 0, "total": total_names}
 
@@ -116,6 +114,7 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
     worms_merge_df, merge_params = pipe.run_worms_merge(
         worms_search_df,
         mol_df,
+        name_table=name_table,
         force_rerun=force_rerun,
         db_path=st.session_state.db_path,
         mol_params=st.session_state.mol_params,
@@ -131,11 +130,11 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
         db_path=st.session_state.db_path,
         worms_merge_params=merge_params,
         ncbi_search_df=ncbi_search_df,
-        mol_df=mol_df,
+        name_table=name_table,
         drop_mol_rejected=params["tax_drop_mol_rejected"],
     )
 
-    summary_df = pipe.build_tax_summary(tax_df, mol_df)
+    summary_df = pipe.build_tax_summary(tax_df, mol_df, name_table)
 
     # 5. Save to State. worms_marine_only propagates from worms_search_params
     # through worms_merge -> finalize into tax_params, so the step-status
@@ -143,11 +142,11 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
     st.session_state.tax_params = final_params
     st.session_state.tax_df = tax_df
     st.session_state.tax_failed = tax_failed
-    st.session_state.tax_failed_names = failed_names
     st.session_state.tax_homonyms = pipe.genus_homonyms(worms_search_df, tax_df)
     st.session_state.tax_mol_rejected = pipe.mol_rejected_rows(
-        worms_merge_df, ncbi_search_df, mol_df
+        worms_merge_df, ncbi_search_df, name_table
     )
+    st.session_state.name_table = name_table
     st.session_state.tax_summary_df = summary_df
     st.session_state.tax_species = tax_df["scientificName"].unique().tolist()
 
@@ -181,7 +180,7 @@ def worms_search_workflow():
                     "Map MOL names to their WoRMS-accepted name before matching "
                     "(default), so synonyms (e.g. Gadus ogac -> Gadus macrocephalus) "
                     "are credited and expanded under the correct genus. The original "
-                    "NCBI name is kept as verbatimIdentification. Uncheck to match on "
+                    "NCBI names are shown as the NCBI synonyms. Uncheck to match on "
                     "the raw NCBI names only."
                 ),
             )
@@ -207,7 +206,9 @@ def worms_search_workflow():
         }
 
         mol_df = st.session_state.mol_df
-        unique_genera = len(pipe.prepare_worms_input(mol_df))
+        unique_genera = len(
+            pipe.prepare_worms_input(mol_df, st.session_state.name_table)
+        )
 
         mode = run_step_workflow(
             df_key="tax_df",
@@ -243,15 +244,13 @@ def render_worms_metrics():
     # synonyms (e.g. Gadus ogac -> Gadus macrocephalus) are not falsely flagged
     # as missing. Falls back to the raw MOL names when resolution is off.
     mol_df = st.session_state.mol_df
-    resolved = st.session_state.tax_params.get("worms_resolve_names", False) and (
-        "acceptedName" in mol_df.columns
-    )
-    if resolved:
-        mol_species = set(mol_df["acceptedName"].dropna())
-    else:
-        mol_species = set(st.session_state.mol_species)
+    name_table = st.session_state.name_table
+    resolved = st.session_state.tax_params.get("worms_resolve_names", False)
+    mol_names = pd.Series(mol_df["scientificName"].dropna().unique(), dtype=object)
+    mol_species = dict(zip(pipe.species_key(mol_names, name_table), mol_names))
     tax_species = set(st.session_state.tax_species)
-    new_count = len(tax_species - mol_species)
+    tax_keys = set(pipe.species_key(pd.Series(list(tax_species), dtype=object), None))
+    new_count = len(tax_keys - set(mol_species))
 
     col1, col2, col3 = st.columns(3)
     col1.metric(
@@ -267,7 +266,9 @@ def render_worms_metrics():
 
     if not resolved:
         # No WoRMS lookup of the MOL names: say only that they are not in TAX.
-        missing = sorted(mol_species - tax_species)
+        missing = sorted(
+            name for key, name in mol_species.items() if key not in tax_keys
+        )
         col3.metric(
             "MOL names not in TAX",
             len(missing),
@@ -287,8 +288,8 @@ def render_worms_metrics():
 
     summary = pipe.summarize_name_resolution(
         mol_df,
+        name_table,
         tax_df=st.session_state.tax_df,
-        failed_names=st.session_state.tax_failed_names,
     )
     renamed, not_found = summary.renamed, summary.not_found
     col3.metric(
@@ -466,10 +467,19 @@ def display_worms_summary():
     )
 
 
+def _with_ncbi_synonyms(df):
+    """df with ncbi_synonyms: the NCBI names its MOL hits gave the species,
+    when they differ from the species name."""
+    synonyms = pipe.ncbi_names(
+        df, st.session_state.mol_df, st.session_state.name_table, synonyms_only=True
+    )
+    return df.assign(ncbi_synonyms=synonyms.str.join(", "))
+
+
 def display_worms_sequence_table(sequence_worms):
     """Display WoRMS species table with formatted columns and color highlighting."""
 
-    styled_df = styled_or_plain(sequence_worms, highlight_in_mol)
+    styled_df = styled_or_plain(_with_ncbi_synonyms(sequence_worms), highlight_in_mol)
 
     st.dataframe(
         styled_df,
@@ -489,13 +499,13 @@ def display_worms_sequence_table(sequence_worms):
             "taxonRank",
             "taxonID",
             "taxonID_db",
-            "verbatimIdentification",
+            "ncbi_synonyms",
         ],
         column_config={
             "seq_id": None,
             "dna_sequence": None,
             "scientificName": COL["scientificName"],
-            "verbatimIdentification": COL["verbatimIdentification"],
+            "ncbi_synonyms": COL["ncbi_synonyms"],
             "taxonURL": COL["taxonURL"],
             "family": COL["family"],
             "genus": COL["genus"],
@@ -528,13 +538,10 @@ def _tax_sequence_label(seq_id):
         else 0
     )
     new = n_species - in_mol
-    mol_df = st.session_state.mol_df
-    mol_name_col = (
-        "acceptedName" if "acceptedName" in mol_df.columns else "scientificName"
-    )
-    mol_species = set(mol_df[mol_df["seq_id"] == seq_id][mol_name_col].unique())
-    tax_species = set(seq_data["scientificName"].unique())
-    missing = len(mol_species - tax_species)
+    # MOL species not in the TAX list (see build_tax_summary).
+    summary = st.session_state.tax_summary_df
+    counts = summary.loc[summary["seq_id"] == seq_id, ["MOL Species", "Overlap"]]
+    missing = (counts["MOL Species"] - counts["Overlap"]).sum()
     label = f"{seq_id} — {n_species} species ({in_mol} from MOL, +{new} new"
     if missing:
         label += f", {missing} missing"
@@ -560,7 +567,7 @@ def display_worms_sequence():
 
 def display_full_tax_list():
     """Display the complete TAX list in a flat table."""
-    df = st.session_state.tax_df
+    df = _with_ncbi_synonyms(st.session_state.tax_df)
     styled_df = styled_or_plain(df, highlight_in_mol)
     cols = df.columns.tolist()
     priority = [
@@ -575,9 +582,11 @@ def display_full_tax_list():
         "phylum",
         "kingdom",
     ]
-    # NCBI verbatim name goes last.
-    middle = [c for c in cols if c not in priority and c != "verbatimIdentification"]
-    tail = ["verbatimIdentification"] if "verbatimIdentification" in cols else []
+    # NCBI synonyms go last. The TAX table of a database written before they
+    # were derived still has a verbatimIdentification column, left out.
+    hidden = {"ncbi_synonyms", "verbatimIdentification"}
+    middle = [c for c in cols if c not in priority and c not in hidden]
+    tail = ["ncbi_synonyms"]
     ordered = priority + middle + tail
     st.caption(":green[■] Species also in MOL list")
     st.dataframe(
@@ -588,7 +597,7 @@ def display_full_tax_list():
         column_config={
             "seq_id": COL["seq_id"],
             "scientificName": COL["scientificName"],
-            "verbatimIdentification": COL["verbatimIdentification"],
+            "ncbi_synonyms": COL["ncbi_synonyms"],
             "taxonURL": COL["taxonURL"],
             "in_mol": None,
             "mol_top_identity_percentage": None,

@@ -54,7 +54,7 @@ COL = {
     "scientificName": st.column_config.TextColumn(
         "Scientific Name",
     ),
-    "verbatimIdentification": st.column_config.TextColumn(
+    "ncbi_synonyms": st.column_config.TextColumn(
         "NCBI synonym",
         help="NCBI/BLAST name(s) for this species that differ from the WoRMS-accepted name (synonyms/misspellings). Blank when NCBI already used the accepted name.",
     ),
@@ -239,9 +239,9 @@ class AppState:
     tax_species: list[str] = field(default_factory=list)
     tax_summary_df: "pd.DataFrame | None" = None
     tax_failed: list[str] = field(default_factory=list)
-    tax_failed_names: list[str] = field(default_factory=list)
     tax_homonyms: "pd.DataFrame | None" = None
     tax_mol_rejected: "pd.DataFrame | None" = None
+    name_table: "pd.DataFrame | None" = None
     tax_df: "pd.DataFrame | None" = None
 
     gbif_logs: list[str] = field(default_factory=list)

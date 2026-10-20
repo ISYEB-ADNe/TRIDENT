@@ -44,7 +44,9 @@ def bold_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
 
     # Prepare Inputs and Progress Tracker
     geo_df = st.session_state.geo_df
-    species_list, _ = pipe.prepare_bold_input(geo_df, st.session_state.ncbi_search_df)
+    species_list, _ = pipe.prepare_bold_input(
+        geo_df, st.session_state.ncbi_search_df, st.session_state.name_table
+    )
     st.session_state.bold_input_species = species_list
     total_names = len(species_list)
     progress_info = {"current": 0, "total": total_names}
@@ -296,6 +298,7 @@ def bold_filter_job(*, force_rerun, retry_empty=False, status, progress_bar, par
         bold_filter_df,
         geo_df,
         ncbi_search_df=st.session_state.ncbi_search_df,
+        name_table=st.session_state.name_table,
         bold_filter_params=bold_filter_params,
         geo_params=st.session_state.geo_params,
         db_path=st.session_state.db_path,
@@ -313,7 +316,10 @@ def bold_filter_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     progress_bar.empty()
 
     extra_summary_df = pipe.build_extra_summary(
-        extra_df, geo_df, ncbi_search_df=st.session_state.ncbi_search_df
+        extra_df,
+        geo_df,
+        ncbi_search_df=st.session_state.ncbi_search_df,
+        name_table=st.session_state.name_table,
     )
 
     st.session_state.bold_filter_df = bold_filter_df
@@ -400,7 +406,11 @@ def display_bold_input_summary():
     if not bold_input:
         return
 
-    non_mol_df = geo_df[pipe.needs_proxy(geo_df, st.session_state.ncbi_search_df)]
+    non_mol_df = geo_df[
+        pipe.needs_proxy(
+            geo_df, st.session_state.ncbi_search_df, st.session_state.name_table
+        )
+    ]
     n_to_query = len(bold_input)
 
     with st.container(border=True):
@@ -519,10 +529,13 @@ def display_extra_summary():
 def display_bold_sequence_metrics(seq_df, selected_seq):
     # Species queried for this seq_id but not found in BOLD
     geo_df = st.session_state.geo_df
-    queried = geo_df[pipe.needs_proxy(geo_df, st.session_state.ncbi_search_df)]
-    queried_for_seq = set(
-        queried.loc[queried["seq_id"] == selected_seq, "scientificName"]
-    )
+    seq_geo = geo_df[geo_df["seq_id"] == selected_seq]
+    queried = seq_geo[
+        pipe.needs_proxy(
+            seq_geo, st.session_state.ncbi_search_df, st.session_state.name_table
+        )
+    ]
+    queried_for_seq = set(queried["scientificName"])
     found_for_seq = set(seq_df["scientificName"].unique())
     missing_for_seq = sorted(queried_for_seq - found_for_seq)
 
@@ -691,7 +704,9 @@ def extra_analysis():
     # Compute and cache input species list (avoid re-logging on every Streamlit rerun)
     if not st.session_state.bold_input_species:
         species_list, _ = pipe.prepare_bold_input(
-            st.session_state.geo_df, st.session_state.ncbi_search_df
+            st.session_state.geo_df,
+            st.session_state.ncbi_search_df,
+            st.session_state.name_table,
         )
         st.session_state.bold_input_species = species_list
 

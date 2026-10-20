@@ -1,14 +1,17 @@
 """WoRMS pipeline — produces the TAX (Taxonomic scope) results list.
 
 Step order:
-    1. prepare_worms_input(mol_df)               → list[str]
+    1. prepare_worms_input(mol_df, name_table)   → list[str]
     2. run_worms_search(genera_list, ...)         → (worms_search_df, params)
     3. run_worms_merge(worms_search_df, ...)      → (worms_merge_df, params)
     4. finalize_tax_results(worms_merge_df, ...)  → (tax_df, params)
 
 Exploration:
-    build_tax_summary(tax_df)
-    mol_rejected_rows(tax_df, ncbi_search_df, mol_df)
+    build_tax_summary(tax_df, mol_df, name_table)
+    mol_rejected_rows(tax_df, ncbi_search_df, name_table)
+
+Names: build_name_table (see names.py) makes the name table of the MOL names
+from run_name_resolution; the later steps take it to compare names.
 """
 
 from typing import NamedTuple
@@ -25,7 +28,6 @@ from trident.core.utils import (
     pluralize,
     species_for_sequences,
     preserve_sequence_order,
-    top_hit_per_group,
     normalize_name,
     notify_progress,
 )
@@ -35,31 +37,38 @@ from trident.clients.worms import (
     resolve_accepted_name,
     worms_search_url,
 )
+from trident.pipelines.names import (
+    best_hits,
+    build_name_table,
+    name_keys,
+    species_key,
+    species_of,
+)
 
 
 ### DATA PREPARATION ###
 
 
-def prepare_worms_input(df: pd.DataFrame) -> list[str]:
+def _genus_of(name) -> str | None:
+    """First word of a name; None for a missing or empty name."""
+    return name.split()[0] if isinstance(name, str) and name else None
+
+
+def prepare_worms_input(df: pd.DataFrame, name_table: pd.DataFrame | None) -> list[str]:
     """Extract unique genera from the MOL DataFrame for WoRMS querying.
 
-    When name resolution (R3) has run, expand the WoRMS-accepted genus (the
-    first token of acceptedName) so synonyms reassigned to a different genus
-    (e.g. Allocentrotus -> Strongylocentrotus) expand the correct genus.
-    Otherwise fall back to the raw 'genus' column.
+    The genus of a name is the one of its species (see species_of), so a
+    synonym reassigned to a different genus (e.g. Allocentrotus ->
+    Strongylocentrotus) expands the correct genus.
 
     Args:
-        df: DataFrame with a 'genus' column, and optionally 'acceptedName'.
+        df: DataFrame with a 'scientificName' column (NCBI names).
+        name_table: See build_name_table; None before names are checked.
 
     Returns:
         List of unique genera (non-null) to query in WoRMS.
     """
-    if "acceptedName" in df.columns:
-        genera = df["acceptedName"].map(
-            lambda name: name.split()[0] if isinstance(name, str) and name else None
-        )
-    else:
-        genera = df["genus"]
+    genera = species_of(df["scientificName"], name_table).map(_genus_of)
     # A hit without a name has no genus to expand.
     genera = genera.dropna().unique().tolist()
     genus_word = pluralize(len(genera), "genus")
@@ -183,47 +192,6 @@ def run_name_resolution(
     )
 
 
-def apply_name_resolution(
-    mol_df: pd.DataFrame, resolution_df: pd.DataFrame | None
-) -> pd.DataFrame:
-    """Attach acceptedName / acceptedNameUsageID / matchedBy to mol_df.
-
-    scientificName stays the raw NCBI name (the MOL tab shows it verbatim);
-    acceptedName holds the WoRMS accepted name (== the raw name when it is not a
-    synonym or is absent from WoRMS). The boundary joins (genus expansion,
-    in_mol, MOL+GEO) key on acceptedName, so synonyms reconcile to the accepted
-    taxon while the original identification is preserved. matchedBy says how
-    WoRMS found the name: 'name', 'ncbi_taxid', or empty.
-
-    Args:
-        mol_df: MOL DataFrame with a 'scientificName' column.
-        resolution_df: Output of run_name_resolution, or None to skip (acceptedName
-            falls back to the raw name).
-
-    Returns:
-        mol_df copy with acceptedName, acceptedNameUsageID and matchedBy columns.
-    """
-    out = mol_df.copy()
-    if resolution_df is None or resolution_df.empty:
-        out["acceptedName"] = out["scientificName"]
-        out["acceptedNameUsageID"] = pd.NA
-        out["matchedBy"] = pd.NA
-        return out
-
-    columns = ["acceptedName", "acceptedNameUsageID", "matchedBy"]
-    lookup = (
-        resolution_df.assign(_key=resolution_df["scientificName"].map(normalize_name))
-        .reindex(columns=["_key", *columns])
-        .drop_duplicates("_key")
-        .set_index("_key")
-    )
-    norm_key = out["scientificName"].map(normalize_name)
-    for col in columns:
-        out[col] = norm_key.map(lookup[col])
-    out["acceptedName"] = out["acceptedName"].fillna(out["scientificName"])
-    return out
-
-
 class NameResolutionSummary(NamedTuple):
     """What the TAX tab reports about the names of the MOL list."""
 
@@ -235,71 +203,66 @@ class NameResolutionSummary(NamedTuple):
 
 def summarize_name_resolution(
     mol_df: pd.DataFrame,
+    name_table: pd.DataFrame | None,
     tax_df: pd.DataFrame | None = None,
-    failed_names: list[str] | None = None,
 ) -> NameResolutionSummary:
     """Relate the NCBI names of the MOL list to the WoRMS names TAX works on.
 
     TAX compares and expands the WoRMS accepted names, so two NCBI names that
     WoRMS treats as one species count once there (e.g. Gadus ogac and Gadus
     macrocephalus). Names are compared case- and whitespace-insensitively, and
-    hits without a name are left out.
+    hits without a name are left out. A name whose WoRMS lookup failed has no
+    row in the name table: it is retried on the next run, not reported as not
+    found.
 
     Args:
-        mol_df: MOL DataFrame after apply_name_resolution (scientificName,
-            acceptedName, acceptedNameUsageID, matchedBy).
+        mol_df: MOL DataFrame (scientificName: NCBI names).
+        name_table: See build_name_table.
         tax_df: TAX list, used to tell whether the genus of a name not found in
             WoRMS was still expanded (so its sequence lost no candidates).
-        failed_names: Names whose WoRMS lookup errored. They are retried on the
-            next run, so they are not reported as not found.
 
     Returns:
         A NameResolutionSummary. renamed has one row per MOL name whose WoRMS
         accepted name differs; not_found one row per MOL name with no WoRMS
         record, sorted, with genusInTax True when its genus is in the TAX list.
     """
-    names = mol_df.loc[
-        mol_df["scientificName"].notna(),
-        ["scientificName", "acceptedName", "acceptedNameUsageID", "matchedBy"],
-    ]
-    names = names.assign(
-        _name=names["scientificName"].map(normalize_name),
-        _accepted=names["acceptedName"].map(normalize_name),
-    ).drop_duplicates("_name")
+    raw = mol_df["scientificName"].dropna()
+    table = name_table if name_table is not None else build_name_table(None)
+    table = table.drop_duplicates("name_key")
 
-    is_renamed = names["_name"] != names["_accepted"]
+    is_renamed = table["name_key"] != species_key(table["species"], None)
     renamed = (
-        names.loc[is_renamed, ["scientificName", "acceptedName", "matchedBy"]]
+        table.loc[is_renamed, ["name", "species", "matched_by"]]
+        .rename(
+            columns={
+                "name": "scientificName",
+                "species": "acceptedName",
+                "matched_by": "matchedBy",
+            }
+        )
         .sort_values("scientificName")
         .reset_index(drop=True)
     )
 
-    failed = set(failed_names or [])
-    is_not_found = names["acceptedNameUsageID"].isna() & ~names["scientificName"].isin(
-        failed
-    )
     tax_genera = (
-        set(tax_df["genus"].dropna().map(normalize_name))
+        set(name_keys(tax_df["genus"].dropna()))
         if tax_df is not None and "genus" in tax_df.columns
         else set()
     )
     not_found = (
-        names.loc[is_not_found, ["scientificName"]]
+        table.loc[table["aphia_id"].isna(), ["name"]]
+        .rename(columns={"name": "scientificName"})
         .assign(
             genusInTax=lambda d: (
-                d["scientificName"]
-                .str.split()
-                .str[0]
-                .map(normalize_name)
-                .isin(tax_genera)
+                d["scientificName"].map(_genus_of).map(normalize_name).isin(tax_genera)
             )
         )
         .sort_values("scientificName")
         .reset_index(drop=True)
     )
     return NameResolutionSummary(
-        n_names=len(names),
-        n_species=names["_accepted"].nunique(),
+        n_names=name_keys(raw).nunique(),
+        n_species=species_key(raw, name_table).nunique(),
         renamed=renamed,
         not_found=not_found,
     )
@@ -435,13 +398,14 @@ def genus_homonyms(worms_search_df: pd.DataFrame, tax_df: pd.DataFrame) -> pd.Da
     cache=FullCache(
         inherit_from=["mol_params", "worms_search_params"],
         local={"worms_resolve_names": "resolve_names"},
-        fingerprint_on=["worms_search_df"],
+        fingerprint_on=["worms_search_df", "name_table"],
     ),
 )
 @preserve_sequence_order("seq_id", "mol_df")
 def run_worms_merge(
     worms_search_df: pd.DataFrame,
     mol_df: pd.DataFrame,
+    name_table: pd.DataFrame | None,
     mol_params: dict | None = None,
     worms_search_params: dict | None = None,
     resolve_names: bool = True,
@@ -455,6 +419,8 @@ def run_worms_merge(
     Args:
         worms_search_df: WoRMS species DataFrame from run_worms_search().
         mol_df: MOL DataFrame from finalize_mol_results().
+        name_table: See build_name_table: the MOL names match on their species,
+            so synonyms (e.g. Gadus ogac) credit the accepted species.
         mol_params: Parameter dict from finalize_mol_results, used for caching only.
         worms_search_params: Parameter dict from run_worms_search, propagated into
             this step's cache key (caching only).
@@ -467,66 +433,25 @@ def run_worms_merge(
     if mol_params is None:
         mol_params = {}
 
-    # Match on the WoRMS-accepted MOL name (R3); fall back to the raw name when
-    # resolution did not run.
-    mol_df = mol_df.copy()
-    if "acceptedName" not in mol_df.columns:
-        mol_df["acceptedName"] = mol_df["scientificName"]
+    # 1. Top hit (scores) per seq_id and species of the MOL names.
+    mol_subset = best_hits(
+        mol_df, name_table, ["dna_sequence", "identity_percentage", "query_cover"]
+    ).rename(columns={"species_key": "_species"})
 
-    # 1a. Top hit (scores) per seq_id + accepted name.
-    mol_subset = top_hit_per_group(
-        mol_df[
-            [
-                "seq_id",
-                "dna_sequence",
-                "acceptedName",
-                "identity_percentage",
-                "query_cover",
-            ]
-        ],
-        keys=["seq_id", "acceptedName"],
-        sort=["identity_percentage", "query_cover"],
-    )
-
-    # 1b. NCBI synonyms: the raw NCBI names that differ from the accepted name
-    # (e.g. accepted Gadus macrocephalus also hit under the synonym Gadus ogac).
-    # Blank when NCBI already used the accepted name. Surfaces that a synonym was
-    # involved regardless of which raw name was the top hit.
-    syn = mol_df[
-        mol_df["scientificName"].map(normalize_name)
-        != mol_df["acceptedName"].map(normalize_name)
-    ]
-    if not syn.empty:
-        syn_names = (
-            syn.groupby(["seq_id", "acceptedName"], observed=False)["scientificName"]
-            .agg(lambda s: ", ".join(sorted(set(s))))
-            .reset_index()
-            .rename(columns={"scientificName": "verbatimIdentification"})
-        )
-        mol_subset = mol_subset.merge(
-            syn_names, on=["seq_id", "acceptedName"], how="left"
-        )
-    else:
-        mol_subset["verbatimIdentification"] = np.nan
-
-    # 2. Merge on the accepted genus (first token of the accepted name), case /
-    # whitespace insensitive. No column clashes (mol_subset carries no genus or
-    # scientificName), so no _mol suffixes are produced.
+    # 2. Merge on the genus of the species, case / whitespace insensitive. No
+    # column clashes (mol_subset carries no genus or scientificName), so no
+    # _mol suffixes are produced.
     worms_search_df = worms_search_df.assign(
-        _join_key=worms_search_df["genus"].map(normalize_name)
+        _join_key=name_keys(worms_search_df["genus"])
     )
-    mol_subset = mol_subset.assign(
-        _join_key=mol_subset["acceptedName"].str.split().str[0].map(normalize_name)
-    )
+    mol_subset = mol_subset.assign(_join_key=mol_subset["_species"].map(_genus_of))
     merged_df = worms_search_df.merge(
         mol_subset, on="_join_key", how="left", suffixes=("", "_mol")
     )
 
-    # 3. Define the Match (Vectorized): the WoRMS species equals the MOL hit's
-    # accepted name, so synonyms (e.g. Gadus ogac) credit the accepted species.
+    # 3. The WoRMS species is a MOL species of the sequence.
     merged_df["in_mol"] = (
-        merged_df["scientificName"].str.lower().str.strip()
-        == merged_df["acceptedName"].str.lower().str.strip()
+        species_key(merged_df["scientificName"], name_table) == merged_df["_species"]
     )
 
     # 4. Genus homonyms (run_worms_search expands each accepted genus of a
@@ -544,11 +469,9 @@ def run_worms_merge(
         )
     merged_df = merged_df.drop(columns="_join_key")
 
-    # 5. Protect MOL-only fields: scores and the verbatim name are meaningful
-    # only where a direct MOL hit matched (in_mol).
+    # 5. Scores are meaningful only where a direct MOL hit matched (in_mol).
     score_cols = ["identity_percentage", "query_cover"]
     merged_df.loc[~merged_df["in_mol"], score_cols] = np.nan
-    merged_df.loc[~merged_df["in_mol"], "verbatimIdentification"] = np.nan
 
     # 6. Deduplicate, Clean and Rename
     merged_df = (
@@ -557,7 +480,7 @@ def run_worms_merge(
             ascending=[True, False, False],
         )
         .drop_duplicates(subset=["seq_id", "scientificName"])
-        .drop(columns=["acceptedName"])
+        .drop(columns=["_species"])
     )
     rename_map = {
         "identity_percentage": "mol_top_identity_percentage",
@@ -578,24 +501,19 @@ def run_worms_merge(
 def mol_rejected_rows(
     tax_df: pd.DataFrame,
     ncbi_search_df: pd.DataFrame | None,
-    mol_df: pd.DataFrame | None = None,
+    name_table: pd.DataFrame | None,
 ) -> pd.DataFrame:
     """TAX rows of species that BLAST returned for that same sequence but MOL rejected.
 
     The test is per (seq_id, species) pair: a species can be a MOL hit for one
-    sequence and rejected for another. A BLAST hit is rejected when its
-    (seq_id, NCBI name) pair is not in mol_df. It matches a TAX row when its
-    NCBI name, or the WoRMS accepted name of that NCBI name, equals the TAX
-    species. Accepted names are known only for the names resolved for the MOL
-    list, so a synonym rejected for every sequence matches on its NCBI name
-    only. Rows that are MOL hits (in_mol) are never returned.
+    sequence and rejected for another. A TAX row that is not a MOL hit
+    (in_mol) but whose species BLAST returned for its sequence (see
+    found_by_blast) was rejected by the MOL filter.
 
     Args:
         tax_df: TAX list with 'seq_id', 'scientificName' and 'in_mol'.
         ncbi_search_df: Raw BLAST hits, before the MOL filter.
-        mol_df: MOL list (the hits that passed the filter), with
-            'acceptedName' when names were resolved. Without it, every BLAST
-            hit counts as rejected.
+        name_table: See build_name_table.
 
     Returns:
         The matching tax_df rows (original index kept), with the best identity
@@ -605,28 +523,11 @@ def mol_rejected_rows(
     if ncbi_search_df is None or ncbi_search_df.empty or tax_df.empty:
         return tax_df.iloc[:0].assign(**{c: pd.Series(dtype=float) for c in score_cols})
 
-    accepted, mol_pairs = {}, set()
-    if mol_df is not None and not mol_df.empty:
-        mol_names = mol_df["scientificName"].map(normalize_name)
-        mol_pairs = set(zip(mol_df["seq_id"], mol_names))
-        if "acceptedName" in mol_df.columns:
-            accepted = dict(zip(mol_names, mol_df["acceptedName"]))
-    hits = ncbi_search_df[
-        ["seq_id", "scientificName", "identity_percentage", "query_cover"]
-    ]
-    raw_key = hits["scientificName"].map(normalize_name)
-    passed = pd.Series(
-        [p in mol_pairs for p in zip(hits["seq_id"], raw_key)], index=hits.index
-    )
-    hits, raw_key = hits[~passed], raw_key[~passed]
-    acc_key = raw_key.map(accepted).map(normalize_name).fillna(raw_key)
-    seen = top_hit_per_group(
-        pd.concat([hits.assign(_key=raw_key), hits.assign(_key=acc_key)]),
-        keys=["seq_id", "_key"],
-        sort=["identity_percentage", "query_cover"],
-        columns=["seq_id", "_key", "identity_percentage", "query_cover"],
+    seen = best_hits(
+        ncbi_search_df, name_table, ["identity_percentage", "query_cover"]
     ).rename(
         columns={
+            "species_key": "_key",
             "identity_percentage": "mol_top_identity_percentage",
             "query_cover": "mol_top_query_cover",
         }
@@ -636,7 +537,7 @@ def mol_rejected_rows(
         columns=score_cols, errors="ignore"
     )
     rejected = (
-        expanded.assign(_key=expanded["scientificName"].map(normalize_name))
+        expanded.assign(_key=species_key(expanded["scientificName"], name_table))
         .reset_index()
         .merge(seen, on=["seq_id", "_key"], how="inner")
         .set_index("index")
@@ -651,23 +552,25 @@ def mol_rejected_rows(
     cache=FullCache(
         inherit_from=["worms_merge_params"],
         local={"tax_drop_mol_rejected": "drop_mol_rejected"},
-        fingerprint_on=["mol_df"],
+        fingerprint_on=["name_table"],
     ),
 )
 def finalize_tax_results(
     worms_merge_df: pd.DataFrame,
     worms_merge_params: dict | None = None,
-    ncbi_search_df: pd.DataFrame | None = None,
-    mol_df: pd.DataFrame | None = None,
+    *,
+    ncbi_search_df: pd.DataFrame | None,
+    name_table: pd.DataFrame | None,
     drop_mol_rejected: bool = True,
 ) -> pd.DataFrame:
     """Finalize the TAX list for export or downstream analysis.
 
     Args:
         worms_merge_df: Merged DataFrame from run_worms_merge().
-        worms_merge_params: Parameter dict from run_worms_merge, used for caching only.
+        worms_merge_params: Parameter dict from run_worms_merge, used for
+            caching only.
         ncbi_search_df: Raw BLAST hits, to find the species MOL rejected.
-        mol_df: MOL list with accepted names (see mol_rejected_rows).
+        name_table: See build_name_table.
         drop_mol_rejected: Remove the species that BLAST returned for a
             sequence but MOL rejected, for that sequence only.
 
@@ -679,7 +582,7 @@ def finalize_tax_results(
 
     tax_df = worms_merge_df.copy()
     if drop_mol_rejected:
-        rejected = mol_rejected_rows(tax_df, ncbi_search_df, mol_df)
+        rejected = mol_rejected_rows(tax_df, ncbi_search_df, name_table)
         if not rejected.empty:
             n_rejected = rejected["scientificName"].nunique()
             logger.info(
@@ -704,13 +607,18 @@ def finalize_tax_results(
 @preserve_sequence_order("seq_id", "tax_df")
 def build_tax_summary(
     tax_df: pd.DataFrame,
-    mol_df: pd.DataFrame | None = None,
+    mol_df: pd.DataFrame | None,
+    name_table: pd.DataFrame | None,
 ) -> pd.DataFrame:
     """Build a per-sequence summary of TAX (and optionally MOL) species counts.
+
+    MOL names count as their species (see species_of), so a synonym overlaps
+    with its TAX species.
 
     Args:
         tax_df: TAX results from finalize_tax_results().
         mol_df: Optional MOL results with 'seq_id' and 'scientificName' columns.
+        name_table: See build_name_table.
 
     Returns:
         DataFrame with one row per seq_id.
@@ -720,10 +628,11 @@ def build_tax_summary(
     summary_data: list[dict] = []
 
     # Pre-compute TAX species sets per seq_id
+    tax = tax_df.dropna(subset=["seq_id"])
     tax_grouped = (
-        tax_df.dropna(subset=["seq_id"])
-        .groupby("seq_id", observed=False)["scientificName"]
-        .agg(lambda s: set(s.unique()))
+        species_key(tax["scientificName"], name_table)
+        .groupby(tax["seq_id"], observed=False)
+        .agg(lambda s: set(s.dropna().unique()))
     )
 
     # If no MOL data, just count TAX species
@@ -737,15 +646,11 @@ def build_tax_summary(
             )
         return pd.DataFrame(summary_data)
 
-    # Count MOL species by their WoRMS-accepted name when resolution ran, so the
-    # overlap with the (accepted) TAX list reflects synonyms correctly.
-    mol_name_col = (
-        "acceptedName" if "acceptedName" in mol_df.columns else "scientificName"
-    )
+    mol = mol_df.dropna(subset=["seq_id"])
     mol_grouped = (
-        mol_df.dropna(subset=["seq_id"])
-        .groupby("seq_id", observed=False)[mol_name_col]
-        .agg(lambda s: set(s.unique()))
+        species_key(mol["scientificName"], name_table)
+        .groupby(mol["seq_id"], observed=False)
+        .agg(lambda s: set(s.dropna().unique()))
     )
 
     for seq_id, tax_species in sorted(tax_grouped.items(), key=lambda x: x[0]):
@@ -777,6 +682,8 @@ def empty_tax_results(mol_df: pd.DataFrame) -> pd.DataFrame:
     queried or cached.
     """
     worms_df, _ = run_worms_search([], db_path=None)
-    merge_df, _ = run_worms_merge(worms_df, mol_df, mol_params={}, db_path=None)
-    tax_df, _ = finalize_tax_results(merge_df, db_path=None)
+    merge_df, _ = run_worms_merge(worms_df, mol_df, None, mol_params={}, db_path=None)
+    tax_df, _ = finalize_tax_results(
+        merge_df, ncbi_search_df=None, name_table=None, db_path=None
+    )
     return tax_df

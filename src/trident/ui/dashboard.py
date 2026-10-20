@@ -232,6 +232,7 @@ def show_results_download():
             geo_df=st.session_state.geo_df,
             mol_df=st.session_state.mol_df,
             hypo_df=st.session_state.get("hypo_df"),
+            name_table=st.session_state.get("name_table"),
         )
 
         if results_df.empty:

@@ -10,7 +10,7 @@ which does WoRMS lookups for higher-level taxa).
     resolve_sequences(results_df) → DataFrame (species count and shared rank per MOTU/ASV)
     add_check_hit(df) → DataFrame
     add_low_identity_warning(df, threshold) → DataFrame
-    build_species_flow(seq_id, ...) → list of (source, target, names) links
+    build_species_flow(seq_id, ..., name_table) → list of (source, target, names) links
     species_flow_table(seq_id, links, ...) → DataFrame (one row per name)
     plot_species_flow(links) → Plotly Sankey figure
 """
@@ -29,6 +29,13 @@ from trident.core.utils import (
     find_exclusion_pipeline_step,
     normalize_name,
     preserve_sequence_order,
+)
+from trident.pipelines.names import (
+    best_hits,
+    name_keys,
+    ncbi_names,
+    species_key,
+    species_of,
 )
 
 
@@ -56,6 +63,10 @@ RESULT_COLS = [
 # HYPO only, shown in the app but not exported: the MOL species a HYPO
 # species' CO1 proxy matched, and the sequence's NCBI identity to it.
 VIA_COLS = ["via_mol_species", "via_mol_identity"]
+
+# MOL+GEO only, for the GBIF export: the NCBI names of the species' MOL hits,
+# joined by ", " as the export writes them.
+VERBATIM_COLS = ["verbatimIdentification"]
 
 # Column order for CSV/file export
 EXPORT_COLS = [
@@ -119,65 +130,51 @@ def _select_columns(df, extra=None):
     return df[[c for c in target if c in df.columns]].copy()
 
 
-def _build_mol_geo_part(geo_df, mol_df):
-    """Build MOL+GEO rows: species confirmed via NCBI + geographically validated."""
+def _build_mol_geo_part(geo_df, mol_df, name_table):
+    """Build MOL+GEO rows: species confirmed via NCBI + geographically validated.
+
+    Each row gets the best MOL hit of its species for its sequence and the
+    NCBI names of its MOL hits, matched on their species (see species_of).
+    """
     mol_geo = geo_df[geo_df["in_mol"].astype(bool)].copy()
     mol_geo["validation_step"] = "MOL+GEO"
+    mol_geo["verbatimIdentification"] = ncbi_names(
+        mol_geo, mol_df, name_table
+    ).str.join(", ")
 
-    # GEO carries the WoRMS-accepted name, so match the best MOL hit on the
-    # accepted name (R3) to attach NCBI scores to synonyms; fall back to raw.
-    mol_df = mol_df.copy()
-    match_name = (
-        "acceptedName" if "acceptedName" in mol_df.columns else "scientificName"
-    )
-
-    best_mol_cols = ["seq_id", match_name, "identity_percentage", "query_cover"]
+    hit_cols = ["identity_percentage", "query_cover"]
     if "hit_url" in mol_df.columns:
-        best_mol_cols.append("hit_url")
-    best_mol = (
-        mol_df.sort_values("identity_percentage", ascending=False)
-        .drop_duplicates(subset=["seq_id", match_name])[best_mol_cols]
-        .rename(
-            columns={
-                match_name: "scientificName",
-                "identity_percentage": "ncbi_top_identity_percentage",
-                "query_cover": "ncbi_top_query_cover",
-                "hit_url": "ncbi_top_hit_url",
-            }
-        )
+        hit_cols.append("hit_url")
+    best_mol = best_hits(mol_df, name_table, hit_cols).rename(
+        columns={
+            "identity_percentage": "ncbi_top_identity_percentage",
+            "query_cover": "ncbi_top_query_cover",
+            "hit_url": "ncbi_top_hit_url",
+        }
     )
-    return mol_geo.merge(best_mol, on=["seq_id", "scientificName"], how="left")
+    return (
+        mol_geo.assign(species_key=species_key(mol_geo["scientificName"], name_table))
+        .merge(best_mol, on=["seq_id", "species_key"], how="left")
+        .drop(columns="species_key")
+    )
 
 
-def _build_hypo_part(hypo_df, geo_df, mol_df):
+def _build_hypo_part(hypo_df, geo_df, mol_df, name_table):
     """Build HYPO rows: hypothetical species supported by a BOLD/NCBI proxy."""
     hypo = hypo_df.copy()
     hypo["validation_step"] = "HYPO"
 
     # The sequence's own evidence for a HYPO species: how well it matched the
-    # MOL species the proxy links it to (its marker is not in GenBank).
-    # The proxy hit may carry the NCBI name or the WoRMS accepted one.
+    # MOL species the proxy links it to (its marker is not in GenBank). The
+    # proxy hit and the MOL hits may name that species differently.
     hypo["via_mol_species"] = hypo.get("scientificName_hit")
-    identity = pd.to_numeric(mol_df["identity_percentage"], errors="coerce")
-    names = [mol_df["scientificName"]]
-    if "acceptedName" in mol_df.columns:
-        names.append(mol_df["acceptedName"])
-    via_identity = (
-        pd.DataFrame(
-            {
-                "seq_id": pd.concat([mol_df["seq_id"]] * len(names)),
-                "_via": pd.concat(names).map(normalize_name),
-                "via_mol_identity": pd.concat([identity] * len(names)),
-            }
-        )
-        .groupby(["seq_id", "_via"])["via_mol_identity"]
-        .max()
+    via_identity = best_hits(mol_df, name_table, ["identity_percentage"]).rename(
+        columns={"identity_percentage": "via_mol_identity"}
     )
-    hypo = hypo.merge(
-        via_identity,
-        left_on=["seq_id", hypo["via_mol_species"].map(normalize_name).rename("_via")],
-        right_index=True,
-        how="left",
+    hypo = (
+        hypo.assign(species_key=species_key(hypo["via_mol_species"], name_table))
+        .merge(via_identity, on=["seq_id", "species_key"], how="left")
+        .drop(columns="species_key")
     )
 
     hypo = hypo.rename(
@@ -202,7 +199,7 @@ def _build_hypo_part(hypo_df, geo_df, mol_df):
 
 
 @preserve_sequence_order("seq_id", "sequences_df")
-def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None):
+def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None, *, name_table):
     """Build combined results DataFrame from MOL+GEO and HYPO species.
 
     Progressive: works with just geo_df + mol_df, adds HYPO rows when available.
@@ -213,17 +210,22 @@ def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None):
         geo_df: GEO results (must have 'in_mol' column).
         mol_df: MOL results (NCBI BLAST hits).
         hypo_df: HYPO results (optional, proxy-validated species).
+        name_table: See build_name_table, to match MOL names on their species.
     """
-    parts = [_select_columns(_build_mol_geo_part(geo_df, mol_df))]
+    parts = [
+        _select_columns(
+            _build_mol_geo_part(geo_df, mol_df, name_table), extra=VERBATIM_COLS
+        )
+    ]
 
     if hypo_df is not None and not hypo_df.empty:
         hypo_part = _select_columns(
-            _build_hypo_part(hypo_df, geo_df, mol_df), extra=VIA_COLS
+            _build_hypo_part(hypo_df, geo_df, mol_df, name_table), extra=VIA_COLS
         )
         parts.append(hypo_part)
 
     results = pd.concat(parts, ignore_index=True)
-    ensure_columns(results, EXPORT_COLS + VIA_COLS)
+    ensure_columns(results, EXPORT_COLS + VIA_COLS + VERBATIM_COLS)
 
     # Cast numeric columns that may be strings from DB cache
     for col in (
@@ -547,6 +549,16 @@ def build_gbif_export_df(results_df: pd.DataFrame) -> pd.DataFrame:
         # Resolve common taxonomy
         taxonomy = _find_common_taxonomy(species_rows)
         row.update(taxonomy)
+        # The NCBI names its MOL+GEO species were identified under.
+        if "verbatimIdentification" in species_rows.columns:
+            names = sorted(
+                {
+                    name
+                    for joined in species_rows["verbatimIdentification"].dropna()
+                    for name in joined.split(", ")
+                }
+            )
+            row["verbatimIdentification"] = ", ".join(names) if names else pd.NA
         rows.append(row)
 
     df = pd.DataFrame(rows)
@@ -664,6 +676,17 @@ def _added(rows):
     return ~_in_mol(rows)
 
 
+def _keys(names, name_table):
+    """{name: species key} of a set of names."""
+    names = sorted(names)
+    return dict(zip(names, species_key(pd.Series(names, dtype=object), name_table)))
+
+
+def _without(names, keys, name_table):
+    """The names whose species is not in keys."""
+    return {name for name, key in _keys(names, name_table).items() if key not in keys}
+
+
 def build_species_flow(
     seq_id,
     ncbi_search_df,
@@ -673,15 +696,20 @@ def build_species_flow(
     extra_df=None,
     hypo_df=None,
     excluded=(),
+    *,
+    name_table,
 ):
     """One sequence's candidates through the steps, for the steps run so far.
 
     NCBI hits and the MOL list carry NCBI names; from TAX on, names are WoRMS
     accepted names, so a MOL name merged as a synonym counts once at TAX.
+    NCBI names are compared with the others through their species (see
+    species_of).
 
     Args:
         excluded: "{seq_id}||{scientificName}" keys of the candidates excluded
             by hand.
+        name_table: See build_name_table.
 
     Returns:
         List of (source, target, names) links between FLOW_NODES, each with
@@ -689,20 +717,26 @@ def build_species_flow(
     """
     hits = _names(ncbi_search_df, seq_id)
     mol = _names(mol_df, seq_id)
-    accepted = set()
-    if mol_df is not None and "acceptedName" in mol_df.columns:
-        accepted = _names(mol_df.assign(scientificName=mol_df["acceptedName"]), seq_id)
-    # A hit named after a species that MOL kept under a synonym is not a loss.
-    links = [("ncbi", "filter_out", hits - mol - accepted), ("ncbi", "mol", mol)]
+    key_of = _keys(hits | mol, name_table)
+    hit_keys = {key_of[name] for name in hits}
+    mol_keys = {key_of[name] for name in mol}
+    # A hit of a species that MOL kept, under any of its names, is not a loss.
+    links = [
+        ("ncbi", "filter_out", {name for name in hits if key_of[name] not in mol_keys}),
+        ("ncbi", "mol", mol),
+    ]
     if tax_df is None:
         return _nonempty(links)
 
     tax_mol = _names(tax_df, seq_id, _in_mol)
     # A congener BLAST returned and the MOL filter rejected, which TAX keeps
     # on request, stays a filter loss: EXTRA seeks no proxy for it.
-    tax_added = _names(tax_df, seq_id, _added) - hits
+    tax_added = _without(_names(tax_df, seq_id, _added), hit_keys, name_table)
+    # MOL species (by their WoRMS name) that TAX does not list.
+    mol_species = set(species_of(pd.Series(sorted(mol), dtype=object), name_table))
+    tax_mol_keys = set(_keys(tax_mol, name_table).values())
     links += [
-        ("mol", "tax_out", (accepted or mol) - tax_mol),
+        ("mol", "tax_out", _without(mol_species, tax_mol_keys, name_table)),
         ("mol", "tax_mol", tax_mol),
     ]
     if geo_df is None:
@@ -713,7 +747,7 @@ def build_species_flow(
         return _nonempty(links)
 
     mol_geo = _names(geo_df, seq_id, _in_mol)
-    added_geo = _names(geo_df, seq_id, _added) - hits
+    added_geo = _without(_names(geo_df, seq_id, _added), hit_keys, name_table)
     links += [
         ("tax_mol", "geo_out", tax_mol - mol_geo),
         ("tax_mol", "mol_geo", mol_geo),
@@ -770,26 +804,24 @@ def _is_end(node, links):
     return not any(src == node for src, _, _ in links)
 
 
-def species_flow_table(seq_id, links, ncbi_search_df, mol_df):
+def species_flow_table(seq_id, links, ncbi_search_df, name_table):
     """One row per name of build_species_flow's links: where it came from and
     where it ended, with its best NCBI identity for a name the sequence's hits
-    carry."""
-    identity = {}
-    for df, name_col in (
-        (mol_df, "acceptedName"),
-        (ncbi_search_df, "scientificName"),
-    ):
-        if df is None or name_col not in df.columns:
-            continue
-        rows = df[df["seq_id"] == seq_id]
+    carry: an NCBI name's own hits, or a species' hits under any of its names."""
+    by_name, by_species = {}, {}
+    if ncbi_search_df is not None:
+        rows = ncbi_search_df[ncbi_search_df["seq_id"] == seq_id]
         # Cached tables can return numbers as strings.
-        best_per_name = (
-            pd.to_numeric(rows["identity_percentage"], errors="coerce")
-            .groupby(rows[name_col])
-            .max()
-        )
-        for name, best in best_per_name.dropna().items():
-            identity[name] = max(best, identity.get(name, best))
+        identity = pd.to_numeric(rows["identity_percentage"], errors="coerce")
+        names = rows["scientificName"]
+        by_name = identity.groupby(name_keys(names)).max().to_dict()
+        by_species = identity.groupby(species_key(names, name_table)).max().to_dict()
+
+    def best_identity(src, name):
+        if src in FLOW_ADDED:
+            return None
+        best = (by_name if src == "ncbi" else by_species).get(normalize_name(name))
+        return None if pd.isna(best) else best
 
     order = list(FLOW_NODES)
     rows = [
@@ -797,7 +829,7 @@ def species_flow_table(seq_id, links, ncbi_search_df, mol_df):
             "species": name,
             "origin": "Added by TAX" if src in FLOW_ADDED else "NCBI hit",
             "outcome": FLOW_NODES[dst][1],
-            "identity": None if src in FLOW_ADDED else identity.get(name),
+            "identity": best_identity(src, name),
             "_order": order.index(dst),
         }
         for src, dst, names in links

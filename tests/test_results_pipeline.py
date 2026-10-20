@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from trident.pipelines import results_pipeline
+from trident.pipelines.names import build_name_table
 from trident.pipelines.results_pipeline import (
     EXPORT_COLS,
     build_results_df,
@@ -13,6 +14,20 @@ from trident.pipelines.results_pipeline import (
     build_species_flow,
     species_flow_table,
 )
+
+
+def _names(accepted: dict) -> pd.DataFrame:
+    """Name table of {NCBI name: WoRMS accepted name}."""
+    return build_name_table(
+        pd.DataFrame(
+            {
+                "scientificName": list(accepted),
+                "acceptedName": list(accepted.values()),
+                "acceptedNameUsageID": range(len(accepted)),
+                "matchedBy": "name",
+            }
+        )
+    )
 
 
 def _curated_df():
@@ -104,20 +119,22 @@ def hypo_df():
 
 class TestBuildResultsDf:
     def test_mol_geo_only(self, sequences_df, geo_df, mol_df):
-        result = build_results_df(sequences_df, geo_df, mol_df)
+        result = build_results_df(sequences_df, geo_df, mol_df, name_table=None)
         assert "validation_step" in result.columns
         mol_geo = result[result["validation_step"] == "MOL+GEO"]
         assert len(mol_geo) == 3
 
     def test_with_hypo(self, sequences_df, geo_df, mol_df, hypo_df):
-        result = build_results_df(sequences_df, geo_df, mol_df, hypo_df=hypo_df)
+        result = build_results_df(
+            sequences_df, geo_df, mol_df, hypo_df=hypo_df, name_table=None
+        )
         hypo = result[result["validation_step"] == "HYPO"]
         assert len(hypo) == 1
         assert hypo.iloc[0]["scientificName"] == "SpecD"
 
     def test_empty_sequences_get_row(self, sequences_df, geo_df, mol_df):
         """s3 has no species → gets an empty row with seq_id and dna_sequence."""
-        result = build_results_df(sequences_df, geo_df, mol_df)
+        result = build_results_df(sequences_df, geo_df, mol_df, name_table=None)
         s3_rows = result[result["seq_id"] == "s3"]
         assert len(s3_rows) == 1
         assert pd.isna(s3_rows.iloc[0]["scientificName"])
@@ -128,31 +145,37 @@ class TestBuildResultsDf:
         sequences_df = pd.DataFrame(
             {"seq_id": ["s2", "s1"], "dna_sequence": ["G", "A"]}
         )
-        result = build_results_df(sequences_df, geo_df, mol_df)
+        result = build_results_df(sequences_df, geo_df, mol_df, name_table=None)
         seq_order = result["seq_id"].unique().tolist()
         assert seq_order == ["s2", "s1"]
 
     def test_all_export_cols_present(self, sequences_df, geo_df, mol_df, hypo_df):
         """All EXPORT_COLS should be present (possibly as NA)."""
-        result = build_results_df(sequences_df, geo_df, mol_df, hypo_df=hypo_df)
+        result = build_results_df(
+            sequences_df, geo_df, mol_df, hypo_df=hypo_df, name_table=None
+        )
         for col in EXPORT_COLS:
             assert col in result.columns, f"Missing column: {col}"
 
     def test_hypo_renames_columns(self, sequences_df, geo_df, mol_df, hypo_df):
         """HYPO columns renamed: identity_percentage → proxy_identity_percentage."""
-        result = build_results_df(sequences_df, geo_df, mol_df, hypo_df=hypo_df)
+        result = build_results_df(
+            sequences_df, geo_df, mol_df, hypo_df=hypo_df, name_table=None
+        )
         hypo = result[result["validation_step"] == "HYPO"]
         assert "proxy_identity_percentage" in result.columns
         assert hypo.iloc[0]["proxy_identity_percentage"] == 88.0
 
     def test_empty_hypo_df(self, sequences_df, geo_df, mol_df):
         """Empty hypo_df is treated like None."""
-        result = build_results_df(sequences_df, geo_df, mol_df, hypo_df=pd.DataFrame())
+        result = build_results_df(
+            sequences_df, geo_df, mol_df, hypo_df=pd.DataFrame(), name_table=None
+        )
         assert (result["validation_step"].dropna() == "MOL+GEO").all()
 
     def test_ncbi_identity_from_mol(self, sequences_df, geo_df, mol_df):
         """MOL+GEO rows get best identity from mol_df."""
-        result = build_results_df(sequences_df, geo_df, mol_df)
+        result = build_results_df(sequences_df, geo_df, mol_df, name_table=None)
         s1_specA = result[
             (result["seq_id"] == "s1") & (result["scientificName"] == "SpecA")
         ]
@@ -162,7 +185,6 @@ class TestBuildResultsDf:
         """A HYPO species gets the MOL species its proxy matched and the
         sequence's MOL identity to it, found under the NCBI name or the WoRMS
         accepted name of that species."""
-        mol_df = mol_df.assign(acceptedName=["SpecA", "SpecB", "SpecC accepted"])
         hypo_df = pd.DataFrame(
             {
                 "seq_id": ["s1", "s2"],
@@ -172,10 +194,48 @@ class TestBuildResultsDf:
                 "query_cover": [90, 90],
             }
         )
-        result = build_results_df(sequences_df, geo_df, mol_df, hypo_df=hypo_df)
+        result = build_results_df(
+            sequences_df,
+            geo_df,
+            mol_df,
+            hypo_df=hypo_df,
+            name_table=_names({"SpecC": "SpecC accepted"}),
+        )
         hypo = result[result["validation_step"] == "HYPO"]
         assert hypo["via_mol_species"].tolist() == ["SpecB", "SpecC accepted"]
         assert hypo["via_mol_identity"].tolist() == [97.0, 95.0]
+
+
+def test_species_mol_found_under_a_synonym_keeps_its_ncbi_hit(sequences_df):
+    """A MOL+GEO species that NCBI named by a synonym gets its best NCBI hit,
+    and the GBIF export gives the NCBI names as verbatimIdentification."""
+    mol_df = pd.DataFrame(
+        {
+            "seq_id": ["s1", "s1"],
+            "scientificName": ["Gadus ogac", "Gadus macrocephalus"],
+            "identity_percentage": [99.0, 97.0],
+            "query_cover": [100, 100],
+            "hit_url": ["url1", "url2"],
+        }
+    )
+    geo_df = pd.DataFrame(
+        {
+            "seq_id": ["s1"],
+            "scientificName": ["Gadus macrocephalus"],
+            "in_mol": [True],
+        }
+    )
+    names = _names({"Gadus ogac": "Gadus macrocephalus"})
+    results = build_results_df(sequences_df, geo_df, mol_df, name_table=names)
+    row = results[results["seq_id"] == "s1"].iloc[0]
+    assert (row["ncbi_top_identity_percentage"], row["ncbi_top_hit_url"]) == (
+        99.0,
+        "url1",
+    )
+    export = build_gbif_export_df(results).set_index("seq_id")
+    assert export.loc["s1", "verbatimIdentification"] == (
+        "Gadus macrocephalus, Gadus ogac"
+    )
 
 
 # --- find_sequence_exclusion_step ---
@@ -221,7 +281,9 @@ def test_any_hypo_check_hit_is_flagged(sequences_df, geo_df, mol_df):
             "ncbi_top_query_cover": [60.0, None, 100.0],
         }
     )
-    result = build_results_df(sequences_df, geo_df, mol_df, hypo_df=hypo_df)
+    result = build_results_df(
+        sequences_df, geo_df, mol_df, hypo_df=hypo_df, name_table=None
+    )
     flagged = result.loc[result["check_hit"], "scientificName"].tolist()
     assert sorted(flagged) == ["SpecX", "SpecZ"]
 
@@ -254,7 +316,7 @@ def test_empty_mol_list_flows_to_results(monkeypatch):
     for df in (tax_df, geo_df, extra_df, hypo_df):
         assert df.empty
         assert {"seq_id", "scientificName"} <= set(df.columns)
-    results = build_results_df(sequences_df, geo_df, mol_df, hypo_df)
+    results = build_results_df(sequences_df, geo_df, mol_df, hypo_df, name_table=None)
     assert sorted(results["seq_id"]) == ["s1", "s2"]
     lost = find_sequence_exclusion_step(
         ["s1", "s2"], ncbi_search_df, mol_df, tax_df, geo_df
@@ -417,10 +479,10 @@ def test_species_flow_ends_each_candidate_once():
         {
             "seq_id": ["s1"] * 3,
             "scientificName": ["Gadus ogac", "Gadus morhua", "Salmo salar"],
-            "acceptedName": ["Gadus macrocephalus", "Gadus morhua", "Salmo salar"],
             "identity_percentage": [99.0, 98.0, 97.0],
         }
     )
+    names = _names({"Gadus ogac": "Gadus macrocephalus"})
     # TAX adds Gadus rejected back, as when it keeps MOL-rejected congeners.
     tax_df = pd.DataFrame(
         {
@@ -451,8 +513,9 @@ def test_species_flow_ends_each_candidate_once():
         extra_df=extra_df,
         hypo_df=hypo_df,
         excluded=["s1||Gadus macrocephalus", "s2||Gadus morhua"],
+        name_table=names,
     )
-    table = species_flow_table("s1", links, ncbi_search_df, mol_df)
+    table = species_flow_table("s1", links, ncbi_search_df, names)
 
     assert dict(zip(table["species"], table["outcome"])) == {
         "Bad fish": "Removed by the MOL filter",

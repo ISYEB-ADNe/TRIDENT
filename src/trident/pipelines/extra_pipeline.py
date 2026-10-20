@@ -29,39 +29,39 @@ from trident.core.database import save_to_db, PartialCache, FullCache, CustomCac
 from trident.core.sequence_selection import select_longest_sequences
 
 from trident.clients.bold import get_records_from_species_list
+from trident.pipelines.names import found_by_blast
 
 
 ### DATA PREPARATION ###
 
 
-def needs_proxy(geo_df: pd.DataFrame, ncbi_search_df=None) -> pd.Series:
+def needs_proxy(
+    geo_df: pd.DataFrame,
+    ncbi_search_df: pd.DataFrame | None,
+    name_table: pd.DataFrame | None,
+) -> pd.Series:
     """Which GEO rows need a BOLD proxy: True for each (seq_id, species) pair
     NCBI BLAST did not find directly.
 
-    A pair is covered when MOL kept it (``in_mol``, which matches synonyms on
-    the accepted name) or when it is in ``ncbi_search_df`` (a raw hit, even
-    one the MOL filter rejected). The BOLD query, the merge of its records and
-    the EXTRA summaries all use this rule, so a species queried for one
-    sequence brings no proxy to a sequence where NCBI found it.
+    A pair is covered when MOL kept it (``in_mol``) or when BLAST returned the
+    species for that sequence under any of its names, even in a hit the MOL
+    filter rejected (see found_by_blast). The BOLD query, the merge of its
+    records and the EXTRA summaries all use this rule, so a species queried
+    for one sequence brings no proxy to a sequence where NCBI found it.
 
     Returns:
         Boolean Series aligned on geo_df's index.
     """
-    needed = pd.Series(True, index=geo_df.index)
+    needed = ~found_by_blast(geo_df, ncbi_search_df, name_table)
     if "in_mol" in geo_df.columns:
         needed &= ~geo_df["in_mol"].astype(bool)
-    if ncbi_search_df is not None and not ncbi_search_df.empty:
-        keys = ["seq_id", "scientificName"]
-        found = pd.MultiIndex.from_frame(geo_df[keys]).isin(
-            pd.MultiIndex.from_frame(ncbi_search_df[keys].drop_duplicates())
-        )
-        needed &= ~found
     return needed
 
 
 def prepare_bold_input(
     geo_df: pd.DataFrame,
-    ncbi_search_df: pd.DataFrame | None = None,
+    ncbi_search_df: pd.DataFrame | None,
+    name_table: pd.DataFrame | None,
 ) -> tuple[list[str], int]:
     """Extract species needing BOLD querying.
 
@@ -73,14 +73,15 @@ def prepare_bold_input(
         geo_df: GEO DataFrame with 'seq_id', 'scientificName', and
             'in_mol' columns.
         ncbi_search_df: Optional NCBI BLAST search results DataFrame. When
-            provided, (seq_id, scientificName) pairs found here are
-            excluded from BOLD querying.
+            provided, (seq_id, species) pairs found here are excluded from
+            BOLD querying.
+        name_table: See build_name_table.
 
     Returns:
         Tuple of (species_list, n_excluded): unique species names to query
         in BOLD, and how many were excluded.
     """
-    candidates = geo_df[needs_proxy(geo_df, ncbi_search_df)]
+    candidates = geo_df[needs_proxy(geo_df, ncbi_search_df, name_table)]
     all_species = geo_df["scientificName"].unique()
     species_list = candidates["scientificName"].unique().tolist()
     n_excluded = len(all_species) - len(species_list)
@@ -264,7 +265,8 @@ def run_bold_filter(
 def run_bold_merge(
     bold_filter_df: pd.DataFrame,
     geo_df: pd.DataFrame,
-    ncbi_search_df: pd.DataFrame | None = None,
+    ncbi_search_df: pd.DataFrame | None,
+    name_table: pd.DataFrame | None,
     bold_filter_params: dict | None = None,
     geo_params: dict | None = None,
 ) -> pd.DataFrame:
@@ -277,6 +279,7 @@ def run_bold_merge(
             'dna_sequence', and taxonomy columns.
         ncbi_search_df: NCBI BLAST search results, for the pairs that need a
             proxy (see needs_proxy); the in_mol flag is used without it.
+        name_table: See build_name_table.
         bold_filter_params: Parameters from run_bold_filter (for caching).
         geo_params: Parameters from finalize_geo_results (for caching).
 
@@ -312,7 +315,7 @@ def run_bold_merge(
     if missing:
         raise KeyError(f"Missing columns in geo_df: {missing}")
 
-    geo_df = geo_df[needs_proxy(geo_df, ncbi_search_df)]
+    geo_df = geo_df[needs_proxy(geo_df, ncbi_search_df, name_table)]
 
     # Merge GEO (left) with filtered BOLD on a normalized name key (case /
     # whitespace insensitive) so spelling differences do not drop species.
@@ -405,7 +408,8 @@ def finalize_extra_results(
 def build_extra_summary(
     extra_df: pd.DataFrame,
     geo_df: pd.DataFrame,
-    ncbi_search_df: pd.DataFrame | None = None,
+    ncbi_search_df: pd.DataFrame | None,
+    name_table: pd.DataFrame | None,
 ) -> pd.DataFrame:
     """Build per-(seq_id, species) table showing BOLD record counts.
 
@@ -417,6 +421,7 @@ def build_extra_summary(
         extra_df: Finalized EXTRA DataFrame (from finalize_extra_results).
         geo_df: GEO DataFrame, for the pairs that needed a proxy.
         ncbi_search_df: NCBI BLAST search results (see needs_proxy).
+        name_table: See build_name_table.
 
     Returns:
         DataFrame with columns: seq_id, scientificName, total_records.
@@ -429,7 +434,7 @@ def build_extra_summary(
     )
 
     # Full skeleton of queried (seq_id, species) pairs
-    queried_df = geo_df[needs_proxy(geo_df, ncbi_search_df)]
+    queried_df = geo_df[needs_proxy(geo_df, ncbi_search_df, name_table)]
 
     all_pairs = queried_df[["seq_id", "scientificName"]].drop_duplicates()
 
@@ -477,7 +482,7 @@ def empty_extra_results(geo_df: pd.DataFrame) -> pd.DataFrame:
     # No species is sent to BOLD, so none of the GEO species is merged; the
     # empty GEO frame only brings its columns.
     merge_df, _ = run_bold_merge(
-        filter_df, geo_df.iloc[:0], geo_params={}, db_path=None
+        filter_df, geo_df.iloc[:0], None, None, geo_params={}, db_path=None
     )
     extra_df, _ = finalize_extra_results(merge_df, db_path=None)
     return extra_df

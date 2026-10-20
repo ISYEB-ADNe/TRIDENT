@@ -282,7 +282,11 @@ def hypo_search_workflow():
         st.divider()
 
         extra_df = st.session_state.extra_df
-        queries_df = pipe.hypo_queries(st.session_state.tax_df)
+        queries_df = pipe.hypo_queries(
+            st.session_state.tax_df,
+            st.session_state.mol_df,
+            st.session_state.name_table,
+        )
         n_searches, n_seqs = pipe.count_hypo_searches(extra_df, queries_df)
         n_skipped = extra_df["seq_id"].nunique() - n_seqs
         ready = (

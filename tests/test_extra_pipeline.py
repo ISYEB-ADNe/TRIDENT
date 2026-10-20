@@ -3,12 +3,13 @@
 prepare_bold_input decides which species still need a BOLD proxy: a species is
 only excluded when EVERY one of its (seq_id, species) pairs was already found
 by NCBI, either kept by MOL (in_mol, which also matches synonyms) or among the
-raw BLAST hits. run_bold_merge then attaches the BOLD proxies to the other
-pairs only.
+raw BLAST hits, under any of the species' names. run_bold_merge then attaches
+the BOLD proxies to the other pairs only.
 """
 
 import pandas as pd
 
+from trident.pipelines.names import build_name_table
 from trident.pipelines.extra_pipeline import (
     build_extra_summary,
     prepare_bold_input,
@@ -17,18 +18,32 @@ from trident.pipelines.extra_pipeline import (
 
 
 def test_excludes_pairs_already_covered_by_ncbi():
+    # BLAST returned D for t2 under its synonym D old, which the MOL filter
+    # rejected (the name table knows it from another sequence's MOL list).
     geo_df = pd.DataFrame(
         {
-            "seq_id": ["t1", "t1", "t2"],
-            "scientificName": ["A", "B", "C"],
-            "in_mol": [True, False, False],
+            "seq_id": ["t1", "t1", "t2", "t2"],
+            "scientificName": ["A", "B", "C", "D"],
+            "in_mol": [True, False, False, False],
         }
     )
-    ncbi_search_df = pd.DataFrame({"seq_id": ["t1"], "scientificName": ["A"]})
+    ncbi_search_df = pd.DataFrame(
+        {"seq_id": ["t1", "t2"], "scientificName": ["A", "D old"]}
+    )
+    name_table = build_name_table(
+        pd.DataFrame(
+            {
+                "scientificName": ["D old"],
+                "acceptedName": ["D"],
+                "acceptedNameUsageID": [1],
+                "matchedBy": ["name"],
+            }
+        )
+    )
 
-    species, n_excluded = prepare_bold_input(geo_df, ncbi_search_df)
-    assert set(species) == {"B", "C"}  # A covered by NCBI -> dropped
-    assert n_excluded == 1
+    species, n_excluded = prepare_bold_input(geo_df, ncbi_search_df, name_table)
+    assert set(species) == {"B", "C"}  # A and D covered by NCBI -> dropped
+    assert n_excluded == 2
 
 
 def test_species_kept_when_uncovered_for_another_sequence():
@@ -42,7 +57,7 @@ def test_species_kept_when_uncovered_for_another_sequence():
     )
     ncbi_search_df = pd.DataFrame({"seq_id": ["t1"], "scientificName": ["A"]})
 
-    species, n_excluded = prepare_bold_input(geo_df, ncbi_search_df)
+    species, n_excluded = prepare_bold_input(geo_df, ncbi_search_df, None)
     assert species == ["A"]
     assert n_excluded == 0
 
@@ -55,7 +70,7 @@ def test_fallback_to_in_mol_without_ncbi_df():
             "in_mol": [True, False],
         }
     )
-    species, n_excluded = prepare_bold_input(geo_df, ncbi_search_df=None)
+    species, n_excluded = prepare_bold_input(geo_df, None, None)
     assert species == ["B"]  # in_mol species A excluded
     assert n_excluded == 1
 
@@ -97,9 +112,9 @@ def test_proxy_only_where_ncbi_did_not_find_the_species():
         {"seq_id": ["t1", "t3"], "scientificName": ["A syn", "A"]}
     )
     merged, _ = run_bold_merge(
-        bold_filter_df, geo_df, ncbi_search_df=ncbi_search_df, db_path=None
+        bold_filter_df, geo_df, ncbi_search_df, None, db_path=None
     )
     assert merged["seq_id"].tolist() == ["t2"]
     assert merged["seq_id_bold"].tolist() == ["BOLD1"]
-    summary = build_extra_summary(merged, geo_df, ncbi_search_df=ncbi_search_df)
+    summary = build_extra_summary(merged, geo_df, ncbi_search_df, None)
     assert summary["seq_id"].tolist() == ["t2"]

@@ -55,12 +55,13 @@ from trident.clients.ncbi import (
     process_blast_results,
     submit_blast_batch,
 )
+from trident.pipelines.names import ncbi_names
 
 
 ### DATA PREPARATION ###
 
 
-def hypo_queries(tax_df) -> pd.DataFrame:
+def hypo_queries(tax_df, mol_df, name_table) -> pd.DataFrame:
     """Entrez organism query of each seq_id: the species of its MOL list.
 
     A hypothetical species is compared with the species that passed the MOL
@@ -68,9 +69,14 @@ def hypo_queries(tax_df) -> pd.DataFrame:
     kept in the TAX list (in_mol). That leaves out what WoRMS does not list
     there (terrestrial contaminants with "Marine only", "cf." and "sp." hits,
     "unidentified"). Species go by name, the WoRMS accepted one and the NCBI
-    synonyms it was hit under (verbatimIdentification): [orgn] matches a name
-    with its subspecies but not hybrid records (they hold the other parent's
-    mitogenome).
+    names the sequence's MOL hits gave them (see species_of): [orgn] matches a
+    name with its subspecies but not hybrid records (they hold the other
+    parent's mitogenome).
+
+    Args:
+        tax_df: TAX list with seq_id, scientificName and in_mol.
+        mol_df: MOL list (NCBI names).
+        name_table: See build_name_table.
 
     Returns:
         DataFrame with columns seq_id, entrez_query and mol_species (the
@@ -81,18 +87,13 @@ def hypo_queries(tax_df) -> pd.DataFrame:
     columns = ["seq_id", "entrez_query", "mol_species"]
     if tax_df.empty:
         return pd.DataFrame(columns=columns)
-    mol = tax_df[tax_df["in_mol"].astype(bool)]
-    # Blank (all NaN, so float) when no MOL hit used a synonym.
-    synonyms = mol.get("verbatimIdentification", pd.Series(index=mol.index))
-    names = pd.concat(
-        [
-            mol[["seq_id", "scientificName"]],
-            mol[["seq_id"]]
-            .assign(scientificName=synonyms.astype(object).str.split(", "))
-            .explode("scientificName")
-            .dropna(),
-        ]
-    )
+    mol = tax_df.loc[tax_df["in_mol"].astype(bool), ["seq_id", "scientificName"]]
+    # The species' own name, also spelled with another case or spacing, is
+    # already in the query.
+    synonyms = mol.assign(
+        scientificName=ncbi_names(mol, mol_df, name_table, synonyms_only=True)
+    ).explode("scientificName")
+    names = pd.concat([mol, synonyms.dropna()])
     species = names.groupby("seq_id")["scientificName"].agg(lambda s: sorted(set(s)))
     return pd.DataFrame(
         {
@@ -852,7 +853,11 @@ def empty_hypo_results(extra_df: pd.DataFrame) -> pd.DataFrame:
     """
     search_df, _ = run_hypo_search({}, db_path=None)
     merge_df, _ = run_hypo_merge(
-        search_df, extra_df, hypo_queries(pd.DataFrame()), extra_params={}, db_path=None
+        search_df,
+        extra_df,
+        hypo_queries(pd.DataFrame(), pd.DataFrame(), None),
+        extra_params={},
+        db_path=None,
     )
     filter_df, _ = run_hypo_filter(merge_df, db_path=None)
     check_df, _ = run_hypo_check(filter_df, db_path=None)

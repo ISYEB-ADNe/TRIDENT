@@ -15,7 +15,8 @@ import streamlit as st
 
 from trident.clients.gbif import get_extent_column_name
 from trident.core.database import load_provenance
-from trident.core.utils import pluralize
+from trident.core.utils import normalize_name, pluralize
+from trident.pipelines.names import species_key, species_of
 
 from trident.pipelines.results_pipeline import (
     build_species_flow,
@@ -646,6 +647,9 @@ def _show_lost_at(seq_id, step):
     key, caption = LOST_AT_TABLES[step]
     df = st.session_state[key]
     rows = df[df["seq_id"] == seq_id]
+    name_table = st.session_state.name_table
+    if key == "mol_df" and name_table is not None and not name_table.empty:
+        rows = rows.assign(acceptedName=species_of(rows["scientificName"], name_table))
     if "identity_percentage" in rows.columns:
         rows = rows.sort_values("identity_percentage", ascending=False)
     st.caption(caption)
@@ -673,6 +677,7 @@ def show_species_flow(seq_id):
         state.get("extra_df"),
         state.get("hypo_df"),
         state.get("excluded_results", []),
+        name_table=state.get("name_table"),
     )
     if not links:
         st.info("No NCBI hit for this sequence.")
@@ -694,7 +699,7 @@ def show_species_flow(seq_id):
         },
     )
     table = species_flow_table(
-        seq_id, links, state.get("ncbi_search_df"), state.get("mol_df")
+        seq_id, links, state.get("ncbi_search_df"), state.get("name_table")
     )
     with st.expander(f"Species at each step ({len(table)})"):
         st.dataframe(
@@ -893,7 +898,9 @@ def _show_all_hits_expander(species, is_hypo):
         mol_df = st.session_state.get("mol_df")
         if mol_df is None:
             return
-        hits = mol_df[mol_df["scientificName"] == species]
+        # The species' hits under any of its NCBI names.
+        keys = species_key(mol_df["scientificName"], st.session_state.name_table)
+        hits = mol_df[keys == normalize_name(species)]
         if hits.empty:
             return
 
@@ -904,6 +911,7 @@ def _show_all_hits_expander(species, is_hypo):
                 hide_index=True,
                 column_order=[
                     "seq_id",
+                    "scientificName",
                     "hit_def",
                     "identity_percentage",
                     "query_cover",
@@ -911,6 +919,7 @@ def _show_all_hits_expander(species, is_hypo):
                 ],
                 column_config={
                     "seq_id": COL["seq_id"],
+                    "scientificName": st.column_config.TextColumn("NCBI name"),
                     "hit_def": COL["hit_def"],
                     "identity_percentage": COL["identity_percentage"],
                     "query_cover": COL["query_cover"],
@@ -1146,6 +1155,7 @@ def results_main():
         geo_df=st.session_state.geo_df,
         mol_df=st.session_state.mol_df,
         hypo_df=st.session_state.get("hypo_df"),
+        name_table=st.session_state.get("name_table"),
     )
     if results_df.empty:
         st.info("📊 No results available.")

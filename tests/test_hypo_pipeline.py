@@ -19,6 +19,7 @@ from Bio.SeqRecord import SeqRecord
 
 import trident.pipelines.hypo_pipeline as hypo_pipeline
 from trident.core.database import view_cached_runs
+from trident.pipelines.names import build_name_table
 from trident.pipelines.hypo_pipeline import (
     count_hypo_searches,
     hypo_queries,
@@ -41,7 +42,7 @@ _finalize = inspect.unwrap(finalize_hypo_results)
 def test_prepare_constrains_the_search_to_the_mol_list():
     """The proxies of a sequence are BLASTed against its MOL species that WoRMS
     kept in the TAX list, whether or not they passed GEO, by their accepted
-    name and the NCBI synonyms they were hit under. A sequence without such
+    name and the other NCBI names its MOL hits gave them. A sequence without such
     species is not searched: unconstrained, a proxy would match its own
     species."""
     extra_df = pd.DataFrame(
@@ -61,10 +62,30 @@ def test_prepare_constrains_the_search_to_the_mol_list():
                 "Caranx ignobilis",
             ],
             "in_mol": [True, False, True, False],
-            "verbatimIdentification": [None, None, "Carangoides ruber", None],
         }
     )
-    queries_df = hypo_queries(tax_df)
+    mol_df = pd.DataFrame(
+        {
+            "seq_id": ["t1", "t1", "t1", "t2"],
+            "scientificName": [
+                "Omobranchus ferox",
+                "omobranchus  ferox",
+                "Carangoides ruber",
+                "Caranx sp.",
+            ],
+        }
+    )
+    name_table = build_name_table(
+        pd.DataFrame(
+            {
+                "scientificName": ["Carangoides ruber"],
+                "acceptedName": ["Caranx ruber"],
+                "acceptedNameUsageID": [218434],
+                "matchedBy": ["name"],
+            }
+        )
+    )
+    queries_df = hypo_queries(tax_df, mol_df, name_table)
     out = prepare_hypo_input(extra_df, queries_df)
 
     assert list(out.keys()) == ["t1"]
@@ -74,9 +95,6 @@ def test_prepare_constrains_the_search_to_the_mol_list():
         '"Omobranchus ferox"[orgn])'
     )
     assert count_hypo_searches(extra_df, queries_df) == (2, 1)
-    # No synonym at all: the column is blank (float NaN) or absent.
-    no_synonym = tax_df.assign(verbatimIdentification=float("nan"))
-    assert len(hypo_queries(no_synonym)) == 1
 
 
 # --- run_hypo_merge: proxy hit -> target species ---

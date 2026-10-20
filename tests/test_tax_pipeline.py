@@ -1,22 +1,23 @@
-"""Tests for TAX pipeline name resolution (R3) and the accepted-name joins.
+"""Tests for TAX pipeline name resolution (R3) and the joins on species.
 
-Covers the pure logic: prepare_worms_input (accepted-genus expansion),
-apply_name_resolution (attach acceptedName/AphiaID), run_worms_merge (in_mol
-credited on the accepted name, verbatim preserved), genus_homonyms (which
-genus homonym is kept), finalize_tax_results (species MOL rejected) and
-summarize_name_resolution
-(what the TAX tab reports about the MOL names). The cached run_name_resolution
-step is exercised via its client contract in test_worms.py.
+Covers the pure logic: the name table and species_of (a MOL name stands for
+its WoRMS species), prepare_worms_input (accepted-genus expansion),
+run_worms_merge (in_mol credited on the species), genus_homonyms (which genus
+homonym is kept), finalize_tax_results (species MOL rejected),
+summarize_name_resolution (what the TAX tab reports about the MOL names) and
+ncbi_names (the NCBI names of a species). The cached run_name_resolution step
+is exercised via its client contract in test_worms.py.
 """
 
 import inspect
 
 import pandas as pd
 
+from trident.core.database import fingerprint
+from trident.pipelines.names import build_name_table, ncbi_names, species_of
 from trident.pipelines.tax_pipeline import (
     prepare_worms_input,
     prepare_resolution_input,
-    apply_name_resolution,
     genus_homonyms,
     run_worms_merge,
     finalize_tax_results,
@@ -29,85 +30,76 @@ _merge = inspect.unwrap(run_worms_merge)
 _finalize = inspect.unwrap(finalize_tax_results)
 
 
-def _resolution_df():
-    return pd.DataFrame(
-        [
+def _table(accepted: dict, aphia_ids: dict | None = None) -> pd.DataFrame:
+    """Name table of {NCBI name: WoRMS accepted name} (None: not in WoRMS)."""
+    aphia_ids = aphia_ids or {}
+    return build_name_table(
+        pd.DataFrame(
             {
-                "scientificName": "Gadus ogac",
-                "acceptedName": "Gadus macrocephalus",
-                "acceptedNameUsageID": 126437,
-                "is_synonym": True,
-            },
-            {
-                "scientificName": "Boreogadus saida",
-                "acceptedName": "Boreogadus saida",
-                "acceptedNameUsageID": 126433,
-                "is_synonym": False,
-            },
-        ]
+                "scientificName": list(accepted),
+                "acceptedName": list(accepted.values()),
+                "acceptedNameUsageID": [aphia_ids.get(n) for n in accepted],
+                "matchedBy": ["name" if a else None for a in accepted.values()],
+            }
+        )
     )
 
 
-# --- apply_name_resolution ---
+# --- species_of ---
 
 
-def test_apply_attaches_accepted_and_aphia():
-    mol = pd.DataFrame(
-        {"seq_id": ["s1", "s2"], "scientificName": ["Gadus ogac", "Boreogadus saida"]}
+def test_a_name_stands_for_its_species_ignoring_case_and_spacing():
+    """A name the table lists stands for its WoRMS species, also written with
+    another case or spacing; a name it does not list, or one WoRMS did not
+    find, stands for itself."""
+    table = _table({"Gadus ogac": "Gadus macrocephalus", "Liparis sp.": None})
+    names = pd.Series(["gadus  Ogac", "Liparis sp.", "Gadus morhua", None])
+    assert species_of(names, table).tolist()[:3] == [
+        "Gadus macrocephalus",
+        "Liparis sp.",
+        "Gadus morhua",
+    ]
+    assert species_of(names, None).tolist()[:3] == names.tolist()[:3]
+
+
+def test_name_table_is_the_same_checked_now_or_read_from_the_cache():
+    """Its fingerprint is part of the TAX cache key: WoRMS ids come back from
+    the API as numbers (NaN when not found) and from SQLite as text."""
+    fresh = pd.DataFrame(
+        {
+            "scientificName": ["Gadus ogac", "Liparis sp."],
+            "acceptedName": ["Gadus macrocephalus", "Liparis sp."],
+            "acceptedNameUsageID": [254538.0, float("nan")],
+            "matchedBy": ["name", ""],
+        }
     )
-    out = apply_name_resolution(mol, _resolution_df())
-    assert out["scientificName"].tolist() == [
-        "Gadus ogac",
-        "Boreogadus saida",
-    ]  # raw kept
-    assert out["acceptedName"].tolist() == ["Gadus macrocephalus", "Boreogadus saida"]
-    assert out["acceptedNameUsageID"].tolist() == [126437, 126433]
-
-
-def test_apply_unresolved_name_falls_back_to_raw():
-    mol = pd.DataFrame({"seq_id": ["s1"], "scientificName": ["Ammodytes sp."]})
-    out = apply_name_resolution(mol, _resolution_df())
-    assert out["acceptedName"].iloc[0] == "Ammodytes sp."  # not in resolution -> raw
-    assert pd.isna(out["acceptedNameUsageID"].iloc[0])
-
-
-def test_apply_empty_resolution_keeps_raw():
-    mol = pd.DataFrame({"seq_id": ["s1"], "scientificName": ["Gadus ogac"]})
-    out = apply_name_resolution(mol, pd.DataFrame())
-    assert out["acceptedName"].iloc[0] == "Gadus ogac"
+    cached = fresh.astype(object).assign(acceptedNameUsageID=["254538", None])
+    taxids = {"Gadus ogac": 8053}
+    assert fingerprint(build_name_table(fresh, taxids)) == fingerprint(
+        build_name_table(cached, {"Gadus ogac": 8053.0})
+    )
 
 
 # --- prepare_worms_input ---
 
 
 def test_prepare_uses_accepted_genus_cross_genus():
-    # Raw genus 'Allocentrotus' but accepted is 'Strongylocentrotus fragilis'.
-    mol = pd.DataFrame(
-        {
-            "genus": ["Allocentrotus"],
-            "acceptedName": ["Strongylocentrotus fragilis"],
-        }
-    )
-    assert prepare_worms_input(mol) == ["Strongylocentrotus"]
+    # NCBI genus 'Allocentrotus' but accepted is 'Strongylocentrotus fragilis'.
+    mol = pd.DataFrame({"scientificName": ["Allocentrotus fragilis", "Gadus morhua"]})
+    table = _table({"Allocentrotus fragilis": "Strongylocentrotus fragilis"})
+    assert prepare_worms_input(mol, table) == ["Strongylocentrotus", "Gadus"]
 
 
-def test_prepare_falls_back_to_genus_without_resolution():
-    mol = pd.DataFrame({"genus": ["Gadus", "Gadus", "Boreogadus"]})
-    assert sorted(prepare_worms_input(mol)) == ["Boreogadus", "Gadus"]
-
-
-# --- run_worms_merge: in_mol on accepted name ---
+# --- run_worms_merge: in_mol on the species ---
 
 
 def test_merge_credits_synonym_in_mol():
-    # MOL hit raw 'Gadus ogac' resolved to accepted 'Gadus macrocephalus'.
+    # MOL hit 'Gadus ogac' stands for the accepted 'Gadus macrocephalus'.
     mol = pd.DataFrame(
         {
             "seq_id": ["s1"],
             "dna_sequence": ["ACGT"],
             "scientificName": ["Gadus ogac"],
-            "acceptedName": ["Gadus macrocephalus"],
-            "genus": ["Gadus"],
             "identity_percentage": [99.0],
             "query_cover": [100.0],
         }
@@ -119,62 +111,39 @@ def test_merge_credits_synonym_in_mol():
             "genus": ["Gadus", "Gadus"],
         }
     )
-    out = _merge(worms, mol)
+    out = _merge(worms, mol, _table({"Gadus ogac": "Gadus macrocephalus"}))
 
     macro = out[out["scientificName"] == "Gadus macrocephalus"].iloc[0]
     morhua = out[out["scientificName"] == "Gadus morhua"].iloc[0]
     # synonym credited against the accepted species
     assert bool(macro["in_mol"]) is True
-    assert macro["verbatimIdentification"] == "Gadus ogac"  # synonym surfaced
     assert macro["mol_top_identity_percentage"] == 99.0
     # the other expanded species is not a MOL hit
     assert bool(morhua["in_mol"]) is False
-    assert pd.isna(morhua["verbatimIdentification"])
 
 
-def test_merge_synonym_surfaced_even_when_accepted_also_hit():
-    # NCBI returned BOTH the accepted name and the synonym for the same species;
-    # the accepted hit is the top score, but the synonym must still surface.
+def test_ncbi_names_of_a_species_for_its_sequence():
+    """A species gets the NCBI names its sequence's MOL hits gave it: all of
+    them for the export, only those differing from it for the synonym column."""
     mol = pd.DataFrame(
         {
-            "seq_id": ["s1", "s1"],
-            "dna_sequence": ["ACGT", "ACGT"],
-            "scientificName": ["Gadus macrocephalus", "Gadus ogac"],
-            "acceptedName": ["Gadus macrocephalus", "Gadus macrocephalus"],
-            "genus": ["Gadus", "Gadus"],
-            "identity_percentage": [99.5, 97.0],  # accepted name is the top hit
-            "query_cover": [100.0, 100.0],
+            "seq_id": ["s1", "s1", "s2"],
+            "scientificName": ["Gadus macrocephalus", "Gadus ogac", "Gadus morhua"],
         }
     )
-    worms = pd.DataFrame(
-        {"scientificName": ["Gadus macrocephalus"], "genus": ["Gadus"]}
-    )
-    out = _merge(worms, mol)
-    row = out[out["scientificName"] == "Gadus macrocephalus"].iloc[0]
-    assert bool(row["in_mol"]) is True
-    assert (
-        row["verbatimIdentification"] == "Gadus ogac"
-    )  # synonym, not the accepted dup
-    assert row["mol_top_identity_percentage"] == 99.5  # top hit score
-
-
-def test_merge_without_resolution_matches_raw_name():
-    # No acceptedName column -> falls back to raw scientificName matching.
-    mol = pd.DataFrame(
+    rows = pd.DataFrame(
         {
-            "seq_id": ["s1"],
-            "dna_sequence": ["ACGT"],
-            "scientificName": ["Gadus morhua"],
-            "genus": ["Gadus"],
-            "identity_percentage": [98.0],
-            "query_cover": [100.0],
+            "seq_id": ["s1", "s1", "s2"],
+            "scientificName": ["Gadus macrocephalus", "Gadus morhua", "Gadus morhua"],
         }
     )
-    worms = pd.DataFrame({"scientificName": ["Gadus morhua"], "genus": ["Gadus"]})
-    out = _merge(worms, mol)
-    assert bool(out.iloc[0]["in_mol"]) is True
-    # No resolution -> raw == accepted -> not a synonym -> blank.
-    assert pd.isna(out.iloc[0]["verbatimIdentification"])
+    table = _table({"Gadus ogac": "Gadus macrocephalus"})
+    names = ncbi_names(rows, mol, table)
+    assert names.iloc[0] == ["Gadus macrocephalus", "Gadus ogac"]
+    assert pd.isna(names.iloc[1])  # no MOL hit of s1 names Gadus morhua
+    synonyms = ncbi_names(rows, mol, table, synonyms_only=True)
+    assert synonyms.iloc[0] == ["Gadus ogac"]
+    assert pd.isna(synonyms.iloc[2])  # NCBI used the accepted name
 
 
 # --- genus homonyms (Liparis: a fish and a plant) ---
@@ -204,18 +173,20 @@ def _liparis_mol():
             "seq_id": ["plant", "fish", "open"],
             "dna_sequence": ["A", "C", "G"],
             "scientificName": ["Liparis loeselii", "Liparis oldname", "Liparis sp."],
-            "acceptedName": ["Liparis loeselii", "Liparis fabricii", "Liparis sp."],
             "identity_percentage": [99.0, 99.0, 99.0],
             "query_cover": [100.0, 100.0, 100.0],
         }
     )
 
 
+_LIPARIS_NAMES = _table({"Liparis oldname": "Liparis fabricii"})
+
+
 def test_each_sequence_keeps_the_genus_homonym_its_mol_species_belong_to():
     """Each sequence keeps the homonym its MOL species belong to, by accepted
     name (so a synonym counts too), and all of them when none of its species
     is in any (open nomenclature)."""
-    tax = _merge(_liparis_worms(), _liparis_mol())
+    tax = _merge(_liparis_worms(), _liparis_mol(), _LIPARIS_NAMES)
     kept = tax.groupby("seq_id")["scientificName"].agg(sorted).to_dict()
     assert kept == {
         "plant": ["Liparis loeselii"],
@@ -229,7 +200,7 @@ def test_homonym_report_says_which_mol_species_and_sequences_keep_each():
     and how many of the sequences with that genus name keep it: the fish and
     the plant are each kept by their own sequence and by the open one."""
     worms = _liparis_worms()
-    report = genus_homonyms(worms, _merge(worms, _liparis_mol()))
+    report = genus_homonyms(worms, _merge(worms, _liparis_mol(), _LIPARIS_NAMES))
     assert report["genusID"].tolist() == [126160, 425907]
     assert report["molSpecies"].tolist() == ["Liparis fabricii", "Liparis loeselii"]
     assert report["sequences"].tolist() == ["2/3", "2/3"]
@@ -239,7 +210,8 @@ def test_homonym_report_says_which_mol_species_and_sequences_keep_each():
 
 
 def _resolved_mol():
-    """The example's two synonyms, a name WoRMS does not know, a failed lookup."""
+    """The example's two synonyms, a name WoRMS does not know, a failed lookup,
+    and their name table."""
     mol = pd.DataFrame(
         {
             "seq_id": ["s1", "s1", "s2", "s2", "s3", "s4"],
@@ -253,35 +225,29 @@ def _resolved_mol():
             ],
         }
     )
-    resolution = pd.DataFrame(
+    # Atherinomorus lacunosus is absent from the table: its lookup failed.
+    table = _table(
         {
-            "scientificName": [
-                "Gadus ogac",
-                "Gadus macrocephalus",
-                "Myoxocephalus verrucosus",
-                "Myoxocephalus scorpius",
-                "Liparis sp.",
-            ],
-            "acceptedName": [
-                "Gadus macrocephalus",
-                "Gadus macrocephalus",
-                "Myoxocephalus scorpius",
-                "Myoxocephalus scorpius",
-                "Liparis sp.",
-            ],
-            "acceptedNameUsageID": [254538, 254538, 127203, 127203, None],
-            "is_synonym": [True, False, True, False, False],
-            "matchedBy": ["name", "name", "name", "name", None],
-        }
+            "Gadus ogac": "Gadus macrocephalus",
+            "Gadus macrocephalus": "Gadus macrocephalus",
+            "Myoxocephalus verrucosus": "Myoxocephalus scorpius",
+            "Myoxocephalus scorpius": "Myoxocephalus scorpius",
+            "Liparis sp.": None,
+        },
+        aphia_ids={
+            "Gadus ogac": 254538,
+            "Gadus macrocephalus": 254538,
+            "Myoxocephalus verrucosus": 127203,
+            "Myoxocephalus scorpius": 127203,
+        },
     )
-    # Atherinomorus lacunosus is absent from the resolution: its lookup failed.
-    return apply_name_resolution(mol, resolution)
+    return mol, table
 
 
 def test_summary_counts_and_lists_the_synonyms_merged():
     """MOL names are counted as NCBI gives them and species as WoRMS accepts
     them; the synonyms WoRMS merges are listed."""
-    summary = summarize_name_resolution(_resolved_mol())
+    summary = summarize_name_resolution(*_resolved_mol())
     assert (summary.n_names, summary.n_species) == (6, 4)
     assert summary.renamed[["scientificName", "acceptedName"]].values.tolist() == [
         ["Gadus ogac", "Gadus macrocephalus"],
@@ -290,28 +256,23 @@ def test_summary_counts_and_lists_the_synonyms_merged():
 
 
 def test_not_found_names_exclude_failed_lookups_and_tell_their_genus():
-    """A failed lookup also has no AphiaID, but it is retried, not absent. A
+    """A failed lookup (no row in the name table) is retried, not absent. A
     name not found whose genus is in TAX lost no candidates."""
     tax = pd.DataFrame({"genus": ["Liparis"]})
-    summary = summarize_name_resolution(
-        _resolved_mol(), tax_df=tax, failed_names=["Atherinomorus lacunosus"]
-    )
+    summary = summarize_name_resolution(*_resolved_mol(), tax_df=tax)
     assert summary.not_found.values.tolist() == [["Liparis sp.", True]]
 
 
 def test_hits_without_a_name_are_neither_resolved_nor_expanded():
     """Also when no hit has a name at all."""
-    mol = pd.DataFrame(
-        {"scientificName": [None, "Gadus morhua"], "genus": [None, "Gadus"]}
-    )
+    mol = pd.DataFrame({"scientificName": [None, "Gadus morhua"]})
     assert prepare_resolution_input(mol) == ["Gadus morhua"]
-    resolved = apply_name_resolution(mol, None)
-    assert prepare_worms_input(resolved) == ["Gadus"]
-    assert summarize_name_resolution(resolved).n_names == 1
+    assert prepare_worms_input(mol, None) == ["Gadus"]
+    assert summarize_name_resolution(mol, None).n_names == 1
 
-    nameless = apply_name_resolution(mol.iloc[:1], None)
-    assert prepare_worms_input(nameless) == []
-    assert summarize_name_resolution(nameless).n_names == 0
+    nameless = mol.iloc[:1]
+    assert prepare_worms_input(nameless, None) == []
+    assert summarize_name_resolution(nameless, None).n_names == 0
 
 
 def test_species_rejected_by_mol_are_dropped_for_that_sequence_only():
@@ -343,24 +304,17 @@ def test_species_rejected_by_mol_are_dropped_for_that_sequence_only():
             "query_cover": [100.0, 100.0, 80.0, 100.0],
         }
     )
-    mol = pd.DataFrame(
-        {
-            "seq_id": ["s1", "s2", "s3"],
-            "scientificName": ["Gadus morhua", "Gadus chalcogrammus", "Gadus ogac"],
-            "acceptedName": [
-                "Gadus morhua",
-                "Gadus chalcogrammus",
-                "Gadus macrocephalus",
-            ],
-        }
-    )
+    # Gadus ogac reached the MOL list for another sequence, so its species is known.
+    table = _table({"Gadus ogac": "Gadus macrocephalus"})
 
-    out = _finalize(tax, ncbi_search_df=ncbi, mol_df=mol)
+    out = _finalize(tax, ncbi_search_df=ncbi, name_table=table)
     assert set(zip(out["seq_id"], out["scientificName"])) == {
         ("s1", "Gadus morhua"),
         ("s1", "Gadus nunavut"),
         ("s2", "Gadus chalcogrammus"),
     }
 
-    kept = _finalize(tax, ncbi_search_df=ncbi, mol_df=mol, drop_mol_rejected=False)
+    kept = _finalize(
+        tax, ncbi_search_df=ncbi, name_table=table, drop_mol_rejected=False
+    )
     assert len(kept) == len(tax)

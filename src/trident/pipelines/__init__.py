@@ -10,11 +10,17 @@ from .mol_pipeline import (
     build_mol_sequence_report,
 )
 
+from .names import (
+    build_name_table,
+    species_of,
+    species_key,
+    ncbi_names,
+)
+
 from .tax_pipeline import (
     prepare_resolution_input,
     prepare_resolution_taxids,
     run_name_resolution,
-    apply_name_resolution,
     genus_homonyms,
     summarize_name_resolution,
     prepare_worms_input,
@@ -84,10 +90,13 @@ __all__ = [
     "build_ncbi_search_overview",
     "build_mol_summary",
     "build_mol_sequence_report",
+    "build_name_table",
+    "species_of",
+    "species_key",
+    "ncbi_names",
     "prepare_resolution_input",
     "prepare_resolution_taxids",
     "run_name_resolution",
-    "apply_name_resolution",
     "genus_homonyms",
     "summarize_name_resolution",
     "prepare_worms_input",
