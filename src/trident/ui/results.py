@@ -15,7 +15,12 @@ import streamlit as st
 
 from trident.clients.gbif import get_extent_column_name
 from trident.core.database import load_provenance
-from trident.core.utils import normalize_name, pluralize
+from trident.core.utils import (
+    name_list,
+    normalize_name,
+    pluralize,
+    species_for_sequences,
+)
 from trident.pipelines.names import species_key, species_of
 
 from trident.pipelines.results_pipeline import (
@@ -35,9 +40,9 @@ from trident.pipelines.results_pipeline import (
 from trident.ui.defaults import NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
 from trident.ui.geo import display_gbif_sequence_table
 from trident.ui.ui import (
-    species_for_sequences,
     COL,
     SELECTED_SEQUENCE_KEY,
+    failed_items,
     persist_value,
     save_widget,
     styled_or_plain,
@@ -1032,6 +1037,7 @@ _SOURCE_STEPS = [
     ("gbif_search", "GBIF", "GEO"),
     ("bold_search", "BOLD", "EXTRA"),
     ("hypo_search", "NCBI", "HYPO"),
+    ("worms_higher_taxa", "WoRMS", "GBIF export"),
 ]
 
 
@@ -1099,14 +1105,25 @@ def show_exports(curated_df):
                     return int(rows.sum())
 
                 if st.button("📥 GBIF export (CSV)", width="stretch", key="gbif_csv"):
-                    with st.spinner("Looking up higher-level taxa in WoRMS..."):
-                        gbif_df = build_gbif_export_df(curated_df)
+                    with st.spinner("Building the GBIF export..."):
+                        gbif_df = build_gbif_export_df(
+                            curated_df, db_path=st.session_state.get("db_path")
+                        )
                     st.session_state._gbif_export = (
                         fingerprint(),
                         gbif_df.to_csv(index=False),
+                        failed_items(gbif_df),
                     )
                 built = st.session_state.get("_gbif_export")
                 if built and built[0] == fingerprint():
+                    if built[2]:
+                        n = len(built[2])
+                        st.warning(
+                            f"WoRMS could not be reached for {n} higher-level "
+                            f"{pluralize(n, 'taxon')} ({name_list(built[2])}): "
+                            "their ID and author are left empty. Click GBIF "
+                            "export again later to complete them."
+                        )
                     st.download_button(
                         label="⬇️ Download GBIF export",
                         data=built[1],

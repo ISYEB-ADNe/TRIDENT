@@ -88,6 +88,7 @@ _PLURALS = {
     "query": "queries",
     "search": "searches",
     "species": "species",
+    "taxon": "taxa",
 }
 
 
@@ -145,7 +146,7 @@ def species_for_sequences(df: pd.DataFrame) -> str:
     sequences" (the eDNA sequences of the ``seq_id`` column)."""
     n_species = df["scientificName"].nunique() if "scientificName" in df else 0
     n_seqs = df["seq_id"].nunique() if "seq_id" in df else 0
-    return f"{n_species} species for {n_seqs} {pluralize(n_seqs, 'sequence')}"
+    return f"{n_species:,} species for {n_seqs:,} {pluralize(n_seqs, 'sequence')}"
 
 
 def name_list(names: Sequence, shown: int = 5) -> str:
@@ -208,16 +209,17 @@ class StepLog:
         summary: str,
         failed: Sequence[str] = (),
         noun: str = "item",
+        retry: str = "Run the step again to retry them.",
     ) -> None:
         """Log the end of the step: *summary* of its results, then the
         *failed* items (by name; *noun* is what an item is), which the next
-        run queries again."""
+        run queries again (*retry* says how)."""
         elapsed = duration(time.monotonic() - self._start)
         logger.info(f"{self.step} done after {elapsed}: {summary}")
         if failed:
             logger.warning(
                 f"{self.step}: {len(failed)} {pluralize(len(failed), noun)} "
-                f"failed ({name_list(failed)}). Run the step again to retry them."
+                f"failed ({name_list(failed)}). {retry}"
             )
 
 

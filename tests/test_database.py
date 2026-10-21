@@ -449,8 +449,9 @@ def test_failed_items_not_provenanced(db_path):
 
 
 def test_failed_items_exposed_on_result_for_this_call_only(db_path):
-    """The result carries this call's failures, so the UI can tell them apart
-    from genuine empties; a later call that succeeds reports none."""
+    """The result carries this call's failures, with or without a database, so
+    the UI can tell them apart from genuine empties; a later call that
+    succeeds reports none."""
     failing = {"bad"}
 
     @save_to_db(
@@ -467,6 +468,8 @@ def test_failed_items_exposed_on_result_for_this_call_only(db_path):
         return pd.DataFrame(rows, columns=["name", "v"])
 
     df, _ = step(["a", "bad", "empty"], db_path=db_path)
+    assert df.attrs["failed_items"] == ["bad"]
+    df, _ = step(["a", "bad", "empty"])
     assert df.attrs["failed_items"] == ["bad"]
 
     failing.clear()  # the source recovers: 'bad' is retried and succeeds

@@ -642,11 +642,17 @@ def save_to_db(
 
             # Nothing to cache without a db_path or without items (empty
             # input). The function is still called, so the caller gets its
-            # empty result with its columns.
+            # empty result with its columns, and its failed items as with a db.
             if db_path is None or not cache_items:
                 if cache_items:
                     _log_cache_use(func.__name__, log_as, 0, len(cache_items))
-                return func(*args, **kwargs), params
+                sink = bound_kwargs.get("failure_sink")
+                if sink is None and "failure_sink" in sig.parameters:
+                    sink = kwargs["failure_sink"] = []
+                result = func(*args, **kwargs)
+                if sink is not None and isinstance(result, pd.DataFrame):
+                    result.attrs["failed_items"] = list(sink)
+                return result, params
 
             with get_connection(db_path) as conn:
                 # 0. Clear empty cache entries so failed items get retried

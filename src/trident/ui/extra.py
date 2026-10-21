@@ -10,8 +10,8 @@ import streamlit as st
 from trident.core import config
 import trident.pipelines as pipe
 
+from trident.core.utils import species_for_sequences
 from trident.ui.ui import (
-    species_for_sequences,
     record_empty_step,
     failed_items,
     show_failed_items_banner,

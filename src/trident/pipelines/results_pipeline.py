@@ -1,12 +1,13 @@
 """Results assembly — combines MOL+GEO and HYPO species into a unified results table.
 
-Unlike other pipelines, this module performs read-only aggregation of existing
-pipeline outputs. No external searches or database caching (except GBIF export
-which does WoRMS lookups for higher-level taxa).
+Unlike other pipelines, this module mostly aggregates the outputs of the
+other steps. Its one search is the GBIF export's WoRMS lookup of higher-level
+taxa (run_higher_taxa_lookup), saved per name like the other steps' searches.
 
     build_results_df(sequences_df, geo_df, mol_df, ...) → DataFrame
     find_sequence_exclusion_step(all_seq_ids, ...) → DataFrame
-    build_gbif_export_df(results_df) → DataFrame (one row per MOTU/ASV)
+    build_gbif_export_df(results_df, ...) → DataFrame (one row per MOTU/ASV)
+    run_higher_taxa_lookup(names, ...) → (records_df, params)
     resolve_sequences(results_df) → DataFrame (species count and shared rank per MOTU/ASV)
     add_check_hit(df) → DataFrame
     add_low_identity_warning(df, threshold) → DataFrame
@@ -23,9 +24,15 @@ from trident.clients.worms import (
     clean_authorships,
     get_aphia_records,
     pick_record,
+    worms_search_url,
 )
+from trident.core.database import PartialCache, save_to_db
+from trident.core.http import create_session
 from trident.core.utils import (
+    StepLog,
     ensure_columns,
+    notify_progress,
+    pluralize,
     find_exclusion_pipeline_step,
     normalize_name,
     preserve_sequence_order,
@@ -525,11 +532,14 @@ def filter_excluded_results(
 
 
 @preserve_sequence_order("seq_id", "results_df")
-def build_gbif_export_df(results_df: pd.DataFrame) -> pd.DataFrame:
+def build_gbif_export_df(results_df: pd.DataFrame, db_path=None) -> pd.DataFrame:
     """Build a GBIF export with one row per MOTU/ASV.
 
     Multi-species MOTUs are resolved to their lowest common taxon,
-    with individual species listed in identificationRemarks.
+    with individual species listed in identificationRemarks. The taxonID and
+    authorship of that taxon come from WoRMS (run_higher_taxa_lookup, saved in
+    *db_path*). When the WoRMS request for a name fails, the rows of that name
+    keep both empty and the name is listed in ``attrs["failed_items"]``.
     """
     rows = []
     for seq_id, group in results_df.groupby("seq_id", sort=False):
@@ -568,18 +578,102 @@ def build_gbif_export_df(results_df: pd.DataFrame) -> pd.DataFrame:
 
     # Fill taxonID/authorship for higher-level taxa via WoRMS
     needs_lookup = df["identificationRemarks"].notna() & df["scientificName"].notna()
+    failed = []
     if needs_lookup.any():
-        _fill_worms_records(df, needs_lookup)
+        names = sorted(df.loc[needs_lookup, "scientificName"].unique())
+        records_df, _ = run_higher_taxa_lookup(names, db_path=db_path)
+        failed = records_df.attrs.get("failed_items", [])
+        _fill_worms_records(df, needs_lookup, records_df)
 
-    return df[GBIF_EXPORT_COLS]
+    df = df[GBIF_EXPORT_COLS]
+    df.attrs["failed_items"] = failed
+    return df
 
 
-def _fill_worms_records(df: pd.DataFrame, mask: pd.Series) -> None:
-    """Look up WoRMS records for higher-level taxa and fill taxonID/authorship in-place.
+# The fields of a WoRMS record that pick_record and the export read.
+HIGHER_TAXA_COLS = [
+    "scientificName",
+    "AphiaID",
+    "valid_AphiaID",
+    "rank",
+    "status",
+    "kingdom",
+    "class",
+    "authority",
+    "valid_authority",
+]
+
+
+@save_to_db(
+    table_name="worms_higher_taxa",
+    cache=PartialCache(items_kwarg="names", item_key="scientificName"),
+    log_as=("WoRMS higher taxa", "taxon"),
+)
+def run_higher_taxa_lookup(
+    names: list[str],
+    user_agent: str | None = None,
+    progress_handler: dict | object | None = None,
+    failure_sink: list | None = None,
+) -> pd.DataFrame:
+    """Every WoRMS record of each higher-level taxon name of the GBIF export.
+
+    All the records of a name are kept, not one: the export chooses among them
+    by the rank and group of each sequence's taxon (see _fill_worms_records).
+    Names whose request failed go to failure_sink, so they are not saved and
+    are looked up again on the next export.
+
+    Returns:
+        DataFrame with HIGHER_TAXA_COLS, one row per record (none for a name
+        WoRMS does not know).
+    """
+    session = create_session(user_agent=user_agent)
+    rows: list[dict] = []
+    failed: list[str] = []
+    log = StepLog("WoRMS higher taxa", len(names))
+    try:
+        for name in names:
+            try:
+                with log.query(name):
+                    records = get_aphia_records(name, session=session)
+            except Exception as exc:
+                log.failed(name, f"{exc} (check: {worms_search_url(name)})")
+                failed.append(name)
+                continue
+            finally:
+                notify_progress(progress_handler)
+            n = len(records)
+            log.item(name, f"{n} {pluralize(n, 'record')}", notable=not records)
+            rows.extend(
+                {
+                    **{col: r.get(col) for col in HIGHER_TAXA_COLS},
+                    "scientificName": name,
+                }
+                for r in records
+            )
+    finally:
+        session.close()
+
+    if failed and failure_sink is not None:
+        failure_sink.extend(failed)
+    found = len({row["scientificName"] for row in rows})
+    log.done(
+        f"{found}/{len(names)} {pluralize(len(names), 'taxon')} found",
+        failed,
+        "taxon",
+        retry="Click GBIF export again to retry them.",
+    )
+    return pd.DataFrame(rows, columns=HIGHER_TAXA_COLS)
+
+
+def _fill_worms_records(
+    df: pd.DataFrame, mask: pd.Series, records_df: pd.DataFrame
+) -> None:
+    """Fill taxonID/authorship of the higher-level taxa in-place, from their
+    WoRMS records (run_higher_taxa_lookup).
 
     A name can be a taxon of that rank in several groups (e.g. the genus
     Liparis, a fish and a plant): the record in the row's class, else its
-    kingdom, is taken (see pick_record). Each name is requested once.
+    kingdom, is taken (see pick_record).
     """
     keys = ["scientificName", "taxonRank", "class", "kingdom"]
 
@@ -590,18 +684,23 @@ def _fill_worms_records(df: pd.DataFrame, mask: pd.Series) -> None:
     lookups = sorted(
         {key_of(row) for row in df.loc[mask, keys].values.tolist()}, key=str
     )
-    logger.info(f"Looking up {len(lookups)} higher-level taxa in WoRMS")
-
-    records_of: dict[str, list[dict]] = {}
+    # None for missing fields, as in a WoRMS answer, so "or" falls back on them.
+    fields = records_df.astype(object).where(records_df.notna(), None)
+    records_of = {
+        name: group.to_dict("records")
+        for name, group in fields.groupby("scientificName")
+    }
     cache = {}
     for name, rank, class_, kingdom in lookups:
-        if name not in records_of:
-            records_of[name] = get_aphia_records(name)
-        records = records_of[name]
+        records = records_of.get(name, [])
         record = pick_record(records, rank, {"class": class_, "kingdom": kingdom})
         if record:
             cache[(name, rank, class_, kingdom)] = {
-                "taxonID": str(record.get("valid_AphiaID") or record["AphiaID"]),
+                # An ID read back from the analysis can be a float, or its
+                # text ("126160.0") when the column was first saved empty.
+                "taxonID": str(
+                    int(float(record.get("valid_AphiaID") or record["AphiaID"]))
+                ),
                 "scientificNameAuthorship": record.get("valid_authority")
                 or record.get("authority"),
                 "taxonID_db": "WORMS",

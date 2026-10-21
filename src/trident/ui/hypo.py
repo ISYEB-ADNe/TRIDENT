@@ -11,12 +11,11 @@ import streamlit as st
 
 from trident.clients.ncbi import set_ncbi_email
 from trident.core import config
-from trident.core.utils import pluralize
+from trident.core.utils import pluralize, species_for_sequences
 import trident.pipelines as pipe
 from trident.pipelines.results_pipeline import add_check_hit
 
 from trident.ui.ui import (
-    species_for_sequences,
     coerce_stored_value,
     record_empty_step,
     failed_items,

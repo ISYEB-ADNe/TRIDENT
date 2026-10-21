@@ -373,7 +373,7 @@ def test_gbif_export_takes_the_worms_record_of_the_rows_group(monkeypatch):
     monkeypatch.setattr(
         results_pipeline,
         "get_aphia_records",
-        lambda name: [
+        lambda name, session=None: [
             _worms_genus(425907, "Plantae", "Magnoliopsida"),
             _worms_genus(126160, "Animalia", "Teleostei", status="unaccepted"),
         ],
@@ -386,11 +386,61 @@ def test_gbif_export_takes_the_worms_record_of_the_rows_group(monkeypatch):
     assert row["taxonID"] == "126160"
 
 
+def test_gbif_export_saves_its_worms_lookups(monkeypatch, tmp_path):
+    """The export's WoRMS records are saved in the analysis: the next export
+    asks WoRMS only for the names whose request failed, which until then are
+    reported and keep their ID empty."""
+    requested = []
+
+    def records(name, session=None):
+        requested.append(name)
+        if name == "Gadus" and requested.count(name) == 1:
+            raise ConnectionError("WoRMS unreachable")
+        return [
+            _worms_genus(
+                126160 if name == "Liparis" else 125732, "Animalia", "Teleostei"
+            )
+        ]
+
+    monkeypatch.setattr(results_pipeline, "get_aphia_records", records)
+    results = pd.DataFrame(
+        [
+            _liparis("s1", _FISH, "liparis"),
+            _liparis("s1", _FISH, "fabricii"),
+            {
+                **_liparis("s2", _FISH, "morhua"),
+                "genus": "Gadus",
+                "scientificName": "Gadus morhua",
+            },
+            {
+                **_liparis("s2", _FISH, "ogac"),
+                "genus": "Gadus",
+                "scientificName": "Gadus ogac",
+            },
+        ]
+    )
+    db_path = tmp_path / "analysis.db"
+
+    first = build_gbif_export_df(results, db_path=db_path)
+    assert first.attrs["failed_items"] == ["Gadus"]
+    assert first.set_index("seq_id")["taxonID"].isna().to_dict() == {
+        "s1": False,
+        "s2": True,
+    }
+
+    second = build_gbif_export_df(results, db_path=db_path).set_index("seq_id")
+    assert requested == ["Gadus", "Liparis", "Gadus"]
+    assert second.attrs["failed_items"] == []
+    assert second["taxonID"].to_dict() == {"s1": "126160", "s2": "125732"}
+
+
 def test_gbif_export_common_taxon_is_a_real_taxon(monkeypatch):
     """The lowest common taxon of a sequence's species is shared at every rank
     above it, so homonym genera of two kingdoms have none; a common species
     is named by its binomial."""
-    monkeypatch.setattr(results_pipeline, "get_aphia_records", lambda name: [])
+    monkeypatch.setattr(
+        results_pipeline, "get_aphia_records", lambda name, session=None: []
+    )
     results = pd.DataFrame(
         [
             _liparis("both", _FISH, "liparis"),
@@ -412,7 +462,9 @@ def test_resolve_sequences_matches_the_gbif_export(monkeypatch):
     """Each sequence resolves to the taxon the GBIF export writes for it, and is
     at species level when that taxon is a species or a subspecies; only a
     candidate named by its genus alone keeps the sequence at genus."""
-    monkeypatch.setattr(results_pipeline, "get_aphia_records", lambda name: [])
+    monkeypatch.setattr(
+        results_pipeline, "get_aphia_records", lambda name, session=None: []
+    )
     lone_subspecies = _liparis("lone", _FISH, "fabricii fabricii")
     lone_subspecies["taxonRank"] = "Subspecies"
     genus_only = {**_liparis("genus_only", _FISH, "x"), "specificEpithet": None}
