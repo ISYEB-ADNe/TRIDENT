@@ -13,6 +13,7 @@ from trident.core import config
 import trident.pipelines as pipe
 
 from trident.ui.ui import (
+    species_for_sequences,
     record_empty_step,
     failed_items,
     show_failed_items_banner,
@@ -278,7 +279,11 @@ def render_worms_metrics():
             ),
         )
         if missing:
-            with st.expander("View the MOL names not in TAX", expanded=False):
+            with st.expander(
+                f"View the {len(missing):,} MOL {pluralize(len(missing), 'name')} "
+                "not in TAX",
+                expanded=False,
+            ):
                 st.dataframe(
                     [{"MOL name": name} for name in missing],
                     width="stretch",
@@ -312,7 +317,11 @@ def render_worms_metrics():
             f"{summary.n_names} MOL names = {summary.n_species} WoRMS accepted "
             f"species{merged_text}. TAX works on the WoRMS accepted names."
         )
-        with st.expander("View the MOL names renamed by WoRMS", expanded=False):
+        n_renamed = len(renamed)
+        with st.expander(
+            f"View the {n_renamed:,} MOL {pluralize(n_renamed, 'name')} renamed by WoRMS",
+            expanded=False,
+        ):
             st.dataframe(
                 renamed[["scientificName", "acceptedName"]],
                 width="stretch",
@@ -330,7 +339,12 @@ def render_worms_metrics():
             )
 
     if not not_found.empty:
-        with st.expander("View the MOL names not found in WoRMS", expanded=False):
+        n_not_found = len(not_found)
+        with st.expander(
+            f"View the {n_not_found:,} MOL {pluralize(n_not_found, 'name')} "
+            "not found in WoRMS",
+            expanded=False,
+        ):
             st.dataframe(
                 not_found,
                 width="stretch",
@@ -399,14 +413,10 @@ def display_mol_rejected(seq_id=None):
         rejected = rejected[rejected["seq_id"] == seq_id]
         if rejected.empty:
             return
-    n_rows = len(rejected)
     n_species = rejected["scientificName"].nunique()
     dropped = st.session_state.tax_params.get("tax_drop_mol_rejected", False)
     if seq_id is None:
-        title = (
-            f"🚫 {n_rows} {pluralize(n_rows, 'row')} ({n_species} species) "
-            "already rejected by MOL"
-        )
+        title = f"🚫 {species_for_sequences(rejected)} already rejected by MOL"
     else:
         title = f"🚫 {n_species} species already rejected by MOL for this sequence"
     with st.expander(title, expanded=False):
@@ -629,7 +639,7 @@ def display_worms_results():
         display_worms_summary()
 
         with st.expander(
-            f"View full TAX list ({len(st.session_state.tax_df)} species)",
+            f"View full TAX list ({species_for_sequences(st.session_state.tax_df)})",
             expanded=False,
         ):
             display_full_tax_list()

@@ -13,6 +13,7 @@ from loguru import logger
 import trident.pipelines as pipe
 from trident.core.config import is_streamlit_cloud, results_dir
 from trident.core.database import check_schema_version, get_connection
+from trident.core.utils import pluralize
 from trident.ui.ui import prefill_settings, reset_for_new_analysis, COL
 
 FASTA_EXTENSIONS = {"fasta", "fa", "txt", "fas"}
@@ -47,7 +48,9 @@ def _db_path(base_name: str) -> str:
 def display_fasta_sequence_table():
     """Renders the loaded sequences in an expandable table."""
     df = st.session_state.sequences_df
-    with st.expander(f"📄 View FASTA File Content ({len(df)} sequences)"):
+    with st.expander(
+        f"📄 View FASTA File Content ({len(df):,} {pluralize(len(df), 'sequence')})"
+    ):
         st.dataframe(
             df,
             width="stretch",

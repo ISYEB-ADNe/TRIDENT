@@ -18,6 +18,7 @@ from trident.clients.gbif import (
 )
 
 from trident.ui.ui import (
+    species_for_sequences,
     record_empty_step,
     failed_items,
     show_failed_items_banner,
@@ -384,7 +385,7 @@ def gbif_search_workflow():
     # Results Preview
     if mode != "NEW" and st.session_state.gbif_search_df is not None:
         with st.expander(
-            f"Inspect GBIF search results ({len(st.session_state.gbif_search_df)} records)",
+            f"Inspect GBIF search results ({species_for_sequences(st.session_state.gbif_search_df)})",
             expanded=False,
         ):
             df = st.session_state.gbif_search_df
@@ -865,7 +866,7 @@ def display_gbif_results():
         display_missing_species()
 
         with st.expander(
-            f"View full GEO list ({len(st.session_state.geo_df)} species)",
+            f"View full GEO list ({species_for_sequences(st.session_state.geo_df)})",
             expanded=False,
         ):
             display_full_geo_list()

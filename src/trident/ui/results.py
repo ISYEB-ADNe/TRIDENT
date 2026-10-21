@@ -35,6 +35,7 @@ from trident.pipelines.results_pipeline import (
 from trident.ui.defaults import NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
 from trident.ui.geo import display_gbif_sequence_table
 from trident.ui.ui import (
+    species_for_sequences,
     COL,
     SELECTED_SEQUENCE_KEY,
     persist_value,
@@ -445,7 +446,7 @@ def show_summary(assignments, curated_df, results_df, threshold):
         exclusion_keys(excluded).isin(st.session_state.excluded_results)
     ].drop_duplicates(subset=["seq_id", "scientificName"])
     if not excluded.empty:
-        with st.expander(f"Excluded by hand ({len(excluded)})"):
+        with st.expander(f"Excluded by hand ({species_for_sequences(excluded)})"):
             st.caption("Select the sequence and check Keep to restore a species.")
             st.dataframe(
                 excluded,
@@ -701,7 +702,9 @@ def show_species_flow(seq_id):
     table = species_flow_table(
         seq_id, links, state.get("ncbi_search_df"), state.get("name_table")
     )
-    with st.expander(f"Species at each step ({len(table)})"):
+    with st.expander(
+        f"Species at each step ({len(table)} {pluralize(len(table), 'name')})"
+    ):
         st.dataframe(
             table,
             width="stretch",

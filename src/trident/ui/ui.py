@@ -655,6 +655,14 @@ def record_empty_step(
     reset_state_after(df_key)
 
 
+def species_for_sequences(df) -> str:
+    """'N species for M sequences', the size of a table with a row per
+    sequence and species, where the row count would add up repeats."""
+    n_species = df["scientificName"].nunique()
+    n_seqs = df["seq_id"].nunique()
+    return f"{n_species:,} species for {n_seqs:,} {pluralize(n_seqs, 'sequence')}"
+
+
 def failed_items(df) -> list[str]:
     """Items whose query failed in the call that returned *df*.
 

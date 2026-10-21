@@ -16,6 +16,7 @@ import trident.pipelines as pipe
 from trident.pipelines.results_pipeline import add_check_hit
 
 from trident.ui.ui import (
+    species_for_sequences,
     coerce_stored_value,
     record_empty_step,
     failed_items,
@@ -332,7 +333,7 @@ def hypo_search_workflow():
         )
     if mode != "NEW" and st.session_state.hypo_merge_df is not None:
         with st.expander(
-            f"Inspect full HYPO search results ({len(st.session_state.hypo_merge_df)} records)",
+            f"Inspect full HYPO search results ({len(st.session_state.hypo_merge_df):,} hits)",
             expanded=False,
         ):
             st.dataframe(
@@ -485,7 +486,7 @@ def hypo_filter_workflow():
     # Results Preview
     if st.session_state.hypo_filter_df is not None:
         with st.expander(
-            f"Inspect filtered HYPO results ({len(st.session_state.hypo_filter_df)} records)",
+            f"Inspect filtered HYPO results ({len(st.session_state.hypo_filter_df):,} hits)",
             expanded=False,
         ):
             st.dataframe(
@@ -940,7 +941,7 @@ def display_hypo_results():
         display_hypo_summary()
 
         with st.expander(
-            f"View full HYPO list ({len(st.session_state.hypo_df)} records)",
+            f"View full HYPO list ({species_for_sequences(st.session_state.hypo_df)})",
             expanded=False,
         ):
             st.dataframe(

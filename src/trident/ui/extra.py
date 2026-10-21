@@ -11,6 +11,7 @@ from trident.core import config
 import trident.pipelines as pipe
 
 from trident.ui.ui import (
+    species_for_sequences,
     record_empty_step,
     failed_items,
     show_failed_items_banner,
@@ -170,7 +171,7 @@ def bold_search_workflow():
                 failed=st.session_state.bold_search_failed,
             )
         with st.expander(
-            f"Inspect full BOLD search results ({len(st.session_state.bold_search_df)} records)",
+            f"Inspect full BOLD search results ({len(st.session_state.bold_search_df):,} records)",
             expanded=False,
         ):
             df = st.session_state.bold_search_df
@@ -631,7 +632,8 @@ def display_bold_results():
         display_extra_summary()
 
         with st.expander(
-            f"View full EXTRA list ({len(extra_df):,} records)", expanded=False
+            f"View full EXTRA list ({len(extra_df):,} BOLD records: {species_for_sequences(extra_df)})",
+            expanded=False,
         ):
             st.dataframe(
                 extra_df,

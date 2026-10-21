@@ -17,6 +17,7 @@ import trident.pipelines as pipe
 
 
 from trident.ui.ui import (
+    species_for_sequences,
     failed_items,
     show_failed_items_banner,
     styled_or_plain,
@@ -263,7 +264,7 @@ def ncbi_search_workflow():
         display_ncbi_search_overview()
 
         with st.expander(
-            f"Inspect raw NCBI/BLAST results ({len(st.session_state.ncbi_search_df)} hits)",
+            f"Inspect raw NCBI/BLAST results ({len(st.session_state.ncbi_search_df):,} hits)",
             expanded=False,
         ):
             cols = st.session_state.ncbi_search_df.columns.tolist()
@@ -997,7 +998,7 @@ def display_ncbi_results():
         display_ncbi_summary()
 
         with st.expander(
-            f"View full MOL list ({len(final_df)} hits)",
+            f"View full MOL list ({len(final_df):,} hits: {species_for_sequences(final_df)})",
             expanded=False,
         ):
             display_full_mol_list()
