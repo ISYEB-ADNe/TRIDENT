@@ -1,6 +1,5 @@
 """Client for the WoRMS (World Register of Marine Species) REST API."""
 
-import json
 from urllib.parse import quote
 
 import pandas as pd
@@ -33,16 +32,15 @@ def _get_json(session: requests.Session, url: str, params: dict):
     """GET a WoRMS lookup and return its JSON body, or None when nothing matches.
 
     WoRMS answers an unknown name or id with 204 (no content) or 404; both are
-    a valid "not found", not a request failure. Other HTTP errors raise.
+    a valid "not found", not a request failure. Other HTTP errors raise, and so
+    does a body that is not JSON (e.g. a maintenance page): taken for "not
+    found", it would be saved as such and never asked again.
     """
     response = session.get(url, params=params, timeout=10)
     if response.status_code in (204, 404):
         return None
     response.raise_for_status()
-    try:
-        return response.json()
-    except json.JSONDecodeError:
-        return None
+    return response.json()
 
 
 @with_optional_session(retries=5, backoff_factor=0.5)

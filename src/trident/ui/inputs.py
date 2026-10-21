@@ -4,6 +4,7 @@ Input handling UI: FASTA upload, DB restore, and sequence preview.
 
 import io
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -108,19 +109,23 @@ def _free_name(name: str) -> str:
 
 def _has_sequences(db_path: Path) -> bool:
     """Whether the database holds the sequences an analysis is restored from
-    (an empty file or another tool's SQLite file does not)."""
-    with get_connection(db_path) as conn:
-        return bool(
-            conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sequences'"
-            ).fetchone()
-        )
+    (an empty file, a file that is not SQLite or another tool's SQLite file
+    does not)."""
+    try:
+        with get_connection(db_path) as conn:
+            return bool(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'sequences'"
+                ).fetchone()
+            )
+    except sqlite3.DatabaseError:
+        return False
 
 
 def _restore_db(uploaded_file, name: str):
     """Restore analysis from an uploaded .db file, saved as *name*."""
-    db = _db_path(name)
-    target_path = Path(db)
+    target_path = Path(_db_path(name))
     target_path.parent.mkdir(parents=True, exist_ok=True)
     # Checked under another name first, so an incompatible file never
     # replaces the analysis it was meant to overwrite.
@@ -135,16 +140,78 @@ def _restore_db(uploaded_file, name: str):
         st.error(message)
         return
     upload_path.replace(target_path)
+    _open_analysis(name)
 
+
+def _open_analysis(name: str):
+    """Make the full analysis *name* (in the results folder) the active one."""
     reset_for_new_analysis("analysis_name")
     st.session_state.analysis_name = name
-    st.session_state.db_path = db
+    st.session_state.db_path = _db_path(name)
     st.session_state.sequences_df = None  # Will trigger auto-restore on rerun
-    # A fresh uploader: the restored file would otherwise stay in it, offering
+    # A fresh uploader: a restored file would otherwise stay in it, offering
     # to restore it again under a new name.
     st.session_state.fasta_uploader_key += 1
     st.session_state.requested_tab = "start"
     st.rerun()
+
+
+def _saved_analyses() -> list[Path]:
+    """The full analyses of the results folder, newest first, the active one
+    left out."""
+    paths = [
+        path
+        for path in results_dir().glob("*.db")
+        if path.stem != st.session_state.get("analysis_name") and _has_sequences(path)
+    ]
+    return sorted(paths, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def _analysis_label(path: Path) -> str:
+    """A saved analysis as the list shows it, e.g. "name (20 Oct 2026, 86 MB)":
+    the date and size tell apart copies of one analysis."""
+    stat = path.stat()
+    day = datetime.fromtimestamp(stat.st_mtime).strftime("%d %b %Y")
+    mb = stat.st_size / 1e6
+    size = f"{mb:,.0f} MB" if mb >= 1 else f"{stat.st_size / 1e3:,.0f} kB"
+    return f"{path.stem} ({day}, {size})"
+
+
+def open_saved_analysis():
+    """Open a full analysis already in the results folder, without copying it.
+
+    Not on Streamlit Cloud, where the folder holds every user's analyses.
+    """
+    if is_streamlit_cloud():
+        return
+    paths = _saved_analyses()
+    if not paths:
+        return
+    labels = {str(path): _analysis_label(path) for path in paths}
+    choice = st.selectbox(
+        "Or open a full analysis saved on this computer",
+        list(labels),
+        index=None,
+        format_func=labels.get,
+        placeholder="Choose an analysis",
+        key=f"open_analysis_{st.session_state.fasta_uploader_key}",
+    )
+    if st.button(
+        "Open Analysis",
+        icon=":material/folder_open:",
+        type="primary",
+        disabled=choice is None,
+        width="stretch",
+    ):
+        # Checked first: opening a missing file would create an empty one.
+        if not Path(choice).is_file():
+            st.error("This analysis is no longer in the results folder.")
+            return
+        compatible, message = check_schema_version(choice)
+        if not compatible:
+            st.error(message)
+            return
+        _open_analysis(Path(choice).stem)
 
 
 def _auto_restore_from_db():
@@ -203,6 +270,16 @@ def handle_file_upload():
         if Path(restore_name).name != restore_name:
             st.error("Enter a name without folders.")
             return
+        # On Cloud the folder is on the server and holds no list to reopen from.
+        if is_streamlit_cloud():
+            st.caption("TRIDENT works on a copy: your file is left unchanged.")
+        else:
+            st.caption(
+                f"TRIDENT keeps a copy in its results folder "
+                f"(`{_db_path(restore_name)}`) and works on that copy: your file "
+                "is left unchanged. To continue it later, open it from the list "
+                "below instead of uploading it again."
+            )
         if Path(_db_path(restore_name)).exists():
             st.warning(
                 f"A full analysis named **{restore_name}** already exists: "
@@ -212,7 +289,7 @@ def handle_file_upload():
             "Restore Analysis",
             icon=":material/restore:",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         ):
             _restore_db(uploaded_file, restore_name)
 
@@ -228,7 +305,7 @@ def handle_file_upload():
             "Process FASTA",
             icon=":material/play_arrow:",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         ):
             _start_fasta_analysis(uploaded_file.name, uploaded_file.getvalue())
 
@@ -251,7 +328,7 @@ def load_example_button():
             "The GEO window is set to the paper's (78.5° N, 14.5° E, 250 km; 500 km is "
             "also searched for comparison)."
         ),
-        use_container_width=True,
+        width="stretch",
     ):
         _start_fasta_analysis(
             EXAMPLE_FASTA.name, EXAMPLE_FASTA.read_bytes(), EXAMPLE_SETTINGS
@@ -274,7 +351,7 @@ def display_analysis_status():
             "Proceed to MOL",
             icon=":material/arrow_forward:",
             type="secondary",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state.requested_tab = "mol"
             st.rerun()
@@ -291,6 +368,7 @@ def upload_and_start_analysis():
     _auto_restore_from_db()
 
     handle_file_upload()
+    open_saved_analysis()
     load_example_button()
 
     st.divider()

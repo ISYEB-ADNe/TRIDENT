@@ -5,6 +5,8 @@ genera as failures (so the cache layer retries them), not genera that simply
 have no AphiaID or no children.
 """
 
+import pytest
+
 from trident.clients import worms
 from trident.clients.worms import get_species_from_genus_list
 
@@ -73,6 +75,20 @@ def test_get_aphia_record_returns_none_on_404():
             return Resp()
 
     assert worms.get_aphia_record("Ammodytes sp.", session=Sess()) is None
+
+
+def test_answer_that_is_not_json_is_an_error_not_a_not_found():
+    """A 200 answer that is not JSON (e.g. a maintenance page) raises, so the
+    name is reported failed and asked again, not saved as unknown to WoRMS."""
+
+    class MaintenancePage(_Page):
+        def json(self):
+            raise worms.requests.exceptions.JSONDecodeError(
+                "Expecting value", "<html>", 0
+            )
+
+    with pytest.raises(worms.requests.exceptions.JSONDecodeError):
+        worms.get_aphia_records("Gadus", session=_Session(MaintenancePage(200)))
 
 
 def test_resolve_accepted_passthrough(monkeypatch):
