@@ -222,6 +222,274 @@
    "scientificNameID": "urn:lsid:marinespecies.org:taxname:1750258"
   }
  },
+ "Larus atricilla": {
+  "body": {
+   "additionalStatus": [
+    {
+     "clbDatasetKey": "53131",
+     "datasetAlias": "IUCN",
+     "datasetKey": "19491596-35ae-4a91-9a98-85cf505f1bd3",
+     "sourceId": "22694455",
+     "status": "LEAST_CONCERN",
+     "statusCode": "LC"
+    }
+   ],
+   "classification": [
+    {
+     "key": "CS5HF",
+     "name": "Eukaryota",
+     "rank": "DOMAIN"
+    },
+    {
+     "key": "N",
+     "name": "Animalia",
+     "rank": "KINGDOM"
+    },
+    {
+     "key": "CH2",
+     "name": "Chordata",
+     "rank": "PHYLUM"
+    },
+    {
+     "key": "8V4V3",
+     "name": "Vertebrata",
+     "rank": "SUBPHYLUM"
+    },
+    {
+     "key": "8V4V5",
+     "name": "Gnathostomata",
+     "rank": "INFRAPHYLUM"
+    },
+    {
+     "key": "8VVWB",
+     "name": "Osteichthyes",
+     "rank": "PARVPHYLUM"
+    },
+    {
+     "key": "9CK8W",
+     "name": "Tetrapoda",
+     "rank": "MEGACLASS"
+    },
+    {
+     "key": "V2",
+     "name": "Aves",
+     "rank": "CLASS"
+    },
+    {
+     "key": "X3",
+     "name": "Charadriiformes",
+     "rank": "ORDER"
+    },
+    {
+     "key": "BSK",
+     "name": "Laridae",
+     "rank": "FAMILY"
+    },
+    {
+     "key": "9H84Y",
+     "name": "Leucophaeus",
+     "rank": "GENUS"
+    },
+    {
+     "key": "7253D",
+     "name": "Leucophaeus atricilla",
+     "rank": "SPECIES"
+    },
+    {
+     "key": "7JY7Q",
+     "name": "Leucophaeus atricilla atricilla",
+     "rank": "SUBSPECIES"
+    }
+   ],
+   "diagnostics": {
+    "confidence": 100,
+    "matchType": "EXACT",
+    "matchedID": {
+     "clbDatasetKey": "2011",
+     "datasetKey": "2d59e5db-57ad-41ff-97d6-11f5fb264527",
+     "datasetTitle": "World Register of Marine Species",
+     "id": "urn:lsid:marinespecies.org:taxname:159074",
+     "mainIndexID": "7JY7Q",
+     "parentID": "urn:lsid:marinespecies.org:taxname:137043",
+     "rank": "SPECIES",
+     "recognizedVariants": [
+      "urn:lsid:marinespecies.org:taxname:159074",
+      "worms:159074",
+      "AphiaID:159074",
+      "http://marinespecies.org/data.php?id=159074",
+      "https://marinespecies.org/data.php?id=159074",
+      "https://www.marinespecies.org/aphia.php?p=taxdetails&id=159074"
+     ],
+     "scientificName": "Larus atricilla Linnaeus, 1758",
+     "status": "ACCEPTED"
+    },
+    "timeTaken": 9,
+    "timings": {
+     "checkConsistencyWithClassificationMatch": 0,
+     "checkScientificNameAndIDConsistencyScientificNameID": 0,
+     "idMatchScientificNameID": 0,
+     "luceneMatch": 9,
+     "nameNRank": 0,
+     "nameParse": 0,
+     "sciNameMatch": 10
+    }
+   },
+   "synonym": false,
+   "usage": {
+    "authorship": "(Linnaeus, 1758)",
+    "canonicalName": "Leucophaeus atricilla atricilla",
+    "code": "ZOOLOGICAL",
+    "formattedName": "<i>Leucophaeus</i> <i>atricilla</i> <i>atricilla</i> (Linnaeus, 1758)",
+    "genericName": "Leucophaeus",
+    "infraspecificEpithet": "atricilla",
+    "key": "7JY7Q",
+    "name": "Leucophaeus atricilla atricilla (Linnaeus, 1758)",
+    "rank": "SUBSPECIES",
+    "specificEpithet": "atricilla",
+    "status": "ACCEPTED",
+    "type": "SCIENTIFIC"
+   }
+  },
+  "params": {
+   "checklistKey": "7ddf754f-d193-4cc9-b351-99906754a03b",
+   "scientificName": "Larus atricilla",
+   "scientificNameID": "urn:lsid:marinespecies.org:taxname:159074"
+  }
+ },
+ "Larus novaehollandiae": {
+  "body": {
+   "additionalStatus": [
+    {
+     "clbDatasetKey": "53131",
+     "datasetAlias": "IUCN",
+     "datasetKey": "19491596-35ae-4a91-9a98-85cf505f1bd3",
+     "sourceId": "62021891",
+     "status": "LEAST_CONCERN",
+     "statusCode": "LC"
+    }
+   ],
+   "classification": [
+    {
+     "key": "CS5HF",
+     "name": "Eukaryota",
+     "rank": "DOMAIN"
+    },
+    {
+     "key": "N",
+     "name": "Animalia",
+     "rank": "KINGDOM"
+    },
+    {
+     "key": "CH2",
+     "name": "Chordata",
+     "rank": "PHYLUM"
+    },
+    {
+     "key": "8V4V3",
+     "name": "Vertebrata",
+     "rank": "SUBPHYLUM"
+    },
+    {
+     "key": "8V4V5",
+     "name": "Gnathostomata",
+     "rank": "INFRAPHYLUM"
+    },
+    {
+     "key": "8VVWB",
+     "name": "Osteichthyes",
+     "rank": "PARVPHYLUM"
+    },
+    {
+     "key": "9CK8W",
+     "name": "Tetrapoda",
+     "rank": "MEGACLASS"
+    },
+    {
+     "key": "V2",
+     "name": "Aves",
+     "rank": "CLASS"
+    },
+    {
+     "key": "X3",
+     "name": "Charadriiformes",
+     "rank": "ORDER"
+    },
+    {
+     "key": "BSK",
+     "name": "Laridae",
+     "rank": "FAMILY"
+    },
+    {
+     "key": "3P9X",
+     "name": "Chroicocephalus",
+     "rank": "GENUS"
+    },
+    {
+     "key": "5YGFR",
+     "name": "Chroicocephalus novaehollandiae",
+     "rank": "SPECIES"
+    },
+    {
+     "key": "7JKTK",
+     "name": "Chroicocephalus novaehollandiae novaehollandiae",
+     "rank": "SUBSPECIES"
+    }
+   ],
+   "diagnostics": {
+    "confidence": 100,
+    "matchType": "EXACT",
+    "matchedID": {
+     "clbDatasetKey": "2011",
+     "datasetKey": "2d59e5db-57ad-41ff-97d6-11f5fb264527",
+     "datasetTitle": "World Register of Marine Species",
+     "id": "urn:lsid:marinespecies.org:taxname:343915",
+     "mainIndexID": "7JKTK",
+     "parentID": "urn:lsid:marinespecies.org:taxname:137043",
+     "rank": "SPECIES",
+     "recognizedVariants": [
+      "urn:lsid:marinespecies.org:taxname:343915",
+      "worms:343915",
+      "AphiaID:343915",
+      "http://marinespecies.org/data.php?id=343915",
+      "https://marinespecies.org/data.php?id=343915",
+      "https://www.marinespecies.org/aphia.php?p=taxdetails&id=343915"
+     ],
+     "scientificName": "Larus novaehollandiae Stephens, 1826",
+     "status": "ACCEPTED"
+    },
+    "timeTaken": 10,
+    "timings": {
+     "checkConsistencyWithClassificationMatch": 0,
+     "checkScientificNameAndIDConsistencyScientificNameID": 1,
+     "idMatchScientificNameID": 0,
+     "luceneMatch": 9,
+     "nameNRank": 0,
+     "nameParse": 1,
+     "sciNameMatch": 10
+    }
+   },
+   "synonym": false,
+   "usage": {
+    "authorship": "(Stephens, 1826)",
+    "canonicalName": "Chroicocephalus novaehollandiae novaehollandiae",
+    "code": "ZOOLOGICAL",
+    "formattedName": "<i>Chroicocephalus</i> <i>novaehollandiae</i> <i>novaehollandiae</i> (Stephens, 1826)",
+    "genericName": "Chroicocephalus",
+    "infraspecificEpithet": "novaehollandiae",
+    "key": "7JKTK",
+    "name": "Chroicocephalus novaehollandiae novaehollandiae (Stephens, 1826)",
+    "rank": "SUBSPECIES",
+    "specificEpithet": "novaehollandiae",
+    "status": "ACCEPTED",
+    "type": "SCIENTIFIC"
+   }
+  },
+  "params": {
+   "checklistKey": "7ddf754f-d193-4cc9-b351-99906754a03b",
+   "scientificName": "Larus novaehollandiae",
+   "scientificNameID": "urn:lsid:marinespecies.org:taxname:343915"
+  }
+ },
  "Larus saundersi": {
   "body": {
    "additionalStatus": [
@@ -348,6 +616,254 @@
    "checklistKey": "7ddf754f-d193-4cc9-b351-99906754a03b",
    "scientificName": "Larus saundersi",
    "scientificNameID": "urn:lsid:marinespecies.org:taxname:343919"
+  }
+ },
+ "Larus scopulinus": {
+  "body": {
+   "classification": [
+    {
+     "key": "CS5HF",
+     "name": "Eukaryota",
+     "rank": "DOMAIN"
+    },
+    {
+     "key": "N",
+     "name": "Animalia",
+     "rank": "KINGDOM"
+    },
+    {
+     "key": "CH2",
+     "name": "Chordata",
+     "rank": "PHYLUM"
+    },
+    {
+     "key": "8V4V3",
+     "name": "Vertebrata",
+     "rank": "SUBPHYLUM"
+    },
+    {
+     "key": "8V4V5",
+     "name": "Gnathostomata",
+     "rank": "INFRAPHYLUM"
+    },
+    {
+     "key": "8VVWB",
+     "name": "Osteichthyes",
+     "rank": "PARVPHYLUM"
+    },
+    {
+     "key": "9CK8W",
+     "name": "Tetrapoda",
+     "rank": "MEGACLASS"
+    },
+    {
+     "key": "V2",
+     "name": "Aves",
+     "rank": "CLASS"
+    },
+    {
+     "key": "X3",
+     "name": "Charadriiformes",
+     "rank": "ORDER"
+    },
+    {
+     "key": "BSK",
+     "name": "Laridae",
+     "rank": "FAMILY"
+    },
+    {
+     "key": "3P9X",
+     "name": "Chroicocephalus",
+     "rank": "GENUS"
+    },
+    {
+     "key": "5YGFR",
+     "name": "Chroicocephalus novaehollandiae",
+     "rank": "SPECIES"
+    },
+    {
+     "key": "9HKV2",
+     "name": "Chroicocephalus novaehollandiae scopulinus",
+     "rank": "SUBSPECIES"
+    }
+   ],
+   "diagnostics": {
+    "confidence": 100,
+    "matchType": "EXACT",
+    "matchedID": {
+     "clbDatasetKey": "2011",
+     "datasetKey": "2d59e5db-57ad-41ff-97d6-11f5fb264527",
+     "datasetTitle": "World Register of Marine Species",
+     "id": "urn:lsid:marinespecies.org:taxname:225913",
+     "mainIndexID": "9HKV2",
+     "parentID": "urn:lsid:marinespecies.org:taxname:137043",
+     "rank": "SPECIES",
+     "recognizedVariants": [
+      "urn:lsid:marinespecies.org:taxname:225913",
+      "worms:225913",
+      "AphiaID:225913",
+      "http://marinespecies.org/data.php?id=225913",
+      "https://marinespecies.org/data.php?id=225913",
+      "https://www.marinespecies.org/aphia.php?p=taxdetails&id=225913"
+     ],
+     "scientificName": "Larus scopulinus Forster, 1844",
+     "status": "ACCEPTED"
+    },
+    "timeTaken": 10,
+    "timings": {
+     "checkConsistencyWithClassificationMatch": 0,
+     "checkScientificNameAndIDConsistencyScientificNameID": 0,
+     "idMatchScientificNameID": 0,
+     "luceneMatch": 8,
+     "nameNRank": 0,
+     "nameParse": 2,
+     "sciNameMatch": 10
+    }
+   },
+   "synonym": false,
+   "usage": {
+    "authorship": "(J. R. Forster, 1844)",
+    "canonicalName": "Chroicocephalus novaehollandiae scopulinus",
+    "code": "ZOOLOGICAL",
+    "formattedName": "<i>Chroicocephalus</i> <i>novaehollandiae</i> <i>scopulinus</i> (J. R. Forster, 1844)",
+    "genericName": "Chroicocephalus",
+    "infraspecificEpithet": "scopulinus",
+    "key": "9HKV2",
+    "name": "Chroicocephalus novaehollandiae scopulinus (J. R. Forster, 1844)",
+    "rank": "SUBSPECIES",
+    "specificEpithet": "novaehollandiae",
+    "status": "ACCEPTED",
+    "type": "SCIENTIFIC"
+   }
+  },
+  "params": {
+   "checklistKey": "7ddf754f-d193-4cc9-b351-99906754a03b",
+   "scientificName": "Larus scopulinus",
+   "scientificNameID": "urn:lsid:marinespecies.org:taxname:225913"
+  }
+ },
+ "Larus thayeri": {
+  "body": {
+   "classification": [
+    {
+     "key": "CS5HF",
+     "name": "Eukaryota",
+     "rank": "DOMAIN"
+    },
+    {
+     "key": "N",
+     "name": "Animalia",
+     "rank": "KINGDOM"
+    },
+    {
+     "key": "CH2",
+     "name": "Chordata",
+     "rank": "PHYLUM"
+    },
+    {
+     "key": "8V4V3",
+     "name": "Vertebrata",
+     "rank": "SUBPHYLUM"
+    },
+    {
+     "key": "8V4V5",
+     "name": "Gnathostomata",
+     "rank": "INFRAPHYLUM"
+    },
+    {
+     "key": "8VVWB",
+     "name": "Osteichthyes",
+     "rank": "PARVPHYLUM"
+    },
+    {
+     "key": "9CK8W",
+     "name": "Tetrapoda",
+     "rank": "MEGACLASS"
+    },
+    {
+     "key": "V2",
+     "name": "Aves",
+     "rank": "CLASS"
+    },
+    {
+     "key": "X3",
+     "name": "Charadriiformes",
+     "rank": "ORDER"
+    },
+    {
+     "key": "BSK",
+     "name": "Laridae",
+     "rank": "FAMILY"
+    },
+    {
+     "key": "62XFH",
+     "name": "Larus",
+     "rank": "GENUS"
+    },
+    {
+     "key": "3SBQC",
+     "name": "Larus glaucoides",
+     "rank": "SPECIES"
+    },
+    {
+     "key": "B765P",
+     "name": "Larus glaucoides thayeri",
+     "rank": "SUBSPECIES"
+    }
+   ],
+   "diagnostics": {
+    "confidence": 100,
+    "matchType": "EXACT",
+    "matchedID": {
+     "clbDatasetKey": "2011",
+     "datasetKey": "2d59e5db-57ad-41ff-97d6-11f5fb264527",
+     "datasetTitle": "World Register of Marine Species",
+     "id": "urn:lsid:marinespecies.org:taxname:343922",
+     "mainIndexID": "B765P",
+     "parentID": "urn:lsid:marinespecies.org:taxname:137043",
+     "rank": "SPECIES",
+     "recognizedVariants": [
+      "urn:lsid:marinespecies.org:taxname:343922",
+      "worms:343922",
+      "AphiaID:343922",
+      "http://marinespecies.org/data.php?id=343922",
+      "https://marinespecies.org/data.php?id=343922",
+      "https://www.marinespecies.org/aphia.php?p=taxdetails&id=343922"
+     ],
+     "scientificName": "Larus thayeri Brooks, 1915",
+     "status": "ACCEPTED"
+    },
+    "timeTaken": 8,
+    "timings": {
+     "checkConsistencyWithClassificationMatch": 0,
+     "checkScientificNameAndIDConsistencyScientificNameID": 0,
+     "idMatchScientificNameID": 0,
+     "luceneMatch": 8,
+     "nameNRank": 0,
+     "nameParse": 0,
+     "sciNameMatch": 8
+    }
+   },
+   "synonym": false,
+   "usage": {
+    "authorship": "W. S. Brooks, 1915",
+    "canonicalName": "Larus glaucoides thayeri",
+    "code": "ZOOLOGICAL",
+    "formattedName": "<i>Larus</i> <i>glaucoides</i> <i>thayeri</i> W. S. Brooks, 1915",
+    "genericName": "Larus",
+    "infraspecificEpithet": "thayeri",
+    "key": "B765P",
+    "name": "Larus glaucoides thayeri W. S. Brooks, 1915",
+    "rank": "SUBSPECIES",
+    "specificEpithet": "glaucoides",
+    "status": "ACCEPTED",
+    "type": "SCIENTIFIC"
+   }
+  },
+  "params": {
+   "checklistKey": "7ddf754f-d193-4cc9-b351-99906754a03b",
+   "scientificName": "Larus thayeri",
+   "scientificNameID": "urn:lsid:marinespecies.org:taxname:343922"
   }
  },
  "Lestrolepis philippina": {

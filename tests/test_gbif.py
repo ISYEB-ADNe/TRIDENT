@@ -379,7 +379,8 @@ def test_species_counted_under_gbif_species_of_worms_id_or_name(monkeypatch):
     name or a variant of it; names sharing a species are both kept. A synonym
     in GBIF of another species (a separate species in WoRMS) counts under its
     own GBIF key; one that only changes the genus, under the accepted key. A
-    genus-only or fuzzy match is left out."""
+    subspecies in GBIF counts under its species when it is the nominate one,
+    else under its own key. A genus-only or fuzzy match is left out."""
     answers = {name: match["body"] for name, match in V2_MATCHES.items()}
     # A misspelt name GBIF matches fuzzily to Spicara flexuosum, without an ID
     spicara = answers["Spicara flexuosum"]
@@ -409,6 +410,10 @@ def test_species_counted_under_gbif_species_of_worms_id_or_name(monkeypatch):
         "Monocentris neozelanica",  # name variant: neozelanicus
         "Arctozenus japonicus",  # synonym, genus change only: L. japonica
         "Lestrolepis philippina",  # synonym of L. japonica, separate in WoRMS
+        "Larus atricilla",  # nominate subspecies of Leucophaeus atricilla
+        "Larus novaehollandiae",  # nominate subspecies of C. novaehollandiae
+        "Larus scopulinus",  # subspecies of Chroicocephalus novaehollandiae
+        "Larus thayeri",  # subspecies of Larus glaucoides
     }
     larus = kept.loc["Larus saundersi"]
     assert larus["gbif_scientificName"] == "Chroicocephalus saundersi"
@@ -422,6 +427,16 @@ def test_species_counted_under_gbif_species_of_worms_id_or_name(monkeypatch):
     assert own["gbif_scientificName"] == "Lestrolepis philippina"
     assert "synonym in GBIF of Lestrolepis japonica" in own["gbif_note"]
     assert japonica["taxonID"] == lestrolepis["acceptedUsage"]["key"]
+    names = kept["gbif_scientificName"].to_dict()
+    assert names["Larus atricilla"] == "Leucophaeus atricilla atricilla"
+    assert names["Larus novaehollandiae"] == (
+        "Chroicocephalus novaehollandiae novaehollandiae"
+    )
+    assert names["Larus scopulinus"] == "Chroicocephalus novaehollandiae scopulinus"
+    assert names["Larus thayeri"] == "Larus glaucoides thayeri"
+    scopulinus = V2_MATCHES["Larus scopulinus"]["body"]["classification"]
+    assert kept.loc["Larus novaehollandiae", "taxonID"] == scopulinus[-2]["key"]
+    assert kept.loc["Larus scopulinus", "taxonID"] == scopulinus[-1]["key"]
 
 
 def test_names_sharing_a_gbif_species_both_get_its_counts(monkeypatch):

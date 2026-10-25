@@ -432,11 +432,12 @@ def gbif_search_workflow():
             f"Inspect GBIF search results ({species_for_sequences(st.session_state.gbif_search_df)})",
             expanded=False,
         ):
-            df = st.session_state.gbif_search_df
+            df = _with_gbif_names(st.session_state.gbif_search_df)
             cols = df.columns.tolist()
             priority = [
                 "seq_id",
                 "scientificName",
+                "gbif_scientificName",
                 "gbif_taxonURL",
                 "gbif_extent",
                 "occurrences",
@@ -460,6 +461,7 @@ def gbif_search_workflow():
                 column_config={
                     "seq_id": COL["seq_id"],
                     "scientificName": COL["scientificName"],
+                    "gbif_scientificName": COL["gbif_scientificName"],
                     "gbif_taxonURL": COL["gbif_taxonURL"],
                     "gbif_extent": COL["gbif_extent"],
                     "occurrences": COL["occurrences"],
@@ -848,15 +850,26 @@ def display_gbif_sequence():
     )
 
 
+def _with_gbif_names(df: pd.DataFrame) -> pd.DataFrame:
+    """df with the name GBIF gives each species, where it differs from WoRMS's
+    (see name_in_source)."""
+    return df.assign(
+        gbif_scientificName=pipe.name_in_source(
+            df["scientificName"], st.session_state.name_table, "gbif"
+        )
+    )
+
+
 def display_full_geo_list():
     """Display the complete GEO list in a flat table."""
-    geo_df = st.session_state.geo_df
+    geo_df = _with_gbif_names(st.session_state.geo_df)
     cols = geo_df.columns.tolist()
     priority = [
         "seq_id",
         "scientificName",
         "gbif_occurrences",
         "mol_top_identity_percentage",
+        "gbif_scientificName",
         "gbif_taxonURL",
         "taxonURL",
         "genus",
@@ -878,6 +891,7 @@ def display_full_geo_list():
         column_config={
             "seq_id": COL["seq_id"],
             "scientificName": COL["scientificName"],
+            "gbif_scientificName": COL["gbif_scientificName"],
             "gbif_taxonURL": COL["gbif_taxonURL"],
             "taxonURL": COL["taxonURL"],
             "gbif_occurrences": COL["gbif_occurrences"],

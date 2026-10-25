@@ -155,6 +155,11 @@ COL = {
         "BOLD DNA Sequence", width="large"
     ),
     "gbif_taxonURL": st.column_config.LinkColumn("GBIF Link", display_text="🔗 View"),
+    "gbif_scientificName": st.column_config.TextColumn(
+        "Name in GBIF",
+        help="The name GBIF gives the species, when it differs from WoRMS; a "
+        "subspecies name when GBIF holds it as one (see the GBIF match log).",
+    ),
     "occurrences": st.column_config.NumberColumn(
         "Occurrences",
         format="%d",

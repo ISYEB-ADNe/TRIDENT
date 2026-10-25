@@ -281,7 +281,14 @@ def _match_single_taxon_name(
             "status": usage.get("status"),
             "rank": usage.get("rank"),
             "matched_by": matched_by,
-            **_counted_species(name, usage, accepted, matched_by, match_type),
+            **_counted_species(
+                name,
+                usage,
+                accepted,
+                matched_by,
+                match_type,
+                data.get("classification"),
+            ),
             **{rank: ranks.get(rank) for rank in _TAXON_RANKS},
             "needs_review": confidence < GBIF_CONFIDENCE or match_type == "NONE",
         }
@@ -532,11 +539,12 @@ _GENDER_ENDINGS = ("rum", "um", "us", "is", "ra", "er", "a", "e")
 
 
 def _epithet_stem(name: str | None) -> str | None:
-    """The species epithet of a name without its gender ending."""
+    """The last epithet of a name (the species epithet of a binomial, the
+    subspecies one of a trinomial) without its gender ending."""
     parts = (name or "").lower().split()
     if len(parts) < 2:
         return None
-    epithet = parts[1]
+    epithet = parts[-1]
     for ending in _GENDER_ENDINGS:
         if epithet.endswith(ending) and len(epithet) > len(ending) + 1:
             return epithet[: -len(ending)]
@@ -544,7 +552,12 @@ def _epithet_stem(name: str | None) -> str | None:
 
 
 def _counted_species(
-    query: str, usage: dict, accepted: dict, matched_by: str, match_type: str
+    query: str,
+    usage: dict,
+    accepted: dict,
+    matched_by: str,
+    match_type: str,
+    classification: list[dict] | None = None,
 ) -> dict:
     """The GBIF species whose occurrences count for the queried name.
 
@@ -558,18 +571,31 @@ def _counted_species(
     same species, counted under the accepted key, which also holds the records
     under the new genus.
 
+    A WoRMS species GBIF holds as a subspecies follows the same rule. Its
+    nominate subspecies (Larus atricilla -> Leucophaeus atricilla atricilla) is
+    the species itself, counted under the GBIF species, which also holds the
+    records named at species level only. Another subspecies (Larus thayeri ->
+    Larus glaucoides thayeri) is counted under its own key: the species key
+    would add all the records of L. glaucoides.
+
     Args:
         query: The queried (TAX) name.
         usage: GBIF's usage of the match (``usage`` of the v2 answer).
         accepted: Its accepted usage (``acceptedUsage``, or the usage itself).
         matched_by: "WoRMS ID" or "name".
         match_type: GBIF's match type.
+        classification: GBIF's classification of the match, from the top
+            rank down to the match.
 
     Returns:
         Dict with ``taxonID`` (the key whose occurrences are counted; None
         when GBIF matched a higher rank only), ``canonicalName`` (GBIF's name
-        of that key), ``note`` (how a synonym is counted, else None) and
+        of the species, a subspecies name when GBIF holds it as one),
+        ``note`` (how a synonym or subspecies is counted, else None) and
         ``left_out`` (why the match is not counted, else None).
+        A nominate subspecies keeps its own name: its name searches in other
+        sources (BOLD, the HYPO check) then miss the species' other
+        subspecies.
     """
     counted = {
         "taxonID": accepted.get("key"),
@@ -577,8 +603,14 @@ def _counted_species(
         "note": None,
         "left_out": None,
     }
+    species = accepted
     if accepted.get("rank") != "SPECIES":
-        return counted | {"taxonID": None}
+        species = next(
+            (taxon for taxon in classification or [] if taxon.get("rank") == "SPECIES"),
+            None,
+        )
+        if species is None:  # matched to a genus or higher
+            return counted | {"taxonID": None}
     if matched_by != "WoRMS ID" and match_type not in _SAME_NAME_MATCHES:
         return counted | {
             "left_out": f"GBIF found only {accepted.get('canonicalName')}, by a "
@@ -593,6 +625,22 @@ def _counted_species(
             "note": "counted under its own name, a synonym in GBIF of "
             f"{accepted.get('canonicalName')}",
         }
+    if species is not accepted:
+        # The nominate subspecies repeats the species epithet
+        nominate = _epithet_stem(accepted.get("canonicalName")) == _epithet_stem(
+            species.get("name")
+        )
+        if nominate and _epithet_stem(query) == _epithet_stem(species.get("name")):
+            return counted | {
+                "taxonID": species.get("key"),
+                "note": f"GBIF subspecies {accepted.get('canonicalName')}, counted "
+                f"with all records of {species.get('name')} (its other subspecies "
+                "included)",
+            }
+        return counted | {
+            "note": f"GBIF subspecies {accepted.get('canonicalName')}, counted with "
+            "its own records only"
+        }
     return counted
 
 
@@ -604,10 +652,10 @@ def filter_taxon_matches(
 
     A match is kept when GBIF found a species with enough confidence, through
     the WoRMS ID or by name, unless the match has a ``left_out`` reason (the
-    match log names them). A synonym in GBIF counts under the key
-    _counted_species chose. Several queried names can share one GBIF species (e.g. a
-    species WoRMS lists twice): each name keeps its row, with the same
-    occurrence counts.
+    match log names them). A synonym or subspecies in GBIF counts under the
+    key _counted_species chose. Several queried names can share one GBIF
+    species (e.g. a species WoRMS lists twice): each name keeps its row, with
+    the same occurrence counts.
 
     Args:
         matches_df: DataFrame from match_taxon_names()
@@ -615,10 +663,11 @@ def filter_taxon_matches(
 
     Returns:
         One row per kept name: ``scientificName`` is the queried name (the TAX
-        name the GEO merge joins on), ``gbif_scientificName`` the name GBIF
-        counts its occurrences under, ``gbif_matched_by`` "WoRMS ID" or "name",
-        ``aphia_id`` the WoRMS ID it was queried with, ``gbif_note`` how a
-        synonym in GBIF is counted.
+        name the GEO merge joins on), ``gbif_scientificName`` GBIF's name of
+        the species (a subspecies name when GBIF holds it as one; taxonID is
+        then the key its occurrences are counted under), ``gbif_matched_by``
+        "WoRMS ID" or "name", ``aphia_id`` the WoRMS ID it was queried with,
+        ``gbif_note`` how a synonym or subspecies in GBIF is counted.
         The classification columns and specificEpithet are those of GBIF's
         species. Always carries the standardised taxonomy columns, even when
         empty.

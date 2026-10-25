@@ -14,6 +14,7 @@ they are.
     bold_name_rows(bold_search_df) → DataFrame
     replace_source_rows(name_table, rows, source) → DataFrame
     resolved_names(name_table) → DataFrame
+    name_in_source(species, name_table, source) → Series
     other_names(species, name_table, sources) → dict
     species_of(names, name_table) → Series
     species_key(names, name_table) → Series
@@ -101,8 +102,7 @@ def build_name_table(
 
 
 def gbif_name_rows(gbif_search_df: pd.DataFrame) -> pd.DataFrame:
-    """Name table rows of the GBIF search: the name GBIF counts each species'
-    occurrences under.
+    """Name table rows of the GBIF search: GBIF's name of each species.
 
     Args:
         gbif_search_df: Output of run_gbif_search (scientificName the TAX
@@ -111,8 +111,9 @@ def gbif_name_rows(gbif_search_df: pd.DataFrame) -> pd.DataFrame:
 
     Returns:
         DataFrame with NAME_TABLE_COLUMNS, source "gbif", one row per species
-        GBIF matched, note saying how a synonym in GBIF is counted; empty for
-        a Backbone search, which keeps no GBIF name.
+        GBIF matched (a subspecies name when GBIF holds it as one), note
+        saying how a synonym or subspecies in GBIF is counted; empty for a
+        Backbone search, which keeps no GBIF name.
     """
     matched = (
         ensure_columns(
@@ -220,6 +221,21 @@ def resolved_names(name_table: pd.DataFrame | None) -> pd.DataFrame:
     if name_table is None:
         return pd.DataFrame(columns=NAME_TABLE_COLUMNS)
     return name_table[name_table["source"].isin(SYNONYM_SOURCES)]
+
+
+def name_in_source(
+    species: pd.Series, name_table: pd.DataFrame | None, source: str
+) -> pd.Series:
+    """The name *source* gives each species, where it differs from the
+    species name; empty (NaN) elsewhere. For display only: these names stand
+    for their species nowhere else (see SYNONYM_SOURCES)."""
+    if name_table is None or name_table.empty:
+        return pd.Series(pd.NA, index=species.index, dtype=object)
+    rows = name_table[
+        (name_table["source"] == source)
+        & (name_table["name_key"] != name_table["species_key"])
+    ].drop_duplicates("species_key")
+    return name_keys(species).map(rows.set_index("species_key")["name"])
 
 
 def other_names(
