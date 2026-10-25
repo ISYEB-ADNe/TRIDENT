@@ -303,6 +303,32 @@ def test_clear_empty_cache_without_results_table(db_path):
     assert cleared == 1
 
 
+def test_retry_empty_requeries_items_saved_with_only_a_reason(db_path):
+    """With result_col, an item whose rows only explain why it has no result
+    counts as empty: retry_empty queries it again and replaces its rows."""
+    calls = []
+
+    @save_to_db(
+        "test_reason_rows",
+        cache=PartialCache(items_kwarg="names", item_key="name", result_col="seq"),
+    )
+    def step(names):
+        calls.extend(names)
+        return pd.DataFrame(
+            {
+                "name": names,
+                "seq": ["ACGT" if n == "found" else None for n in names],
+                "why": [None if n == "found" else "not in BOLD" for n in names],
+            }
+        )
+
+    step(["found", "absent"], db_path=db_path)
+    df, _ = step(["found", "absent"], db_path=db_path, retry_empty=True)
+
+    assert calls == ["found", "absent", "absent"]
+    assert sorted(df["name"]) == ["absent", "found"]
+
+
 def test_view_cached_runs_with_empty_result(db_path):
     """view_cached_runs lists empty runs (row_count 0) even with no results table."""
 

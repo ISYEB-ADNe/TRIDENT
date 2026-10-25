@@ -704,33 +704,6 @@ def show_failed_items_banner(
     )
 
 
-def show_missing_results_banner(
-    input_values, result_df, key_col: str, item_label: str = "items", failed=None
-) -> None:
-    """Warn when items from THIS run's input are absent from its result.
-
-    Compares the current input against the current result (not the whole cache
-    history). Items in *failed* are left out: they are reported by
-    ``show_failed_items_banner``. The remaining missing items returned no
-    records and are cached as empty; "Retry empty results" re-queries them
-    (useful if the source changed, or for a database written before failures
-    were tracked, where a failed query was cached as empty).
-    """
-    inputs = set(input_values or [])
-    if not inputs:
-        return
-    found = set()
-    if result_df is not None and not result_df.empty and key_col in result_df.columns:
-        found = set(result_df[key_col].dropna().unique())
-    n_missing = len(inputs - found - set(failed or []))
-    if n_missing:
-        st.info(
-            f"{n_missing}/{len(inputs)} {item_label} returned no records (saved "
-            "as empty). To query them again, set Cache to **Retry empty "
-            "results** and re-run."
-        )
-
-
 # Widget key of the selected sequence, shared by every tab's selector.
 SELECTED_SEQUENCE_KEY = "selected_sequence"
 

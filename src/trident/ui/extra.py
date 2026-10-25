@@ -4,10 +4,19 @@ BOLD Analysis UI Module
 This module handles only UI rendering and user interaction.
 """
 
+import pandas as pd
 import streamlit as st
 
 
 from trident.core import config
+from trident.clients.bold import (
+    OUTCOMES_WITHOUT_SEQUENCES,
+    SEQUENCES,
+    bold_search_url,
+    outcome_counts,
+    outcomes_by_species,
+    with_sequences,
+)
 import trident.pipelines as pipe
 
 from trident.core.utils import species_for_sequences
@@ -27,7 +36,6 @@ from trident.ui.ui import (
     run_step_workflow,
     next_step_button,
     require_prerequisite,
-    show_missing_results_banner,
 )
 
 from trident.ui.defaults import BOLD_SIMILARITY_DEFAULT
@@ -163,18 +171,13 @@ def bold_search_workflow():
             show_failed_items_banner(
                 st.session_state.bold_search_failed, "species", "species", source="BOLD"
             )
-            show_missing_results_banner(
-                st.session_state.bold_input_species,
-                st.session_state.bold_search_df,
-                "scientificName",
-                item_label="species",
-                failed=st.session_state.bold_search_failed,
-            )
+            show_species_without_sequences_banner()
+        sequences = with_sequences(st.session_state.bold_search_df)
         with st.expander(
-            f"Inspect full BOLD search results ({len(st.session_state.bold_search_df):,} records)",
+            f"Inspect full BOLD search results ({len(sequences):,} sequences)",
             expanded=False,
         ):
-            df = st.session_state.bold_search_df
+            df = sequences
             st.dataframe(
                 df,
                 width="stretch",
@@ -208,6 +211,70 @@ def bold_search_workflow():
                     "taxonID_db": None,
                 },
             )
+
+
+QUERY_FAILED = "query failed"
+# A species without rows in a search saved before reasons were recorded.
+REASON_NOT_SAVED = "no usable sequence (reason not saved)"
+REASONS = [*OUTCOMES_WITHOUT_SEQUENCES, REASON_NOT_SAVED, QUERY_FAILED, SEQUENCES]
+
+
+def _species_outcomes() -> pd.Series:
+    """bold_outcome of each of this run's queried species, QUERY_FAILED for a
+    failed query."""
+    failed = set(st.session_state.bold_search_failed or [])
+    outcomes = outcomes_by_species(st.session_state.bold_search_df).reindex(
+        st.session_state.bold_input_species
+    )
+    return outcomes.fillna(REASON_NOT_SAVED).where(
+        ~outcomes.index.isin(failed), QUERY_FAILED
+    )
+
+
+def show_why_no_sequence(names: list[str]) -> None:
+    """Expander listing *names* (species without a BOLD sequence) with the
+    reason and a link to each species' BOLD search."""
+    outcomes = _species_outcomes().reindex(names)
+    table = pd.DataFrame(
+        {
+            "scientificName": outcomes.index,
+            "bold_outcome": pd.Categorical(outcomes.to_numpy(), categories=REASONS),
+            "bold_url": [bold_search_url(n) for n in outcomes.index],
+        }
+    ).sort_values(["bold_outcome", "scientificName"])
+    with st.expander(f"⚠️ {len(names)} species without a BOLD sequence"):
+        st.caption(
+            "Not in BOLD: BOLD does not know the name. Only GenBank copies: "
+            "the COI-5P records BOLD has for the species are copies of "
+            "GenBank sequences, already in NCBI; as proxies they would only "
+            "confirm themselves in HYPO, so they are left out."
+        )
+        st.dataframe(
+            table,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "scientificName": COL["scientificName"],
+                "bold_outcome": "Why",
+                "bold_url": COL["bold_seq_url"],
+            },
+        )
+
+
+def show_species_without_sequences_banner() -> None:
+    """Count the queried species without a BOLD sequence, by reason."""
+    outcomes = _species_outcomes()
+    # The failed banner lists the failed species.
+    outcomes = outcomes[~outcomes.isin([SEQUENCES, QUERY_FAILED])]
+    if outcomes.empty:
+        return
+    reasons = outcome_counts(outcomes, order=REASONS)
+    n_queried = len(st.session_state.bold_input_species)
+    st.info(
+        f"{len(outcomes)}/{n_queried} species without a usable BOLD sequence "
+        f"({reasons}). To query them again, set Cache to **Retry empty "
+        "results** and re-run."
+    )
 
 
 # --------------------------------------------------------------------
@@ -269,7 +336,7 @@ def bold_filter_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     # Prepare Inputs and Progress Tracker
     bold_search_df = st.session_state.bold_search_df
     geo_df = st.session_state.geo_df
-    total_species = bold_search_df["scientificName"].nunique()
+    total_species = with_sequences(bold_search_df)["scientificName"].nunique()
     progress_info = {"current": 0, "total": total_species}
 
     # Background Execution
@@ -345,7 +412,7 @@ def _filter_success_message():
     extra_df = st.session_state.extra_df
     if extra_df is not None and st.session_state.bold_filter_df is not None:
         st.success(
-            f"✅ Filtering complete: {len(st.session_state.bold_filter_df):,}/{len(st.session_state.bold_search_df):,} sequences retained"
+            f"✅ Filtering complete: {len(st.session_state.bold_filter_df):,}/{len(with_sequences(st.session_state.bold_search_df)):,} sequences retained"
         )
 
 
@@ -354,8 +421,14 @@ def bold_filter_workflow():
     with st.container(border=True):
         st.markdown("### 🔍 Filtering Search Results")
 
-        if st.session_state.bold_search_df.empty:
-            st.info("No BOLD records to filter.")
+        n_sequences = len(with_sequences(st.session_state.bold_search_df))
+        if not n_sequences:
+            st.info("No BOLD sequences to filter.")
+            without = _species_outcomes()
+            # The failed banner lists the failed species.
+            show_why_no_sequence(
+                sorted(without.index[~without.isin([SEQUENCES, QUERY_FAILED])])
+            )
             record_empty_step(
                 "extra_df",
                 "extra_params",
@@ -383,7 +456,7 @@ def bold_filter_workflow():
             current_params=current_params,
             job_fn=bold_filter_job,
             job_kwargs={"params": current_params},
-            new_string=f"Ready to filter **{len(st.session_state.bold_search_df)}** sequences.",
+            new_string=f"Ready to filter **{n_sequences}** sequences.",
             btn_key="bold_filter_apply",
             logs_prefix="bold_filter_",
             threaded=True,
@@ -482,19 +555,14 @@ def render_bold_metrics():
         help="Unique species identified in BOLD results",
     )
     c3.metric(
-        "Missing Species",
+        "Species Without Sequences",
         len(missing),
-        delta=f"{len(missing)} not in BOLD" if missing else "All found",
+        delta=f"{len(missing)} without a BOLD sequence" if missing else "All found",
         delta_color="inverse",
-        help="Species queried but not found in BOLD database",
+        help="Species queried in BOLD that got no usable sequence",
     )
     if missing:
-        with st.expander(f"⚠️ {len(missing)} species not found in BOLD"):
-            st.dataframe(
-                [{"Species Name": n} for n in missing],
-                hide_index=True,
-                width="stretch",
-            )
+        show_why_no_sequence(missing)
 
 
 def display_extra_summary():
@@ -552,17 +620,12 @@ def display_bold_sequence_metrics(seq_df, selected_seq):
         help="Unique species identified in BOLD results",
     )
     c3.metric(
-        "Missing Species",
+        "Species Without Sequences",
         len(missing_for_seq),
-        help="Species queried but not found in BOLD database",
+        help="Species queried in BOLD that got no usable sequence",
     )
     if missing_for_seq:
-        with st.expander(f"⚠️ {len(missing_for_seq)} species not found in BOLD"):
-            st.dataframe(
-                [{"Species Name": n} for n in missing_for_seq],
-                hide_index=True,
-                width="stretch",
-            )
+        show_why_no_sequence(missing_for_seq)
 
 
 def display_bold_sequence_table(seq_df):

@@ -12,6 +12,7 @@ from trident.core.http import create_session, with_optional_session
 from trident.core.utils import (
     StepLog,
     extract_specific_epithet,
+    name_list,
     notify_progress,
     pluralize,
 )
@@ -24,8 +25,10 @@ API_BASE_URL = f"{BOLD_BASE_URL}/api"
 
 
 def bold_search_url(species: str) -> str:
-    """BOLD portal search for a species, for log lines to check it by hand."""
-    return f"{BOLD_BASE_URL}/result?query={quote(species + '[tax]')}"
+    """BOLD portal search for a species, to look at it by hand. The name is
+    quoted: unquoted, the portal reads each word as a separate term and finds
+    nothing."""
+    return f"{BOLD_BASE_URL}/result?query={quote(f'"{species}"[tax]')}"
 
 
 @with_optional_session(retries=5, backoff_factor=0.5)
@@ -123,7 +126,27 @@ def _parse_jsonl(response_text: str) -> list[dict]:
     return data
 
 
-# Output columns of _clean_records, also present when there are no records.
+# Why a queried species has no BOLD sequence, or SEQUENCES when it has some
+# (bold_outcome column of the search).
+SEQUENCES = "sequences"
+NOT_IN_BOLD = "not in BOLD"
+NO_RECORD = "no record"
+OTHER_MARKERS = "only other markers"
+GENBANK_ONLY = "only GenBank copies"
+NO_SEQUENCE = "no DNA sequence"
+
+# In the order the search filters them out.
+OUTCOMES_WITHOUT_SEQUENCES = [
+    NOT_IN_BOLD,
+    NO_RECORD,
+    OTHER_MARKERS,
+    GENBANK_ONLY,
+    NO_SEQUENCE,
+]
+
+GENBANK_INST = "Mined from GenBank, NCBI"
+
+# Columns of _clean_records, also present when there are no records.
 BOLD_RECORD_COLUMNS = [
     "seq_id",
     "dna_sequence",
@@ -141,26 +164,47 @@ BOLD_RECORD_COLUMNS = [
     "seq_url",
 ]
 
+# Columns of the search: scientificName is the queried species (the name the
+# EXTRA merge joins on), bold_scientificName the name BOLD files the records
+# under. A species without sequences has one row, with its bold_outcome only.
+BOLD_SEARCH_COLUMNS = BOLD_RECORD_COLUMNS + ["bold_scientificName", "bold_outcome"]
 
-def _clean_records(
+
+def _filter_records(
     records: list[dict], keep_only_COI5P: bool = True, keep_ncbi: bool = False
-) -> pd.DataFrame:
-    """Transform raw BOLD API records into a standardized DataFrame.
+) -> tuple[list[dict], str | None]:
+    """The records the search keeps, and the outcome of the filter that left
+    none (None when some are kept).
 
     Args:
         records: Raw record dicts from the BOLD API.
         keep_only_COI5P: If True, only retain records with marker_code ``"COI-5P"``.
         keep_ncbi: If True, retain records also found in NCBI.
-
-    Returns:
-        DataFrame with taxonomy, sequence, and URL columns.
     """
+    if not records:
+        return [], NO_RECORD
+    checks = []
+    if keep_only_COI5P:
+        checks.append((OTHER_MARKERS, lambda r: r.get("marker_code") == "COI-5P"))
+    if not keep_ncbi:
+        checks.append((GENBANK_ONLY, lambda r: r.get("inst") != GENBANK_INST))
+    checks.append((NO_SEQUENCE, lambda r: bool(r.get("nuc"))))
+    for outcome, keep in checks:
+        records = [r for r in records if keep(r)]
+        if not records:
+            return [], outcome
+    return records, None
+
+
+def _clean_records(
+    records: list[dict], keep_only_COI5P: bool = True, keep_ncbi: bool = False
+) -> tuple[pd.DataFrame, str | None]:
+    """The raw BOLD API records the search keeps (_filter_records) as a
+    DataFrame of BOLD_RECORD_COLUMNS, and the outcome of the filter that left
+    none (None when some are kept)."""
+    kept, outcome = _filter_records(records, keep_only_COI5P, keep_ncbi)
     cleaned_data = []
-    for record in records:
-        if keep_only_COI5P and record.get("marker_code") != "COI-5P":
-            continue
-        if not keep_ncbi and record.get("inst") == "Mined from GenBank, NCBI":
-            continue
+    for record in kept:
         processid = record.get("processid")
         taxid = record.get("taxid")
         cleaned_record = {
@@ -182,18 +226,22 @@ def _clean_records(
             "seq_url": f"{BOLD_BASE_URL}/record/{processid}",
         }
         cleaned_data.append(cleaned_record)
-    return pd.DataFrame(cleaned_data, columns=BOLD_RECORD_COLUMNS)
+    return pd.DataFrame(cleaned_data, columns=BOLD_RECORD_COLUMNS), outcome
 
 
 def query_species(
     species_name: str,
     query_prefix: str = "tax:species:",
     session: requests.Session | None = None,
-) -> list[dict] | None:
+) -> tuple[bool, list[dict]] | None:
     """Query BOLD for barcode sequences of a species.
 
-    Preprocesses the query, obtains a query ID, downloads results, and
-    parses the JSONL response.
+    BOLD's preprocessor checks the name against BOLD's taxonomy (exact names
+    only, no synonyms). A name it does not know comes back as a search of the
+    record IDs (``ids:processid:...``), which never finds records: the name is
+    reported as not in BOLD without querying. A name it rejects (in
+    ``failed_terms``) is queried as written. An answer with neither is a
+    failure.
 
     Args:
         species_name: Species name (e.g. ``"Caranx caballus"``).
@@ -201,21 +249,28 @@ def query_species(
         session: Optional requests session for connection reuse.
 
     Returns:
-        List of record dicts if successful, empty list if no results,
-        or None if any step fails.
+        (in_bold, records): whether BOLD knows the name, and its records
+        (empty when it has none). None if any request fails.
     """
     query = f"{query_prefix}{species_name}"
 
     try:
-        # Step 1: Preprocess — validate and resolve query against BOLD taxonomy
         preprocess_response = _preprocess_query(query, session=session)
-
-        # Use the matched term from the preprocessor (handles synonyms/canonical forms)
         successful = preprocess_response.get("successful_terms", [])
-        resolved_query = successful[0]["matched"] if successful else query
+        matched = successful[0]["matched"] if successful else ""
+        if not successful and (failed := preprocess_response.get("failed_terms")):
+            logger.warning(
+                f"BOLD {species_name}: the preprocessor rejected the name "
+                f"({failed}), queried as written "
+                f"(check: {bold_search_url(species_name)})"
+            )
+            matched = query
+        if matched.startswith("ids:"):
+            return False, []
+        if not matched.startswith("tax:"):
+            raise ValueError(f"unexpected preprocessor answer: {preprocess_response}")
 
-        # Step 2: Get query ID
-        query_id = _get_query_id(resolved_query, session=session)
+        query_id = _get_query_id(matched, session=session)
         if not query_id:
             logger.warning(
                 f"BOLD {species_name} failed: BOLD gave no query ID "
@@ -223,17 +278,78 @@ def query_species(
             )
             return None
 
-        # Step 3: Download and parse results
         response_text = _download_results(query_id, session=session)
         data = _parse_jsonl(response_text)
         logger.debug(f"Retrieved {len(data)} records for {species_name}")
-        return data
+        return True, data
 
     except Exception as e:
         logger.warning(
             f"BOLD {species_name} failed: {e} (check: {bold_search_url(species_name)})"
         )
         return None
+
+
+def _species_rows(
+    species: str,
+    in_bold: bool,
+    records: list[dict],
+    keep_only_COI5P: bool,
+    keep_ncbi: bool,
+) -> pd.DataFrame:
+    """Search rows of one queried species: its usable sequences, or one row
+    with the reason it has none."""
+    if in_bold:
+        cleaned, outcome = _clean_records(records, keep_only_COI5P, keep_ncbi)
+    else:
+        outcome = NOT_IN_BOLD
+    if outcome:
+        # Typed object like the record columns: the first save of the step
+        # sets the SQLite column types, and a float taxonID column would read
+        # later IDs back as floats.
+        return pd.DataFrame(
+            [{"scientificName": species, "bold_outcome": outcome}],
+            columns=BOLD_SEARCH_COLUMNS,
+            dtype=object,
+        )
+    return cleaned.assign(
+        bold_scientificName=cleaned["scientificName"],
+        scientificName=species,
+        bold_outcome=SEQUENCES,
+    )[BOLD_SEARCH_COLUMNS]
+
+
+# Columns only the search needs: bold_outcome is always SEQUENCES on a
+# sequence row, and bold_scientificName (the name BOLD files a record under,
+# so far always the queried name) is for looking at the search itself.
+SEARCH_ONLY_COLUMNS = ["bold_scientificName", "bold_outcome"]
+
+
+def with_sequences(bold_search_df: pd.DataFrame) -> pd.DataFrame:
+    """The rows of the BOLD search that hold a sequence, without
+    SEARCH_ONLY_COLUMNS. A search saved with no column at all (no species had
+    records) gives an empty frame."""
+    if "dna_sequence" not in bold_search_df.columns:
+        return pd.DataFrame(columns=BOLD_RECORD_COLUMNS)
+    return bold_search_df.dropna(subset=["dna_sequence"]).drop(
+        columns=SEARCH_ONLY_COLUMNS, errors="ignore"
+    )
+
+
+def outcomes_by_species(bold_search_df: pd.DataFrame) -> pd.Series:
+    """bold_outcome of each queried species, indexed by scientificName. A
+    search saved before outcomes were recorded only has species with
+    sequences."""
+    if "scientificName" not in bold_search_df.columns:
+        return pd.Series(dtype=object, name="bold_outcome")
+    if "bold_outcome" not in bold_search_df.columns:
+        bold_search_df = bold_search_df.assign(bold_outcome=SEQUENCES)
+    return (
+        bold_search_df.dropna(subset=["scientificName"])
+        .drop_duplicates("scientificName")
+        .set_index("scientificName")["bold_outcome"]
+        .fillna(SEQUENCES)
+    )
 
 
 def get_records_from_species_list(
@@ -260,7 +376,9 @@ def get_records_from_species_list(
         user_agent: User-Agent header for HTTP requests.
 
     Returns:
-        Tuple of (bold_df, failed_species).
+        Tuple of (bold_df, failed_species): bold_df has BOLD_SEARCH_COLUMNS,
+        the usable sequences of each species, or one row with the reason it
+        has none (bold_outcome).
     """
     active_session = session or create_session(
         retries=5, backoff_factor=0.5, user_agent=user_agent
@@ -273,23 +391,24 @@ def get_records_from_species_list(
     for i, species in enumerate(species_list):
         try:
             with log.query(species):
-                records = query_species(species, session=active_session)
+                result = query_species(species, session=active_session)
 
-            if records is None:
+            if result is None:
                 # None means the query errored (network/403/parse), as opposed
-                # to [] which is a genuine empty result. Only errors count as
-                # failures so the cache layer retries them instead of caching
-                # them as empty. Keep query_species returning None on error.
+                # to a genuine empty result. Only errors count as failures so
+                # the cache layer retries them instead of caching them as
+                # empty. Keep query_species returning None on error.
                 failed_species.append(species)
                 log.item(species, "failed", notable=True)  # its error is logged above
             else:
-                cleaned = _clean_records(
-                    records, keep_only_COI5P=keep_only_COI5P, keep_ncbi=keep_ncbi
-                )
-                if not cleaned.empty:
-                    all_records.append(cleaned)
-                n = len(cleaned)
-                log.item(species, f"{n} BOLD {pluralize(n, 'sequence')}")
+                rows = _species_rows(species, *result, keep_only_COI5P, keep_ncbi)
+                all_records.append(rows)
+                outcome = rows["bold_outcome"].iloc[0]
+                if outcome == SEQUENCES:
+                    n = len(rows)
+                    log.item(species, f"{n} BOLD {pluralize(n, 'sequence')}")
+                else:
+                    log.item(species, outcome, notable=outcome == NOT_IN_BOLD)
 
         except Exception as e:
             log.failed(species, e)
@@ -310,13 +429,35 @@ def get_records_from_species_list(
     bold_df = (
         pd.concat(all_records, ignore_index=True)
         if all_records
-        else pd.DataFrame(columns=BOLD_RECORD_COLUMNS)
+        else pd.DataFrame(columns=BOLD_SEARCH_COLUMNS)
     )
-    # A record without a sequence is of no use as a proxy.
-    bold_df = bold_df.dropna(subset=["dna_sequence"])
-    log.done(
-        f"{len(bold_df)} BOLD {pluralize(len(bold_df), 'sequence')}",
-        failed_species,
-        "species",
-    )
+    _log_outcomes(log, bold_df, failed_species)
     return bold_df, failed_species
+
+
+def outcome_counts(
+    outcomes: pd.Series, noun: str = "", order: list[str] = OUTCOMES_WITHOUT_SEQUENCES
+) -> str:
+    """How many species have each outcome of *order*, as in "15 not in BOLD,
+    14 only GenBank copies" (*noun* after each count, e.g. "species")."""
+    counts = outcomes.value_counts()
+    noun = f" {noun}" if noun else ""
+    return ", ".join(f"{counts[o]}{noun} {o}" for o in order if o in counts)
+
+
+def _log_outcomes(log: StepLog, bold_search_df: pd.DataFrame, failed: list[str]):
+    """End the step's log: the sequences found and the species of each
+    outcome without one, then one line naming them per outcome."""
+    sequences = with_sequences(bold_search_df)
+    n_species = sequences["scientificName"].nunique()
+    summary = (
+        f"{len(sequences)} BOLD {pluralize(len(sequences), 'sequence')} for "
+        f"{n_species} {pluralize(n_species, 'species')}"
+    )
+    outcomes = outcomes_by_species(bold_search_df)
+    counts = outcome_counts(outcomes, "species")
+    log.done(f"{summary}, {counts}" if counts else summary, failed, "species")
+    for outcome in OUTCOMES_WITHOUT_SEQUENCES:
+        names = sorted(outcomes.index[outcomes == outcome])
+        if names:
+            logger.info(f"BOLD search, {outcome}: {name_list(names)}")

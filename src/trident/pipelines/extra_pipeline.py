@@ -28,7 +28,7 @@ from trident.core.constants import BOLD_SIMILARITY
 from trident.core.database import save_to_db, PartialCache, FullCache, CustomCache
 from trident.core.sequence_selection import select_longest_sequences
 
-from trident.clients.bold import get_records_from_species_list
+from trident.clients.bold import get_records_from_species_list, with_sequences
 from trident.pipelines.names import found_by_blast
 
 
@@ -104,6 +104,7 @@ def prepare_bold_input(
             "bold_keep_only_COI5P": "keep_only_COI5P",
             "bold_keep_ncbi": "keep_ncbi",
         },
+        result_col="dna_sequence",
     ),
     log_as=("BOLD search", "species"),
 )
@@ -128,7 +129,8 @@ def run_bold_search(
             retry on the next run instead of caching them as empty.
 
     Returns:
-        DataFrame with BOLD records.
+        DataFrame with the BOLD sequences of each species, or one row with
+        the reason it has none (see get_records_from_species_list).
     """
     bold_search_df, failed_species = get_records_from_species_list(
         species_list,
@@ -162,7 +164,7 @@ def _bold_filter_params(
     }
     inputs = [
         {"scientificName": species, **params}
-        for species in bold_search_df["scientificName"].unique()
+        for species in with_sequences(bold_search_df)["scientificName"].unique()
     ]
     return inputs, params
 
@@ -195,7 +197,8 @@ def run_bold_filter(
     """Filter redundant BOLD sequences, keeping the longest per species.
 
     Args:
-        bold_search_df: DataFrame with 'scientificName' and 'dna_sequence' columns.
+        bold_search_df: Output of run_bold_search; its rows without a
+            sequence are left out.
         longest_n: Max sequences to keep per species (None = keep all non-redundant).
         similarity: Percent identity threshold above which sequences are redundant.
         bold_search_params: Parameter dict from run_bold_search, propagated into
@@ -212,6 +215,7 @@ def run_bold_filter(
         "identical to a longer one"
     )
 
+    bold_search_df = with_sequences(bold_search_df)
     filtered_dfs = []
     total_original = len(bold_search_df)
 

@@ -417,6 +417,10 @@ class CacheStrategy(ABC):
         """
         return bound_kwargs
 
+    # Column a result row needs for its item to count as a result (see
+    # _empty_run_ids); None: any row does.
+    result_col: str | None = None
+
     @property
     def match_map(self) -> dict[str, str] | None:
         """Map from cache-dict keys to output DataFrame columns.
@@ -466,6 +470,11 @@ class PartialCache(CacheStrategy):
 
     No ``fingerprint_on``: per-item caches already re-run only changed/new
     items, so whole-batch content fingerprinting does not apply here.
+
+    *result_col*: for a step that saves a row explaining why an item has no
+    result (e.g. a species without a BOLD sequence), the column only real
+    results fill; an item with no row filling it counts as empty, so "Retry
+    empty results" queries it again.
     """
 
     def __init__(
@@ -475,7 +484,9 @@ class PartialCache(CacheStrategy):
         extract: Callable | None = None,
         params: dict[str, str] | None = None,
         output_col: str | None = None,
+        result_col: str | None = None,
     ):
+        self.result_col = result_col
         self.items_kwarg = items_kwarg
         self.item_key = item_key
         self.extract = extract
@@ -657,7 +668,7 @@ def save_to_db(
             with get_connection(db_path) as conn:
                 # 0. Clear empty cache entries so failed items get retried
                 if retry_empty:
-                    clear_empty_cache(db_path, table_name)
+                    clear_empty_cache(db_path, table_name, cache.result_col)
 
                 cached_dfs = []
                 uncached_items = []
@@ -891,15 +902,22 @@ def clear_cache(
             logger.info(f"Cleared all cache for '{table_name}'")
 
 
-def _empty_run_ids(conn: sqlite3.Connection, table_name: str) -> list[int]:
-    """run_ids cached as input rows but with no matching results rows."""
+def _empty_run_ids(
+    conn: sqlite3.Connection, table_name: str, result_col: str | None = None
+) -> list[int]:
+    """run_ids cached as input rows but with no matching results rows (no row
+    filling *result_col*, when given)."""
     inputs_table = f"{table_name}_inputs"
     if not _table_exists(conn, inputs_table):
         return []
-    if _table_exists(conn, table_name):
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})")}
+    if columns:
+        # A table without result_col (saved before the step had one): any row
+        # counts as a result.
+        filled = f" AND r.{result_col} IS NOT NULL" if result_col in columns else ""
         cursor = conn.execute(
             f"SELECT i.run_id FROM {inputs_table} i "
-            f"LEFT JOIN {table_name} r ON i.run_id = r.run_id "
+            f"LEFT JOIN {table_name} r ON i.run_id = r.run_id{filled} "
             f"WHERE r.run_id IS NULL"
         )
     else:
@@ -908,8 +926,11 @@ def _empty_run_ids(conn: sqlite3.Connection, table_name: str) -> list[int]:
     return [row[0] for row in cursor.fetchall()]
 
 
-def clear_empty_cache(db_path: str | Path, table_name: str) -> int:
-    """Remove cached entries that produced zero result rows.
+def clear_empty_cache(
+    db_path: str | Path, table_name: str, result_col: str | None = None
+) -> int:
+    """Remove cached entries that produced zero result rows (no row filling
+    *result_col*, when given; see PartialCache).
 
     Their items are then re-queried on the next run, without re-running items
     that returned rows. Failed queries do not need this: they are never cached
@@ -922,7 +943,14 @@ def clear_empty_cache(db_path: str | Path, table_name: str) -> int:
     """
     inputs_table = f"{table_name}_inputs"
     with get_connection(db_path) as conn:
-        empty_ids = _empty_run_ids(conn, table_name)
+        empty_ids = _empty_run_ids(conn, table_name, result_col)
+        if empty_ids and result_col and _table_exists(conn, table_name):
+            # Their explanation rows go too, or the re-query would add to them.
+            placeholders = ",".join("?" * len(empty_ids))
+            conn.execute(
+                f"DELETE FROM {table_name} WHERE run_id IN ({placeholders})",
+                empty_ids,
+            )
 
         if empty_ids:
             placeholders = ",".join("?" * len(empty_ids))
