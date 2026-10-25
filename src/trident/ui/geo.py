@@ -734,7 +734,11 @@ def display_gbif_sequence_table(
     min_occurrences: int,
     extents: list[float],
     priority_extent: float | str = None,
+    note_empty_area: bool = True,
 ):
+    """The sequence's candidates and their GBIF counts, grouped by the
+    extents they pass; note_empty_area=False leaves out the note that none
+    passes in the priority extent (for a sequence known to have none)."""
     df_wide, classification = pipe.classify_gbif_extents(
         seq_df, min_occurrences, extents, priority_extent
     )
@@ -769,15 +773,15 @@ def display_gbif_sequence_table(
             hide_index=True,
         )
 
-    st.caption(":green[■] Species also in MOL list")
-
+    if df_wide["in_mol"].astype(bool).any():
+        st.caption(":green[■] Species also in MOL list")
     for bucket in classification["buckets"]:
         kind, ext_col, df = bucket["kind"], bucket["extent_col"], bucket["df"]
 
         if kind == "local":
             if not df.empty:
                 render_styled_table(df)
-            else:
+            elif note_empty_area:
                 st.info(
                     f"No species found matching the threshold in the "
                     f"{priority_col} extent."

@@ -309,6 +309,9 @@ class AppState:
     excluded_results: list[str] = field(default_factory=list)
     # The keys each bulk button excluded, so a second click restores them.
     bulk_excluded: dict[str, list[str]] = field(default_factory=dict)
+    # Results' lost-at steps and the tables they came from (see _lost_at in
+    # results.py); any reset drops it, and with it the old tables.
+    lost_at_memo: dict[str, Any] | None = None
 
     # reset=False: not a pipeline output, so reset_state_after leaves it intact
     # (it is the cross-tab widget persistence store).

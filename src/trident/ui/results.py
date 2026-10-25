@@ -30,7 +30,7 @@ from trident.pipelines.results_pipeline import (
     species_flow_table,
     build_results_df,
     exclusion_keys,
-    find_sequence_exclusion_step,
+    flow_lost_at,
     filter_excluded_results,
     resolve_sequences,
     RESULT_COLS,
@@ -104,12 +104,12 @@ RESULTS_COLUMN_CONFIG = {
 VIA_COLUMN_CONFIG = {
     "via_mol_species": st.column_config.TextColumn(
         "Via MOL species",
-        help="HYPO: the MOL species of this sequence that its CO1 proxy matched.",
+        help="HYPO: the MOL species of this sequence that its best CO1 proxy hit matched.",
     ),
     "via_mol_identity": st.column_config.NumberColumn(
         "Via identity (%)",
         format="%.2f",
-        help="HYPO: the sequence's best MOL identity to that species.",
+        help="HYPO: this sequence's best MOL identity to that species.",
     ),
 }
 FILTER_KEY = "results_filter"
@@ -130,9 +130,12 @@ LOSS_REASONS = {
     "MOL Filter": "no hit passing the MOL filter",
     "TAX": "no species found in WoRMS (TAX)",
     "GEO": "no candidate recorded in the area (GEO)",
+    "GEO not run": "GEO not run",
+    "EXTRA": "only expanded candidates, none with a BOLD proxy (EXTRA)",
+    "EXTRA not run": "only expanded candidates, EXTRA not run",
     "HYPO": "only expanded candidates, none confirmed by HYPO",
     "HYPO not run": "only expanded candidates, HYPO not run",
-    "Curation": "all candidates excluded by hand",
+    "Curation": "all its validated species excluded by hand",
 }
 
 
@@ -184,30 +187,45 @@ def _flag_low_identity(df, threshold, best_identity):
     return df
 
 
-def _lost_step(seq_ids, results_df):
-    """Step at which each sequence without a species lost it."""
-    exclusion = find_sequence_exclusion_step(
-        all_seq_ids=seq_ids,
-        ncbi_search_df=st.session_state.get("ncbi_search_df"),
-        mol_df=st.session_state.get("mol_df"),
-        tax_df=st.session_state.get("tax_df"),
-        geo_df=st.session_state.get("geo_df"),
-    )
-    steps = dict(zip(exclusion.get("seq_id", []), exclusion.get("pipeline_step", [])))
-    had_species = set(results_df.dropna(subset=["scientificName"])["seq_id"])
-    # A sequence with validated species lost them all by hand. One that passed
-    # GEO without any had only expanded species, which HYPO did not confirm or
-    # has not tested yet.
-    after_geo = (
-        "HYPO" if st.session_state.get("hypo_df") is not None else "HYPO not run"
-    )
-    return {
-        seq_id: "Curation" if seq_id in had_species else steps.get(seq_id, after_geo)
-        for seq_id in seq_ids
-    }
+# The session tables of the species flow, named as build_species_flow's arguments.
+FLOW_TABLES = ["ncbi_search_df", "mol_df", "tax_df", "geo_df", "extra_df", "hypo_df"]
 
 
-def _assignments(curated_df, results_df, threshold):
+def _species_flow(seq_id):
+    """The sequence's species flow (see build_species_flow) for the steps run."""
+    state = st.session_state
+    return build_species_flow(
+        seq_id,
+        **{key: state.get(key) for key in FLOW_TABLES},
+        excluded=state.get("excluded_results", []),
+        name_table=state.get("name_table"),
+    )
+
+
+def _lost_at(seq_ids):
+    """flow_lost_at of each sequence, kept until a step's table or the name
+    table changes: rebuilding a flow per sequence on every rerun takes seconds
+    on thousands of sequences. Steps replace their tables, never edit them, so
+    the same objects mean the same data. An exclusion changes only its own
+    sequence's flow."""
+    state = st.session_state
+    tables = [state.get(key) for key in [*FLOW_TABLES, "name_table"]]
+    excluded = set(state.get("excluded_results", []))
+    memo = state.get("lost_at_memo")
+    if memo is None or any(old is not new for old, new in zip(memo["tables"], tables)):
+        memo = {"tables": tables, "excluded": excluded, "lost": {}}
+        state.lost_at_memo = memo
+    lost = memo["lost"]
+    for key in memo["excluded"] ^ excluded:
+        lost.pop(key.split("||", 1)[0], None)
+    memo["excluded"] = excluded
+    for seq_id in seq_ids:
+        if seq_id not in lost:
+            lost[seq_id] = flow_lost_at(_species_flow(seq_id))
+    return {seq_id: lost[seq_id] for seq_id in seq_ids}
+
+
+def _assignments(curated_df, threshold):
     """One row per sequence: its assignment after curation, and what to check."""
     table = resolve_sequences(curated_df)
     species_rows = curated_df.dropna(subset=["scientificName"])
@@ -224,12 +242,18 @@ def _assignments(curated_df, results_df, threshold):
     table["check_hit"] = check_hit.fillna(False).astype(bool)
 
     unassigned = table.loc[table["n_species"] == 0, "seq_id"].tolist()
-    lost = _lost_step(unassigned, results_df)
+    # Where it lost its last species, as its species flow shows it.
+    lost = {seq_id: step for seq_id, (step, _) in _lost_at(unassigned).items()}
     table["lost_at"] = table["seq_id"].map(lost)
     notes = []
     for _, row in table.iterrows():
         if row["n_species"] == 0:
-            notes.append(LOSS_REASONS.get(row["lost_at"], row["lost_at"]))
+            lost_at = row["lost_at"]
+            notes.append(
+                "no candidate left"
+                if lost_at is None
+                else LOSS_REASONS.get(lost_at, lost_at)
+            )
             continue
         note = []
         if row["low_identity"]:
@@ -606,12 +630,14 @@ def show_assignments(assignments, curated_df, threshold):
 
 
 # What an unassigned sequence had at the step that lost it: the session table
-# that step read, and the sentence above it.
+# that step read, and the sentence above it (the note above says why).
 LOST_AT_TABLES = {
-    "MOL Filter": ("ncbi_search_df", "Its NCBI hits, none kept by the MOL filter:"),
-    "TAX": ("mol_df", "Its MOL hits, none giving a species at TAX:"),
-    "HYPO": ("geo_df", "Its expanded candidates, none confirmed by HYPO:"),
-    "HYPO not run": ("geo_df", "Its expanded candidates, not tested by HYPO yet:"),
+    "MOL Filter": ("ncbi_search_df", "This sequence's NCBI hits:"),
+    "TAX": ("mol_df", "This sequence's MOL hits:"),
+    "EXTRA": ("geo_df", "This sequence's expanded candidates:"),
+    "EXTRA not run": ("geo_df", "This sequence's expanded candidates:"),
+    "HYPO": ("geo_df", "The expanded candidates HYPO tested:"),
+    "HYPO not run": ("geo_df", "This sequence's expanded candidates:"),
 }
 LOST_AT_COLS = [
     "scientificName",
@@ -629,25 +655,30 @@ LOST_AT_COLS = [
 def _show_lost_at(seq_id, step):
     """Show what an unassigned sequence had at the step that lost it, as
     that step recorded it."""
+    names = _lost_at([seq_id])[seq_id][1]
     if step == "GEO":
         params = st.session_state.geo_params
         min_occ = params["gbif_min_occurrences"]
         extent = params["gbif_filter_extent"]
         df = st.session_state.gbif_search_df
-        seq_df = df[df["seq_id"] == seq_id]
+        # Only the candidates lost at GEO, not a congener the MOL filter
+        # rejected that TAX kept.
+        seq_df = df[(df["seq_id"] == seq_id) & df["scientificName"].isin(names)]
         if seq_df.empty:
             st.caption("GBIF returned no counts for its candidate species.")
             return
         area = area_label(extent, params.get("gbif_area"))
         st.caption(
-            f"Its candidate species and their GBIF occurrences. GEO keeps a species "
-            f"with at least {min_occ} {pluralize(min_occ, 'occurrence')} {area}."
+            f"This sequence's candidates and their GBIF occurrences. GEO keeps a "
+            f"species with at least {min_occ} {pluralize(min_occ, 'occurrence')} "
+            f"{area}."
         )
         display_gbif_sequence_table(
             seq_df,
             min_occ,
             st.session_state.gbif_search_params["gbif_extents"],
             extent,
+            note_empty_area=False,
         )
         return
     if step not in LOST_AT_TABLES:
@@ -655,6 +686,10 @@ def _show_lost_at(seq_id, step):
     key, caption = LOST_AT_TABLES[step]
     df = st.session_state[key]
     rows = df[df["seq_id"] == seq_id]
+    if key == "geo_df":
+        # Only the candidates that ended at this step: GEO also lists species
+        # lost earlier, such as a congener the MOL filter rejected and TAX kept.
+        rows = rows[rows["scientificName"].isin(names)]
     name_table = st.session_state.name_table
     if key == "mol_df" and not resolved_names(name_table).empty:
         rows = rows.assign(acceptedName=species_of(rows["scientificName"], name_table))
@@ -676,17 +711,7 @@ def _show_lost_at(seq_id, step):
 def show_species_flow(seq_id):
     """The selected sequence's candidates at each step, as a Sankey."""
     state = st.session_state
-    links = build_species_flow(
-        seq_id,
-        state.get("ncbi_search_df"),
-        state.get("mol_df"),
-        state.get("tax_df"),
-        state.get("geo_df"),
-        state.get("extra_df"),
-        state.get("hypo_df"),
-        state.get("excluded_results", []),
-        name_table=state.get("name_table"),
-    )
+    links = _species_flow(seq_id)
     if not links:
         st.info("No NCBI hit for this sequence.")
         return
@@ -1206,17 +1231,17 @@ def results_main():
 
     with st.container(border=True):
         threshold = _threshold_slider()
-        assignments = _assignments(curated_df, results_df, threshold)
+        assignments = _assignments(curated_df, threshold)
         show_summary(assignments, curated_df, results_df, threshold)
         display_same_species(curated_df)
 
     show_assignments(assignments, curated_df, threshold)
     show_sequence_detail(results_df, assignments, threshold)
+    show_curated_results(curated_df, assignments, threshold)
     show_results_per_species(
         results_df,
         assignments,
         threshold,
         same_species_as(curated_df["scientificName"]),
     )
-    show_curated_results(curated_df, assignments, threshold)
     show_exports(curated_df)

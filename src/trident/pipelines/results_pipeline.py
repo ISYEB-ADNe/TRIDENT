@@ -5,7 +5,6 @@ other steps. Its one search is the GBIF export's WoRMS lookup of higher-level
 taxa (run_higher_taxa_lookup), saved per name like the other steps' searches.
 
     build_results_df(sequences_df, geo_df, mol_df, ...) → DataFrame
-    find_sequence_exclusion_step(all_seq_ids, ...) → DataFrame
     build_gbif_export_df(results_df, ...) → DataFrame (one row per MOTU/ASV)
     run_higher_taxa_lookup(names, ...) → (records_df, params)
     resolve_sequences(results_df) → DataFrame (species count and shared rank per MOTU/ASV)
@@ -13,6 +12,7 @@ taxa (run_higher_taxa_lookup), saved per name like the other steps' searches.
     add_low_identity_warning(df, threshold) → DataFrame
     build_species_flow(seq_id, ..., name_table) → list of (source, target, names) links
     species_flow_table(seq_id, links, ...) → DataFrame (one row per name)
+    flow_lost_at(links) → (step, names) where a sequence without a species lost them
     plot_species_flow(links) → Plotly Sankey figure
 """
 
@@ -33,7 +33,6 @@ from trident.core.utils import (
     ensure_columns,
     notify_progress,
     pluralize,
-    find_exclusion_pipeline_step,
     normalize_name,
     preserve_sequence_order,
 )
@@ -259,46 +258,6 @@ def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None, *, name_table):
     add_check_hit(results)
     results["check_hit"] &= results["validation_step"].eq("HYPO")
     return results
-
-
-def _seq_ids_in(df):
-    """Extract unique seq_id set from a DataFrame."""
-    return set(df["seq_id"].dropna().unique())
-
-
-def find_sequence_exclusion_step(
-    all_seq_ids,
-    ncbi_search_df=None,
-    mol_df=None,
-    tax_df=None,
-    geo_df=None,
-):
-    """Find at which pipeline step each empty sequence lost all species.
-
-    Args:
-        all_seq_ids: Full list of sequence IDs.
-        ncbi_search_df: Raw NCBI search results (optional).
-        mol_df: Filtered MOL results (optional).
-        tax_df: WoRMS taxonomy results (optional).
-        geo_df: GBIF geographic results (optional).
-
-    Returns:
-        DataFrame with columns: seq_id, pipeline_step.
-    """
-    steps = []
-    if ncbi_search_df is not None:
-        steps.append(("MOL Search", _seq_ids_in(ncbi_search_df)))
-    if mol_df is not None:
-        steps.append(("MOL Filter", _seq_ids_in(mol_df)))
-    if tax_df is not None:
-        steps.append(("TAX", _seq_ids_in(tax_df)))
-    if geo_df is not None:
-        steps.append(("GEO", _seq_ids_in(geo_df)))
-
-    if not steps:
-        return pd.DataFrame(columns=["seq_id", "pipeline_step"])
-
-    return find_exclusion_pipeline_step(all_seq_ids, steps)
 
 
 # ---------------------------------------------------------------------------
@@ -887,6 +846,54 @@ def build_species_flow(
 def _nonempty(links):
     """The links that carry at least one name."""
     return [link for link in links if link[2]]
+
+
+# The step each loss node of the flow stands for, as Results names it.
+FLOW_LOSS_STEPS = {
+    "filter_out": "MOL Filter",
+    "tax_out": "TAX",
+    "geo_out": "GEO",
+    "geo_not_run": "GEO not run",
+    "no_proxy": "EXTRA",
+    "extra_not_run": "EXTRA not run",
+    "hypo_out": "HYPO",
+    "hypo_not_run": "HYPO not run",
+    "excluded": "Curation",
+}
+# Loss nodes whose candidates still wait for a step.
+FLOW_NOT_RUN = {"geo_not_run", "extra_not_run", "hypo_not_run"}
+
+
+def flow_lost_at(links):
+    """Where a sequence without a species lost its last ones, with the names
+    that ended there. Curation when species it had were excluded by hand (the
+    user's decision empties it, whatever its other candidates became); else a
+    step not run yet when a candidate still waits for it; else the flow's
+    furthest loss (FLOW_NODES runs left to right): a sequence with some species
+    HYPO did not confirm and others without a BOLD proxy lost its last chance
+    at HYPO.
+
+    Returns:
+        (step, names); ("MOL Search", set()) for a sequence without NCBI hits,
+        (None, set()) when its flow loses no candidate.
+    """
+    if not links:
+        return "MOL Search", set()
+    rank = {node: i for i, node in enumerate(FLOW_NODES)}
+    losses = [(dst, names) for _, dst, names in links if dst in FLOW_LOSS_STEPS]
+    if not losses:
+        return None, set()
+    last, _ = max(
+        losses,
+        key=lambda loss: (
+            loss[0] == "excluded",
+            loss[0] in FLOW_NOT_RUN,
+            rank[loss[0]],
+        ),
+    )
+    return FLOW_LOSS_STEPS[last], set().union(
+        *(names for dst, names in losses if dst == last)
+    )
 
 
 def _name_list(names):

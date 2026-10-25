@@ -80,7 +80,7 @@ from .hypo_pipeline import (
 
 from .results_pipeline import (
     build_results_df,
-    find_sequence_exclusion_step,
+    flow_lost_at,
     build_gbif_export_df,
     add_check_hit,
     add_low_identity_warning,
@@ -153,7 +153,7 @@ __all__ = [
     "build_hypo_filter_summary",
     "build_hypo_check_summary",
     "build_results_df",
-    "find_sequence_exclusion_step",
+    "flow_lost_at",
     "build_gbif_export_df",
     "add_check_hit",
     "add_low_identity_warning",

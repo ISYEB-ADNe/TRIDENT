@@ -4,7 +4,6 @@ import pandas as pd
 
 from trident.core.utils import (
     extract_specific_epithet,
-    find_exclusion_pipeline_step,
     notify_progress,
     preserve_sequence_order,
     reorder_taxonomy_columns,
@@ -162,29 +161,6 @@ def test_reorder_no_taxonomy_cols():
     df = pd.DataFrame({"a": [1], "b": [2]})
     result = reorder_taxonomy_columns(df)
     assert list(result.columns) == ["a", "b"]
-
-
-# --- find_exclusion_pipeline_step ---
-
-
-def test_find_exclusion_step():
-    all_ids = ["s1", "s2", "s3"]
-    steps = [
-        ("MOL Search", {"s1", "s2", "s3"}),
-        ("MOL Filter", {"s1", "s2"}),
-        ("GEO", {"s1"}),
-    ]
-    result = find_exclusion_pipeline_step(all_ids, steps)
-    assert len(result) == 2
-    assert result[result["seq_id"] == "s3"]["pipeline_step"].iloc[0] == "MOL Filter"
-    assert result[result["seq_id"] == "s2"]["pipeline_step"].iloc[0] == "GEO"
-
-
-def test_find_exclusion_step_none_excluded():
-    result = find_exclusion_pipeline_step(
-        ["s1"], [("step1", {"s1"}), ("step2", {"s1"})]
-    )
-    assert result.empty
 
 
 # --- preserve_sequence_order ---

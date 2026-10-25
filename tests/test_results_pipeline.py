@@ -8,7 +8,7 @@ from trident.pipelines.names import build_name_table
 from trident.pipelines.results_pipeline import (
     EXPORT_COLS,
     build_results_df,
-    find_sequence_exclusion_step,
+    flow_lost_at,
     filter_excluded_results,
     build_gbif_export_df,
     build_species_flow,
@@ -238,34 +238,6 @@ def test_species_mol_found_under_a_synonym_keeps_its_ncbi_hit(sequences_df):
     )
 
 
-# --- find_sequence_exclusion_step ---
-
-
-class TestFindExclusionStep:
-    def test_basic(self):
-        result = find_sequence_exclusion_step(
-            ["s1", "s2", "s3"],
-            ncbi_search_df=pd.DataFrame({"seq_id": ["s1", "s2", "s3"]}),
-            mol_df=pd.DataFrame({"seq_id": ["s1", "s2"]}),
-            geo_df=pd.DataFrame({"seq_id": ["s1"]}),
-        )
-        assert len(result) == 2
-        s3 = result[result["seq_id"] == "s3"]
-        assert s3.iloc[0]["pipeline_step"] == "MOL Filter"
-
-    def test_no_steps(self):
-        result = find_sequence_exclusion_step(["s1"])
-        assert result.empty
-
-    def test_all_present(self):
-        result = find_sequence_exclusion_step(
-            ["s1"],
-            ncbi_search_df=pd.DataFrame({"seq_id": ["s1"]}),
-            mol_df=pd.DataFrame({"seq_id": ["s1"]}),
-        )
-        assert result.empty
-
-
 # --- check_hit flag ---
 
 
@@ -318,10 +290,18 @@ def test_empty_mol_list_flows_to_results(monkeypatch):
         assert {"seq_id", "scientificName"} <= set(df.columns)
     results = build_results_df(sequences_df, geo_df, mol_df, hypo_df, name_table=None)
     assert sorted(results["seq_id"]) == ["s1", "s2"]
-    lost = find_sequence_exclusion_step(
-        ["s1", "s2"], ncbi_search_df, mol_df, tax_df, geo_df
-    )
-    assert set(lost["pipeline_step"]) == {"MOL Search"}
+    for seq_id in ("s1", "s2"):
+        links = build_species_flow(
+            seq_id,
+            ncbi_search_df,
+            mol_df,
+            tax_df,
+            geo_df,
+            extra_df,
+            hypo_df,
+            name_table=None,
+        )
+        assert flow_lost_at(links) == ("MOL Search", set())
 
 
 # --- GBIF export of genus homonyms (Liparis: a fish and a plant) ---
@@ -587,3 +567,67 @@ def test_species_flow_ends_each_candidate_once():
         "Gadus extra",
     }
     assert table.set_index("species").loc["Gadus macrocephalus", "identity"] == 99.0
+
+
+def test_lost_at_is_the_flows_last_loss():
+    """A sequence without a species lost them where its flow's last loss is:
+    a congener BLAST returned and the MOL filter rejected is a filter loss even
+    when TAX keeps it, and expanded species wait for EXTRA, then HYPO."""
+    ncbi_search_df = pd.DataFrame(
+        {
+            "seq_id": ["s1", "s1", "s2"],
+            "scientificName": ["Gadus morhua", "Gadus rejected", "Gadus morhua"],
+            "identity_percentage": [98.0, 70.0, 98.0],
+        }
+    )
+    mol_df = ncbi_search_df.iloc[[0, 2]]
+    # s1 keeps in the area only the rejected congener, s2 only an added one.
+    tax_df = pd.DataFrame(
+        {
+            "seq_id": ["s1", "s1", "s2", "s2"],
+            "scientificName": [
+                "Gadus morhua",
+                "Gadus rejected",
+                "Gadus morhua",
+                "Gadus added",
+            ],
+            "in_mol": [True, False, True, False],
+        }
+    )
+    geo_df = tax_df.iloc[[1, 3]]
+    proxied = tax_df.iloc[[3]]
+    names = _names({})
+
+    def lost_at(seq_id, extra_df, hypo_df):
+        links = build_species_flow(
+            seq_id,
+            ncbi_search_df,
+            mol_df,
+            tax_df,
+            geo_df,
+            extra_df,
+            hypo_df,
+            name_table=names,
+        )
+        return flow_lost_at(links)
+
+    assert lost_at("s1", proxied, proxied.iloc[:0]) == ("GEO", {"Gadus morhua"})
+    added = {"Gadus added"}
+    assert lost_at("s2", None, None) == ("EXTRA not run", added)
+    assert lost_at("s2", proxied.iloc[:0], None) == ("EXTRA", added)
+    assert lost_at("s2", proxied, None) == ("HYPO not run", added)
+    assert lost_at("s2", proxied, proxied.iloc[:0]) == ("HYPO", added)
+
+    # Species excluded by hand outrank a candidate still waiting for a step.
+    links = build_species_flow(
+        "s2",
+        ncbi_search_df,
+        mol_df,
+        tax_df,
+        tax_df.iloc[2:],
+        None,
+        None,
+        excluded=["s2||Gadus morhua"],
+        name_table=names,
+    )
+    assert flow_lost_at(links) == ("Curation", {"Gadus morhua"})

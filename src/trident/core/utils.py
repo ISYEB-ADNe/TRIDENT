@@ -294,34 +294,6 @@ def reorder_taxonomy_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[before_taxon + taxon_cols + after_taxon]
 
 
-def find_exclusion_pipeline_step(
-    all_ids: list[str],
-    steps: list[tuple[str, set[str]]],
-    id_col: str = "seq_id",
-) -> pd.DataFrame:
-    """Find the first pipeline step where each ID is absent.
-
-    Walks through steps in order for each ID. The first step whose set
-    does not contain the ID is recorded as the exclusion point.
-
-    Args:
-        all_ids: All IDs to check.
-        steps: Ordered (step_name, set_of_ids_present) pairs.
-        id_col: Column name for the ID in the output DataFrame.
-
-    Returns:
-        DataFrame with columns: {id_col}, pipeline_step. Only contains
-        IDs that were excluded (absent from at least one step).
-    """
-    excluded = []
-    for item_id in all_ids:
-        for step_name, id_set in steps:
-            if item_id not in id_set:
-                excluded.append({id_col: item_id, "pipeline_step": step_name})
-                break
-    return pd.DataFrame(excluded)
-
-
 ##### DECORATORS #####
 
 
