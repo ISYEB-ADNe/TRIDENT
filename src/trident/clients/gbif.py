@@ -243,9 +243,9 @@ def _match_single_taxon_name(
     Returns:
         Dict with the match type and confidence, ``matched_by`` ("WoRMS ID" or
         "name"), the GBIF species counted for the name (``taxonID``,
-        ``canonicalName``, ``note``, ``left_out``: see _counted_species), its
-        classification, and the 'needs_review' flag for low-confidence
-        matches.
+        ``speciesID``, ``canonicalName``, ``note``, ``left_out``: see
+        _counted_species), its classification, and the 'needs_review' flag
+        for low-confidence matches.
     """
     params = {"scientificName": name, "checklistKey": COL_XR_CHECKLIST}
     if worms_id:
@@ -525,6 +525,7 @@ _GBIF_TAXON_COLS = [
     "gbif_matched_by",
     "aphia_id",
     "gbif_note",
+    "gbif_speciesID",
 ]
 
 # Name match types that mean the queried species: the same name, or a variant
@@ -589,7 +590,9 @@ def _counted_species(
 
     Returns:
         Dict with ``taxonID`` (the key whose occurrences are counted; None
-        when GBIF matched a higher rank only), ``canonicalName`` (GBIF's name
+        when GBIF matched a higher rank only), ``speciesID`` (the key of
+        GBIF's species for the name: the accepted species of a synonym, the
+        species of a subspecies), ``canonicalName`` (GBIF's name
         of the species, a subspecies name when GBIF holds it as one),
         ``note`` (how a synonym or subspecies is counted, else None) and
         ``left_out`` (why the match is not counted, else None).
@@ -599,6 +602,7 @@ def _counted_species(
     """
     counted = {
         "taxonID": accepted.get("key"),
+        "speciesID": None,
         "canonicalName": accepted.get("canonicalName"),
         "note": None,
         "left_out": None,
@@ -611,6 +615,7 @@ def _counted_species(
         )
         if species is None:  # matched to a genus or higher
             return counted | {"taxonID": None}
+    counted["speciesID"] = species.get("key")
     if matched_by != "WoRMS ID" and match_type not in _SAME_NAME_MATCHES:
         return counted | {
             "left_out": f"GBIF found only {accepted.get('canonicalName')}, by a "
@@ -667,7 +672,8 @@ def filter_taxon_matches(
         the species (a subspecies name when GBIF holds it as one; taxonID is
         then the key its occurrences are counted under), ``gbif_matched_by``
         "WoRMS ID" or "name", ``aphia_id`` the WoRMS ID it was queried with,
-        ``gbif_note`` how a synonym or subspecies in GBIF is counted.
+        ``gbif_note`` how a synonym or subspecies in GBIF is counted,
+        ``gbif_speciesID`` GBIF's species for the name (see _counted_species).
         The classification columns and specificEpithet are those of GBIF's
         species. Always carries the standardised taxonomy columns, even when
         empty.
@@ -681,6 +687,7 @@ def filter_taxon_matches(
         matches_df.copy(),
         [
             "canonicalName",
+            "speciesID",
             "matched_by",
             "worms_id",
             "note",
@@ -708,6 +715,7 @@ def filter_taxon_matches(
     filtered_df["gbif_matched_by"] = kept["matched_by"].to_numpy()
     filtered_df["aphia_id"] = as_ids(kept["worms_id"]).to_numpy()
     filtered_df["gbif_note"] = kept["note"].to_numpy()
+    filtered_df["gbif_speciesID"] = kept["speciesID"].astype("string").to_numpy()
     filtered_df["specificEpithet"] = filtered_df.apply(
         lambda row: extract_specific_epithet(row["gbif_scientificName"], row["genus"]),
         axis=1,

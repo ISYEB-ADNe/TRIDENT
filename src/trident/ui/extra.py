@@ -34,6 +34,7 @@ from trident.ui.ui import (
     run_with_progress,
     reset_state_after,
     sequence_selector,
+    display_same_species,
     run_step_workflow,
     next_step_button,
     require_prerequisite,
@@ -730,6 +731,7 @@ def display_bold_results():
 
         render_bold_metrics()
         display_extra_summary()
+        display_same_species(extra_df)
 
         with st.expander(
             f"View full EXTRA list ({len(extra_df):,} BOLD records: {species_for_sequences(extra_df)})",

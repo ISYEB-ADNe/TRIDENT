@@ -21,7 +21,10 @@ they are.
     best_hits(hits, name_table, columns) → DataFrame
     found_by_blast(df, ncbi_search_df, name_table) → Series
     ncbi_names(df, mol_df, name_table) → Series
+    same_species_groups(species, name_table) → DataFrame
 """
+
+import itertools
 
 import pandas as pd
 
@@ -107,18 +110,25 @@ def gbif_name_rows(gbif_search_df: pd.DataFrame) -> pd.DataFrame:
     Args:
         gbif_search_df: Output of run_gbif_search (scientificName the TAX
             species, gbif_scientificName, taxonID the GBIF key,
-            gbif_matched_by, aphia_id, gbif_note).
+            gbif_speciesID, gbif_matched_by, aphia_id, gbif_note).
 
     Returns:
         DataFrame with NAME_TABLE_COLUMNS, source "gbif", one row per species
-        GBIF matched (a subspecies name when GBIF holds it as one), note
-        saying how a synonym or subspecies in GBIF is counted; empty for a
-        Backbone search, which keeps no GBIF name.
+        GBIF matched (a subspecies name when GBIF holds it as one), source_id
+        GBIF's species for it (the counted key in a search saved before it
+        was kept), note saying how a synonym or subspecies in GBIF is
+        counted; empty for a Backbone search, which keeps no GBIF name.
     """
     matched = (
         ensure_columns(
             gbif_search_df.copy(),
-            ["gbif_scientificName", "gbif_matched_by", "aphia_id", "gbif_note"],
+            [
+                "gbif_scientificName",
+                "gbif_speciesID",
+                "gbif_matched_by",
+                "aphia_id",
+                "gbif_note",
+            ],
         )
         .dropna(subset=["scientificName", "gbif_scientificName"])
         .drop_duplicates("scientificName")
@@ -130,6 +140,9 @@ def gbif_name_rows(gbif_search_df: pd.DataFrame) -> pd.DataFrame:
         matched_by_col="gbif_matched_by",
         aphia_ids=as_ids(matched["aphia_id"]),
         notes=matched["gbif_note"],
+        source_ids=matched["gbif_speciesID"]
+        .astype("string")
+        .fillna(matched["taxonID"].astype("string")),
     )
 
 
@@ -167,9 +180,11 @@ def _source_rows(
     matched_by_col: str,
     aphia_ids: pd.Series | None = None,
     notes: pd.Series | None = None,
+    source_ids: pd.Series | None = None,
 ) -> pd.DataFrame:
     """Name table rows of a search: the species from scientificName, the name
-    the source gives it from *name_col*, source_id from taxonID."""
+    the source gives it from *name_col*, source_id from *source_ids* or
+    taxonID."""
     species = df["scientificName"].astype(str)
     names = df[name_col].astype(str)
     if aphia_ids is None:
@@ -182,7 +197,9 @@ def _source_rows(
             "aphia_id": aphia_ids,
             "name": names,
             "source": source,
-            "source_id": df["taxonID"].astype("string"),
+            "source_id": (df["taxonID"] if source_ids is None else source_ids).astype(
+                "string"
+            ),
             "matched_by": df[matched_by_col].astype("string"),
             "note": notes.astype("string"),
             "name_key": names.map(normalize_name),
@@ -401,4 +418,85 @@ def ncbi_names(
     )
     return pd.Series(
         names.reindex(_pairs(df, name_table)).to_numpy(), index=df.index, dtype=object
+    )
+
+
+SAME_SPECIES_COLUMNS = ["scientificName", "sameSpeciesAs", "group"]
+
+
+def same_species_groups(
+    species: pd.Series, name_table: pd.DataFrame | None
+) -> pd.DataFrame:
+    """Species that another source counts as one species.
+
+    WoRMS can keep one species under two accepted names: a genus change left
+    Larus saundersi accepted next to Chroicocephalus saundersi. Sources can
+    also disagree with WoRMS on synonyms. Two species are linked when a
+    source of the name table outside SYNONYM_SOURCES gives them the same ID
+    or the same name, or gives one the name of the other. For GBIF the ID is GBIF's species for the name, so a
+    synonym links to its accepted species and a subspecies to its species.
+
+    Linked species form groups: A linked to B and B to C is one group.
+    Nothing is merged: the groups are for the user to check.
+
+    Args:
+        species: Species names (repeats allowed); only links between them count.
+        name_table: See build_name_table, with the rows the sources added.
+
+    Returns:
+        One row per linked species, sorted by group: scientificName,
+        sameSpeciesAs (the species a source links it to, each with its
+        sources, e.g. "Larus saundersi (GBIF)"), group (a number). Empty when
+        no species is linked.
+    """
+    if name_table is None or name_table.empty:
+        return pd.DataFrame(columns=SAME_SPECIES_COLUMNS)
+    distinct = pd.Series(pd.unique(species.dropna()), dtype=object)
+    names = dict(zip(name_keys(distinct), distinct))
+    rows = name_table[
+        ~name_table["source"].isin(SYNONYM_SOURCES)
+        & name_table["species_key"].isin(names)
+    ]
+    links = {}  # species key -> {linked species key: sources}
+
+    def link(a, b, source):
+        links.setdefault(a, {}).setdefault(b, set()).add(source.upper())
+        links.setdefault(b, {}).setdefault(a, set()).add(source.upper())
+
+    for column in ("source_id", "name_key"):
+        by_taxon = rows.dropna(subset=[column]).groupby(["source", column])
+        for (source, _), keys in by_taxon["species_key"]:
+            for a, b in itertools.combinations(set(keys), 2):
+                link(a, b, source)
+    # A source can give a species the name of another species of the list.
+    for a, b, source in zip(rows["species_key"], rows["name_key"], rows["source"]):
+        if b in names and b != a:
+            link(a, b, source)
+    if not links:
+        return pd.DataFrame(columns=SAME_SPECIES_COLUMNS)
+
+    # Groups are the connected components of the links.
+    group_of, number = {}, 0
+    for start in sorted(links, key=names.get):
+        if start in group_of:
+            continue
+        number += 1
+        todo = [start]
+        while todo:
+            key = todo.pop()
+            if key not in group_of:
+                group_of[key] = number
+                todo += links[key]
+
+    out = []
+    for key, linked in links.items():
+        same_as = sorted(
+            f"{names[other]} ({', '.join(sorted(sources))})"
+            for other, sources in linked.items()
+        )
+        out.append((names[key], ", ".join(same_as), group_of[key]))
+    return (
+        pd.DataFrame(out, columns=SAME_SPECIES_COLUMNS)
+        .sort_values(["group", "scientificName"])
+        .reset_index(drop=True)
     )

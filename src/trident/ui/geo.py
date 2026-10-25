@@ -33,6 +33,8 @@ from trident.ui.ui import (
     run_with_progress,
     reset_state_after,
     highlight_in_mol,
+    display_same_species,
+    with_same_species,
     sequence_selector,
     run_step_workflow,
     next_step_button,
@@ -464,6 +466,7 @@ def gbif_search_workflow():
                     "gbif_scientificName": COL["gbif_scientificName"],
                     "gbif_taxonURL": COL["gbif_taxonURL"],
                     "gbif_extent": COL["gbif_extent"],
+                    "gbif_speciesID": None,
                     "occurrences": COL["occurrences"],
                     "genus": COL["genus"],
                     "specificEpithet": COL["specificEpithet"],
@@ -862,7 +865,7 @@ def _with_gbif_names(df: pd.DataFrame) -> pd.DataFrame:
 
 def display_full_geo_list():
     """Display the complete GEO list in a flat table."""
-    geo_df = _with_gbif_names(st.session_state.geo_df)
+    geo_df = with_same_species(_with_gbif_names(st.session_state.geo_df))
     cols = geo_df.columns.tolist()
     priority = [
         "seq_id",
@@ -870,6 +873,7 @@ def display_full_geo_list():
         "gbif_occurrences",
         "mol_top_identity_percentage",
         "gbif_scientificName",
+        "sameSpeciesAs",
         "gbif_taxonURL",
         "taxonURL",
         "genus",
@@ -892,6 +896,7 @@ def display_full_geo_list():
             "seq_id": COL["seq_id"],
             "scientificName": COL["scientificName"],
             "gbif_scientificName": COL["gbif_scientificName"],
+            "sameSpeciesAs": COL["sameSpeciesAs"],
             "gbif_taxonURL": COL["gbif_taxonURL"],
             "taxonURL": COL["taxonURL"],
             "gbif_occurrences": COL["gbif_occurrences"],
@@ -921,6 +926,7 @@ def display_gbif_results():
         st.markdown("### 📊 GEO List Overview")
         render_gbif_metrics()
         display_gbif_summary()
+        display_same_species(st.session_state.geo_df)
         display_missing_species()
 
         with st.expander(

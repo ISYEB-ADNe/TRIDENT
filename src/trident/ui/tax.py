@@ -22,6 +22,8 @@ from trident.ui.ui import (
     run_with_progress,
     reset_state_after,
     highlight_in_mol,
+    display_same_species,
+    with_same_species,
     sequence_selector,
     run_step_workflow,
     next_step_button,
@@ -585,7 +587,7 @@ def display_worms_sequence():
 
 def display_full_tax_list():
     """Display the complete TAX list in a flat table."""
-    df = _with_ncbi_synonyms(st.session_state.tax_df)
+    df = with_same_species(_with_ncbi_synonyms(st.session_state.tax_df))
     styled_df = styled_or_plain(df, highlight_in_mol)
     cols = df.columns.tolist()
     priority = [
@@ -600,11 +602,12 @@ def display_full_tax_list():
         "phylum",
         "kingdom",
     ]
-    # NCBI synonyms go last. The TAX table of a database written before they
-    # were derived still has a verbatimIdentification column, left out.
-    hidden = {"ncbi_synonyms", "verbatimIdentification"}
+    # NCBI synonyms and the same-species note go last. A TAX table saved
+    # before NCBI synonyms were derived has a verbatimIdentification column,
+    # left out.
+    hidden = {"ncbi_synonyms", "sameSpeciesAs", "verbatimIdentification"}
     middle = [c for c in cols if c not in priority and c not in hidden]
-    tail = ["ncbi_synonyms"]
+    tail = ["ncbi_synonyms", "sameSpeciesAs"]
     ordered = priority + middle + tail
     st.caption(":green[■] Species also in MOL list")
     st.dataframe(
@@ -616,6 +619,7 @@ def display_full_tax_list():
             "seq_id": COL["seq_id"],
             "scientificName": COL["scientificName"],
             "ncbi_synonyms": COL["ncbi_synonyms"],
+            "sameSpeciesAs": COL["sameSpeciesAs"],
             "taxonURL": COL["taxonURL"],
             "in_mol": None,
             "mol_top_identity_percentage": None,
@@ -643,6 +647,7 @@ def display_worms_results():
         st.markdown("### 📊 TAX List Overview")
         render_worms_metrics()
         display_genus_homonyms()
+        display_same_species(st.session_state.tax_df)
         display_mol_rejected()
         display_worms_summary()
 

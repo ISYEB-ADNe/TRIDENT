@@ -54,6 +54,8 @@ from trident.ui.ui import (
     CHECK_HIT_NOTE,
     mol_query_cover,
     sequence_selector,
+    display_same_species,
+    same_species_as,
 )
 
 
@@ -936,8 +938,9 @@ def _show_all_hits_expander(species, is_hypo):
             )
 
 
-def show_results_per_species(results_df, assignments, threshold):
-    """Taxonomy, links and sequences of one species."""
+def show_results_per_species(results_df, assignments, threshold, same_species):
+    """Taxonomy, links and sequences of one species. same_species: see
+    same_species_as."""
     with st.container(border=True):
         st.markdown("### 🐟 Species Summary & Links")
 
@@ -964,6 +967,13 @@ def show_results_per_species(results_df, assignments, threshold):
         if pd.notna(row.get("scientificNameAuthorship")):
             tax_parts.append(f"**Authorship:** {row['scientificNameAuthorship']}")
         st.markdown(" · ".join(tax_parts))
+        same = same_species.get(selected_species)
+        if same:
+            st.warning(
+                f"Possibly the same species as {same}: another source counts "
+                "them as one species.",
+                icon="⚠️",
+            )
 
         links = []
         for col, label in (
@@ -1198,9 +1208,15 @@ def results_main():
         threshold = _threshold_slider()
         assignments = _assignments(curated_df, results_df, threshold)
         show_summary(assignments, curated_df, results_df, threshold)
+        display_same_species(curated_df)
 
     show_assignments(assignments, curated_df, threshold)
     show_sequence_detail(results_df, assignments, threshold)
-    show_results_per_species(results_df, assignments, threshold)
+    show_results_per_species(
+        results_df,
+        assignments,
+        threshold,
+        same_species_as(curated_df["scientificName"]),
+    )
     show_curated_results(curated_df, assignments, threshold)
     show_exports(curated_df)

@@ -380,7 +380,9 @@ def test_species_counted_under_gbif_species_of_worms_id_or_name(monkeypatch):
     in GBIF of another species (a separate species in WoRMS) counts under its
     own GBIF key; one that only changes the genus, under the accepted key. A
     subspecies in GBIF counts under its species when it is the nominate one,
-    else under its own key. A genus-only or fuzzy match is left out."""
+    else under its own key. Each name also keeps GBIF's species for it: the
+    accepted species of a synonym, the species of a subspecies. A genus-only
+    or fuzzy match is left out."""
     answers = {name: match["body"] for name, match in V2_MATCHES.items()}
     # A misspelt name GBIF matches fuzzily to Spicara flexuosum, without an ID
     spicara = answers["Spicara flexuosum"]
@@ -427,6 +429,7 @@ def test_species_counted_under_gbif_species_of_worms_id_or_name(monkeypatch):
     assert own["gbif_scientificName"] == "Lestrolepis philippina"
     assert "synonym in GBIF of Lestrolepis japonica" in own["gbif_note"]
     assert japonica["taxonID"] == lestrolepis["acceptedUsage"]["key"]
+    assert own["gbif_speciesID"] == japonica["gbif_speciesID"] == japonica["taxonID"]
     names = kept["gbif_scientificName"].to_dict()
     assert names["Larus atricilla"] == "Leucophaeus atricilla atricilla"
     assert names["Larus novaehollandiae"] == (
@@ -437,6 +440,7 @@ def test_species_counted_under_gbif_species_of_worms_id_or_name(monkeypatch):
     scopulinus = V2_MATCHES["Larus scopulinus"]["body"]["classification"]
     assert kept.loc["Larus novaehollandiae", "taxonID"] == scopulinus[-2]["key"]
     assert kept.loc["Larus scopulinus", "taxonID"] == scopulinus[-1]["key"]
+    assert kept.loc["Larus scopulinus", "gbif_speciesID"] == scopulinus[-2]["key"]
 
 
 def test_names_sharing_a_gbif_species_both_get_its_counts(monkeypatch):

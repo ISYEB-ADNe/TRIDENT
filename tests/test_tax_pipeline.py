@@ -15,10 +15,12 @@ import pandas as pd
 
 from trident.core.database import fingerprint
 from trident.pipelines.names import (
+    bold_name_rows,
     build_name_table,
     gbif_name_rows,
     ncbi_names,
     replace_source_rows,
+    same_species_groups,
     species_of,
 )
 from trident.pipelines.tax_pipeline import (
@@ -95,6 +97,67 @@ def test_gbif_names_are_recorded_but_never_merge_two_worms_species():
         pd.DataFrame({"scientificName": ["Larus saundersi"]}), table
     )
     assert summary.renamed.empty and summary.not_found.empty
+
+
+def test_species_a_source_counts_as_one_are_grouped_for_checking():
+    """Species a source gives one ID or one name are linked, each to the
+    species a source links it to, with that source; links from several
+    sources form one group. GBIF links on its species for each name, also
+    when it counts the names under different keys; a source that gives a
+    species the name of another links them, even when that other species has
+    no row from the source."""
+    gbif = gbif_name_rows(
+        pd.DataFrame(
+            {
+                "scientificName": ["Larus saundersi", "Chroicocephalus saundersi"],
+                "gbif_scientificName": ["Larus saundersi", "Chroicocephalus saundersi"],
+                "taxonID": ["9ABCD", "5YGFL"],
+                "gbif_speciesID": ["5YGFL"] * 2,
+                "gbif_matched_by": ["WoRMS ID"] * 2,
+                "aphia_id": [343919, 1750258],
+            }
+        )
+    )
+    bold = bold_name_rows(
+        pd.DataFrame(
+            {
+                "scientificName": ["Larus saundersi"],
+                "bold_scientificName": ["Saundersilarus saundersi"],
+                "taxonID": ["701"],
+                "bold_matched_by": ["name"],
+                "dna_sequence": ["acgt"],
+            }
+        )
+    )
+    table = replace_source_rows(replace_source_rows(None, gbif, "gbif"), bold, "bold")
+    species = pd.Series(
+        [
+            "Larus saundersi",
+            "Chroicocephalus saundersi",
+            "Saundersilarus saundersi",
+            "Chroicocephalus ridibundus",
+            "Larus saundersi",
+        ]
+    )
+
+    groups = same_species_groups(species, table)
+
+    assert groups.set_index("scientificName").to_dict("index") == {
+        "Chroicocephalus saundersi": {
+            "sameSpeciesAs": "Larus saundersi (GBIF)",
+            "group": 1,
+        },
+        "Larus saundersi": {
+            "sameSpeciesAs": "Chroicocephalus saundersi (GBIF), "
+            "Saundersilarus saundersi (BOLD)",
+            "group": 1,
+        },
+        "Saundersilarus saundersi": {
+            "sameSpeciesAs": "Larus saundersi (BOLD)",
+            "group": 1,
+        },
+    }
+    assert same_species_groups(species.iloc[:1], table).empty
 
 
 def test_name_table_is_the_same_checked_now_or_read_from_the_cache():

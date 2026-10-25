@@ -23,6 +23,7 @@ from loguru import logger
 from trident.clients.ncbi import BLAST_SLOW_THREADS
 from trident.core.utils import pluralize
 from trident.core import stop
+from trident.pipelines.names import same_species_groups
 from trident.logging import get_log_level
 from trident.ui.defaults import (
     NCBI_GAP_MIN_TOP_DEFAULT,
@@ -155,6 +156,12 @@ COL = {
         "BOLD DNA Sequence", width="large"
     ),
     "gbif_taxonURL": st.column_config.LinkColumn("GBIF Link", display_text="🔗 View"),
+    "sameSpeciesAs": st.column_config.TextColumn(
+        "Possibly same species as",
+        help="Another source (in brackets) counts these species as one. WoRMS "
+        "may keep one species under two names, or the sources may disagree. "
+        "The names are kept and counted apart.",
+    ),
     "gbif_scientificName": st.column_config.TextColumn(
         "Name in GBIF",
         help="The name GBIF gives the species, when it differs from WoRMS; a "
@@ -1133,6 +1140,46 @@ def highlight_empty_sequence(row):
 
     style = "background-color: #c0c0c0; color: black;" if is_empty else ""
     return [style] * len(row)
+
+
+def same_species_as(names: pd.Series) -> pd.Series:
+    """The species each of *names* is possibly the same as, indexed by name;
+    only the linked ones (see same_species_groups)."""
+    groups = same_species_groups(names, st.session_state.name_table)
+    return groups.set_index("scientificName")["sameSpeciesAs"]
+
+
+def with_same_species(df: pd.DataFrame) -> pd.DataFrame:
+    """df with sameSpeciesAs (see same_species_as); empty for other rows."""
+    names = df["scientificName"]
+    return df.assign(sameSpeciesAs=names.map(same_species_as(names)))
+
+
+def display_same_species(df: pd.DataFrame) -> None:
+    """List the species of df another source counts as one species."""
+    groups = same_species_groups(df["scientificName"], st.session_state.name_table)
+    if groups.empty:
+        return
+    n_groups = groups["group"].nunique()
+    with st.expander(
+        f"⚠️ {n_groups} species possibly listed under several names",
+        expanded=False,
+    ):
+        st.caption(
+            "Another source counts these names as one species. WoRMS may keep "
+            "one species under two names, or the sources may disagree. The "
+            "names are kept and counted apart: check them."
+        )
+        st.dataframe(
+            groups,
+            width="stretch",
+            hide_index=True,
+            column_order=["scientificName", "sameSpeciesAs"],
+            column_config={
+                "scientificName": COL["scientificName"],
+                "sameSpeciesAs": COL["sameSpeciesAs"],
+            },
+        )
 
 
 def highlight_in_mol(row):

@@ -20,6 +20,7 @@ from .names import (
     species_of,
     species_key,
     ncbi_names,
+    same_species_groups,
 )
 
 from .tax_pipeline import (
@@ -107,6 +108,7 @@ __all__ = [
     "species_of",
     "species_key",
     "ncbi_names",
+    "same_species_groups",
     "prepare_resolution_input",
     "prepare_resolution_taxids",
     "run_name_resolution",
