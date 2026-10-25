@@ -13,7 +13,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from trident.clients.gbif import get_extent_column_name
+from trident.clients.gbif import area_label
 from trident.core.database import load_provenance
 from trident.core.utils import (
     name_list,
@@ -21,7 +21,7 @@ from trident.core.utils import (
     pluralize,
     species_for_sequences,
 )
-from trident.pipelines.names import species_key, species_of
+from trident.pipelines.names import resolved_names, species_key, species_of
 
 from trident.pipelines.results_pipeline import (
     build_species_flow,
@@ -635,8 +635,7 @@ def _show_lost_at(seq_id, step):
         if seq_df.empty:
             st.caption("GBIF returned no counts for its candidate species.")
             return
-        area = get_extent_column_name(extent)
-        area = "worldwide" if area == "global" else f"within {area}"
+        area = area_label(extent, params.get("gbif_area"))
         st.caption(
             f"Its candidate species and their GBIF occurrences. GEO keeps a species "
             f"with at least {min_occ} {pluralize(min_occ, 'occurrence')} {area}."
@@ -654,7 +653,7 @@ def _show_lost_at(seq_id, step):
     df = st.session_state[key]
     rows = df[df["seq_id"] == seq_id]
     name_table = st.session_state.name_table
-    if key == "mol_df" and name_table is not None and not name_table.empty:
+    if key == "mol_df" and not resolved_names(name_table).empty:
         rows = rows.assign(acceptedName=species_of(rows["scientificName"], name_table))
     if "identity_percentage" in rows.columns:
         rows = rows.sort_values("identity_percentage", ascending=False)

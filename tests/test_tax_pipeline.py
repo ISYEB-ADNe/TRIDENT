@@ -14,7 +14,13 @@ import inspect
 import pandas as pd
 
 from trident.core.database import fingerprint
-from trident.pipelines.names import build_name_table, ncbi_names, species_of
+from trident.pipelines.names import (
+    build_name_table,
+    gbif_name_rows,
+    ncbi_names,
+    replace_source_rows,
+    species_of,
+)
 from trident.pipelines.tax_pipeline import (
     prepare_worms_input,
     prepare_resolution_input,
@@ -60,6 +66,35 @@ def test_a_name_stands_for_its_species_ignoring_case_and_spacing():
         "Gadus morhua",
     ]
     assert species_of(names, None).tolist()[:3] == names.tolist()[:3]
+
+
+def test_gbif_names_are_recorded_but_never_merge_two_worms_species():
+    """GEO records the name GBIF counts each species under; that name can be
+    another WoRMS species, which still stands for itself, and is no WoRMS
+    rename or name missing from WoRMS."""
+    table = _table({"Larus saundersi": "Larus saundersi"}, {"Larus saundersi": 343919})
+    gbif_search = pd.DataFrame(
+        {
+            "scientificName": ["Larus saundersi"],
+            "gbif_scientificName": ["Chroicocephalus saundersi"],
+            "taxonID": ["5YGFL"],
+            "gbif_matched_by": ["WoRMS ID"],
+            "aphia_id": [343919],
+        }
+    )
+    rows = gbif_name_rows(gbif_search)
+    table = replace_source_rows(replace_source_rows(table, rows, "gbif"), rows, "gbif")
+
+    gbif = table[table["source"] == "gbif"]
+    assert gbif[["species", "name", "source_id"]].values.tolist() == [
+        ["Larus saundersi", "Chroicocephalus saundersi", "5YGFL"]
+    ]
+    names = pd.Series(["Chroicocephalus saundersi", "Larus saundersi"])
+    assert species_of(names, table).tolist() == names.tolist()
+    summary = summarize_name_resolution(
+        pd.DataFrame({"scientificName": ["Larus saundersi"]}), table
+    )
+    assert summary.renamed.empty and summary.not_found.empty
 
 
 def test_name_table_is_the_same_checked_now_or_read_from_the_cache():

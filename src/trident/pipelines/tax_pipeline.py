@@ -25,6 +25,7 @@ from trident.core.database import save_to_db, PartialCache, FullCache
 from trident.core.http import create_session
 from trident.core.utils import (
     StepLog,
+    as_ids,
     pluralize,
     species_for_sequences,
     preserve_sequence_order,
@@ -39,8 +40,8 @@ from trident.clients.worms import (
 )
 from trident.pipelines.names import (
     best_hits,
-    build_name_table,
     name_keys,
+    resolved_names,
     species_key,
     species_of,
 )
@@ -227,8 +228,7 @@ def summarize_name_resolution(
         record, sorted, with genusInTax True when its genus is in the TAX list.
     """
     raw = mol_df["scientificName"].dropna()
-    table = name_table if name_table is not None else build_name_table(None)
-    table = table.drop_duplicates("name_key")
+    table = resolved_names(name_table).drop_duplicates("name_key")
 
     is_renamed = table["name_key"] != species_key(table["species"], None)
     renamed = (
@@ -319,12 +319,6 @@ def run_worms_search(
 ### GENUS HOMONYMS ###
 
 
-def _ids(values: pd.Series) -> pd.Series:
-    """AphiaIDs as nullable integers (they come back from SQLite as int, float
-    or text)."""
-    return pd.to_numeric(values, errors="coerce").astype("Int64")
-
-
 def genus_homonyms(worms_search_df: pd.DataFrame, tax_df: pd.DataFrame) -> pd.DataFrame:
     """Report the genus names expanded as several homonyms, and what TAX kept.
 
@@ -355,7 +349,7 @@ def genus_homonyms(worms_search_df: pd.DataFrame, tax_df: pd.DataFrame) -> pd.Da
         return pd.DataFrame(columns=columns)
 
     species = worms_search_df.assign(
-        genusID=_ids(worms_search_df["genusID"]),
+        genusID=as_ids(worms_search_df["genusID"]),
         _genus=worms_search_df["genus"].map(normalize_name),
     ).dropna(subset=["genusID"])
     groups = (
@@ -373,7 +367,7 @@ def genus_homonyms(worms_search_df: pd.DataFrame, tax_df: pd.DataFrame) -> pd.Da
         return pd.DataFrame(columns=columns)
 
     tax = tax_df.assign(
-        _gid=_ids(tax_df["genusID"]), _genus=tax_df["genus"].map(normalize_name)
+        _gid=as_ids(tax_df["genusID"]), _genus=tax_df["genus"].map(normalize_name)
     )
     kept = tax.groupby("_gid")["seq_id"].nunique()
     total = tax.groupby("_genus")["seq_id"].nunique()
@@ -458,7 +452,7 @@ def run_worms_merge(
     # name): a sequence keeps the ones its MOL species belong to, all of them
     # when none of its species is in any.
     if "genusID" in merged_df.columns:
-        merged_df["_gid"] = _ids(merged_df["genusID"])
+        merged_df["_gid"] = as_ids(merged_df["genusID"])
         groups = ["seq_id", "_join_key"]
         merged_df["_hit"] = merged_df.groupby([*groups, "_gid"], dropna=False)[
             "in_mol"

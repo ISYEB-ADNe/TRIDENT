@@ -34,6 +34,7 @@ PARAM_LABELS: dict[str, str] = {
     "gbif_latitude": "Latitude",
     "gbif_longitude": "Longitude",
     "gbif_extents": "Search Extents (km)",
+    "gbif_area": "Search Area",
     "gbif_filter_extent": "Selected Extent (km)",
     "gbif_min_occurrences": "Min. Occurrences",
     # EXTRA (BOLD)
@@ -74,6 +75,7 @@ SECTIONS = [
             "gbif_latitude",
             "gbif_longitude",
             "gbif_extents",
+            "gbif_area",
             "gbif_filter_extent",
             "gbif_min_occurrences",
         ],

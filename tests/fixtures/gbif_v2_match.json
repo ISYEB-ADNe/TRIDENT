@@ -1,0 +1,713 @@
+{
+ "Aulotrachichthys nyx": {
+  "body": {
+   "classification": [
+    {
+     "key": "CS5HF",
+     "name": "Eukaryota",
+     "rank": "DOMAIN"
+    },
+    {
+     "key": "N",
+     "name": "Animalia",
+     "rank": "KINGDOM"
+    },
+    {
+     "key": "CH2",
+     "name": "Chordata",
+     "rank": "PHYLUM"
+    },
+    {
+     "key": "8V4V3",
+     "name": "Vertebrata",
+     "rank": "SUBPHYLUM"
+    },
+    {
+     "key": "8V4V5",
+     "name": "Gnathostomata",
+     "rank": "INFRAPHYLUM"
+    },
+    {
+     "key": "8VVWB",
+     "name": "Osteichthyes",
+     "rank": "PARVPHYLUM"
+    },
+    {
+     "key": "8VR36",
+     "name": "Actinopterygii",
+     "rank": "GIGACLASS"
+    },
+    {
+     "key": "KTWM8",
+     "name": "Actinopteri",
+     "rank": "SUPERCLASS"
+    },
+    {
+     "key": "8V4VD",
+     "name": "Teleostei",
+     "rank": "CLASS"
+    },
+    {
+     "key": "KVW6L",
+     "name": "Trachichthyiformes",
+     "rank": "ORDER"
+    },
+    {
+     "key": "KVV46",
+     "name": "Trachichthyidae",
+     "rank": "FAMILY"
+    },
+    {
+     "key": "KTZ2P",
+     "name": "Aulotrachichthys",
+     "rank": "GENUS"
+    }
+   ],
+   "diagnostics": {
+    "confidence": 94,
+    "issues": [
+     "SCIENTIFIC_NAME_ID_NOT_FOUND"
+    ],
+    "matchType": "HIGHERRANK",
+    "timeTaken": 18,
+    "timings": {
+     "idMatchScientificNameID": 0,
+     "sciNameMatch": 18
+    }
+   },
+   "synonym": false,
+   "usage": {
+    "authorship": "Fowler, 1938",
+    "canonicalName": "Aulotrachichthys",
+    "code": "ZOOLOGICAL",
+    "formattedName": "<i>Aulotrachichthys</i> Fowler, 1938",
+    "key": "KTZ2P",
+    "name": "Aulotrachichthys Fowler, 1938",
+    "rank": "GENUS",
+    "status": "ACCEPTED",
+    "type": "SCIENTIFIC"
+   }
+  },
+  "params": {
+   "checklistKey": "7ddf754f-d193-4cc9-b351-99906754a03b",
+   "scientificName": "Aulotrachichthys nyx",
+   "scientificNameID": "urn:lsid:marinespecies.org:taxname:1913235"
+  }
+ },
+ "Chroicocephalus saundersi": {
+  "body": {
+   "additionalStatus": [
+    {
+     "clbDatasetKey": "53131",
+     "datasetAlias": "IUCN",
+     "datasetKey": "19491596-35ae-4a91-9a98-85cf505f1bd3",
+     "sourceId": "22694436",
+     "status": "VULNERABLE",
+     "statusCode": "VU"
+    }
+   ],
+   "classification": [
+    {
+     "key": "CS5HF",
+     "name": "Eukaryota",
+     "rank": "DOMAIN"
+    },
+    {
+     "key": "N",
+     "name": "Animalia",
+     "rank": "KINGDOM"
+    },
+    {
+     "key": "CH2",
+     "name": "Chordata",
+     "rank": "PHYLUM"
+    },
+    {
+     "key": "8V4V3",
+     "name": "Vertebrata",
+     "rank": "SUBPHYLUM"
+    },
+    {
+     "key": "8V4V5",
+     "name": "Gnathostomata",
+     "rank": "INFRAPHYLUM"
+    },
+    {
+     "key": "8VVWB",
+     "name": "Osteichthyes",
+     "rank": "PARVPHYLUM"
+    },
+    {
+     "key": "9CK8W",
+     "name": "Tetrapoda",
+     "rank": "MEGACLASS"
+    },
+    {
+     "key": "V2",
+     "name": "Aves",
+     "rank": "CLASS"
+    },
+    {
+     "key": "X3",
+     "name": "Charadriiformes",
+     "rank": "ORDER"
+    },
+    {
+     "key": "BSK",
+     "name": "Laridae",
+     "rank": "FAMILY"
+    },
+    {
+     "key": "3P9X",
+     "name": "Chroicocephalus",
+     "rank": "GENUS"
+    },
+    {
+     "key": "5YGFL",
+     "name": "Chroicocephalus saundersi",
+     "rank": "SPECIES"
+    }
+   ],
+   "diagnostics": {
+    "confidence": 100,
+    "matchType": "EXACT",
+    "matchedID": {
+     "clbDatasetKey": "2011",
+     "datasetKey": "2d59e5db-57ad-41ff-97d6-11f5fb264527",
+     "datasetTitle": "World Register of Marine Species",
+     "id": "urn:lsid:marinespecies.org:taxname:1750258",
+     "mainIndexID": "5YGFL",
+     "parentID": "urn:lsid:marinespecies.org:taxname:465357",
+     "rank": "SPECIES",
+     "recognizedVariants": [
+      "urn:lsid:marinespecies.org:taxname:1750258",
+      "worms:1750258",
+      "AphiaID:1750258",
+      "http://marinespecies.org/data.php?id=1750258",
+      "https://marinespecies.org/data.php?id=1750258",
+      "https://www.marinespecies.org/aphia.php?p=taxdetails&id=1750258"
+     ],
+     "scientificName": "Chroicocephalus saundersi Swinhoe, 1871",
+     "status": "ACCEPTED"
+    },
+    "timeTaken": 17,
+    "timings": {
+     "checkConsistencyWithClassificationMatch": 0,
+     "checkScientificNameAndIDConsistencyScientificNameID": 0,
+     "idMatchScientificNameID": 2,
+     "luceneMatch": 14,
+     "nameNRank": 0,
+     "nameParse": 1,
+     "sciNameMatch": 15
+    }
+   },
+   "synonym": false,
+   "usage": {
+    "authorship": "Swinhoe, 1871",
+    "canonicalName": "Chroicocephalus saundersi",
+    "code": "ZOOLOGICAL",
+    "formattedName": "<i>Chroicocephalus</i> <i>saundersi</i> Swinhoe, 1871",
+    "genericName": "Chroicocephalus",
+    "key": "5YGFL",
+    "name": "Chroicocephalus saundersi Swinhoe, 1871",
+    "rank": "SPECIES",
+    "specificEpithet": "saundersi",
+    "status": "ACCEPTED",
+    "type": "SCIENTIFIC"
+   }
+  },
+  "params": {
+   "checklistKey": "7ddf754f-d193-4cc9-b351-99906754a03b",
+   "scientificName": "Chroicocephalus saundersi",
+   "scientificNameID": "urn:lsid:marinespecies.org:taxname:1750258"
+  }
+ },
+ "Larus saundersi": {
+  "body": {
+   "additionalStatus": [
+    {
+     "clbDatasetKey": "53131",
+     "datasetAlias": "IUCN",
+     "datasetKey": "19491596-35ae-4a91-9a98-85cf505f1bd3",
+     "sourceId": "22694436",
+     "status": "VULNERABLE",
+     "statusCode": "VU"
+    }
+   ],
+   "classification": [
+    {
+     "key": "CS5HF",
+     "name": "Eukaryota",
+     "rank": "DOMAIN"
+    },
+    {
+     "key": "N",
+     "name": "Animalia",
+     "rank": "KINGDOM"
+    },
+    {
+     "key": "CH2",
+     "name": "Chordata",
+     "rank": "PHYLUM"
+    },
+    {
+     "key": "8V4V3",
+     "name": "Vertebrata",
+     "rank": "SUBPHYLUM"
+    },
+    {
+     "key": "8V4V5",
+     "name": "Gnathostomata",
+     "rank": "INFRAPHYLUM"
+    },
+    {
+     "key": "8VVWB",
+     "name": "Osteichthyes",
+     "rank": "PARVPHYLUM"
+    },
+    {
+     "key": "9CK8W",
+     "name": "Tetrapoda",
+     "rank": "MEGACLASS"
+    },
+    {
+     "key": "V2",
+     "name": "Aves",
+     "rank": "CLASS"
+    },
+    {
+     "key": "X3",
+     "name": "Charadriiformes",
+     "rank": "ORDER"
+    },
+    {
+     "key": "BSK",
+     "name": "Laridae",
+     "rank": "FAMILY"
+    },
+    {
+     "key": "3P9X",
+     "name": "Chroicocephalus",
+     "rank": "GENUS"
+    },
+    {
+     "key": "5YGFL",
+     "name": "Chroicocephalus saundersi",
+     "rank": "SPECIES"
+    }
+   ],
+   "diagnostics": {
+    "confidence": 100,
+    "matchType": "EXACT",
+    "matchedID": {
+     "clbDatasetKey": "2011",
+     "datasetKey": "2d59e5db-57ad-41ff-97d6-11f5fb264527",
+     "datasetTitle": "World Register of Marine Species",
+     "id": "urn:lsid:marinespecies.org:taxname:343919",
+     "mainIndexID": "5YGFL",
+     "parentID": "urn:lsid:marinespecies.org:taxname:137043",
+     "rank": "SPECIES",
+     "recognizedVariants": [
+      "urn:lsid:marinespecies.org:taxname:343919",
+      "worms:343919",
+      "AphiaID:343919",
+      "http://marinespecies.org/data.php?id=343919",
+      "https://marinespecies.org/data.php?id=343919",
+      "https://www.marinespecies.org/aphia.php?p=taxdetails&id=343919"
+     ],
+     "scientificName": "Larus saundersi (Swinhoe, 1871)",
+     "status": "ACCEPTED"
+    },
+    "timeTaken": 10,
+    "timings": {
+     "checkConsistencyWithClassificationMatch": 0,
+     "checkScientificNameAndIDConsistencyScientificNameID": 0,
+     "idMatchScientificNameID": 0,
+     "luceneMatch": 10,
+     "nameNRank": 1,
+     "nameParse": 0,
+     "sciNameMatch": 11
+    }
+   },
+   "synonym": false,
+   "usage": {
+    "authorship": "Swinhoe, 1871",
+    "canonicalName": "Chroicocephalus saundersi",
+    "code": "ZOOLOGICAL",
+    "formattedName": "<i>Chroicocephalus</i> <i>saundersi</i> Swinhoe, 1871",
+    "genericName": "Chroicocephalus",
+    "key": "5YGFL",
+    "name": "Chroicocephalus saundersi Swinhoe, 1871",
+    "rank": "SPECIES",
+    "specificEpithet": "saundersi",
+    "status": "ACCEPTED",
+    "type": "SCIENTIFIC"
+   }
+  },
+  "params": {
+   "checklistKey": "7ddf754f-d193-4cc9-b351-99906754a03b",
+   "scientificName": "Larus saundersi",
+   "scientificNameID": "urn:lsid:marinespecies.org:taxname:343919"
+  }
+ },
+ "Lestrolepis philippina": {
+  "body": {
+   "acceptedUsage": {
+    "authorship": "(Tanaka, 1908)",
+    "canonicalName": "Lestrolepis japonica",
+    "code": "ZOOLOGICAL",
+    "formattedName": "<i>Lestrolepis</i> <i>japonica</i> (Tanaka, 1908)",
+    "genericName": "Lestrolepis",
+    "key": "6Q2WB",
+    "name": "Lestrolepis japonica (Tanaka, 1908)",
+    "rank": "SPECIES",
+    "specificEpithet": "japonica",
+    "type": "SCIENTIFIC"
+   },
+   "classification": [
+    {
+     "key": "CS5HF",
+     "name": "Eukaryota",
+     "rank": "DOMAIN"
+    },
+    {
+     "key": "N",
+     "name": "Animalia",
+     "rank": "KINGDOM"
+    },
+    {
+     "key": "CH2",
+     "name": "Chordata",
+     "rank": "PHYLUM"
+    },
+    {
+     "key": "8V4V3",
+     "name": "Vertebrata",
+     "rank": "SUBPHYLUM"
+    },
+    {
+     "key": "8V4V5",
+     "name": "Gnathostomata",
+     "rank": "INFRAPHYLUM"
+    },
+    {
+     "key": "8VVWB",
+     "name": "Osteichthyes",
+     "rank": "PARVPHYLUM"
+    },
+    {
+     "key": "8VR36",
+     "name": "Actinopterygii",
+     "rank": "GIGACLASS"
+    },
+    {
+     "key": "KTWM8",
+     "name": "Actinopteri",
+     "rank": "SUPERCLASS"
+    },
+    {
+     "key": "8V4VD",
+     "name": "Teleostei",
+     "rank": "CLASS"
+    },
+    {
+     "key": "S8",
+     "name": "Aulopiformes",
+     "rank": "ORDER"
+    },
+    {
+     "key": "V948J",
+     "name": "Alepisauroidei",
+     "rank": "SUBORDER"
+    },
+    {
+     "key": "KVMGS",
+     "name": "Paralepididae",
+     "rank": "FAMILY"
+    },
+    {
+     "key": "V94W5",
+     "name": "Lestidiinae",
+     "rank": "SUBFAMILY"
+    },
+    {
+     "key": "KVG6C",
+     "name": "Lestrolepis",
+     "rank": "GENUS"
+    },
+    {
+     "key": "6Q2WB",
+     "name": "Lestrolepis japonica",
+     "rank": "SPECIES"
+    }
+   ],
+   "diagnostics": {
+    "confidence": 98,
+    "issues": [
+     "SCIENTIFIC_NAME_ID_NOT_FOUND"
+    ],
+    "matchType": "EXACT",
+    "timeTaken": 11,
+    "timings": {
+     "idMatchScientificNameID": 1,
+     "luceneMatch": 10,
+     "nameNRank": 0,
+     "nameParse": 0,
+     "sciNameMatch": 10
+    }
+   },
+   "synonym": true,
+   "usage": {
+    "authorship": "Fowler, 1934",
+    "canonicalName": "Lestrolepis philippina",
+    "code": "ZOOLOGICAL",
+    "formattedName": "<i>Lestrolepis</i> <i>philippina</i> Fowler, 1934",
+    "genericName": "Lestrolepis",
+    "key": "TZVB5",
+    "name": "Lestrolepis philippina Fowler, 1934",
+    "rank": "SPECIES",
+    "specificEpithet": "philippina",
+    "status": "SYNONYM",
+    "type": "SCIENTIFIC"
+   }
+  },
+  "params": {
+   "checklistKey": "7ddf754f-d193-4cc9-b351-99906754a03b",
+   "scientificName": "Lestrolepis philippina",
+   "scientificNameID": "urn:lsid:marinespecies.org:taxname:1905532"
+  }
+ },
+ "Monocentris neozelanica": {
+  "body": {
+   "classification": [
+    {
+     "key": "CS5HF",
+     "name": "Eukaryota",
+     "rank": "DOMAIN"
+    },
+    {
+     "key": "N",
+     "name": "Animalia",
+     "rank": "KINGDOM"
+    },
+    {
+     "key": "CH2",
+     "name": "Chordata",
+     "rank": "PHYLUM"
+    },
+    {
+     "key": "8V4V3",
+     "name": "Vertebrata",
+     "rank": "SUBPHYLUM"
+    },
+    {
+     "key": "8V4V5",
+     "name": "Gnathostomata",
+     "rank": "INFRAPHYLUM"
+    },
+    {
+     "key": "8VVWB",
+     "name": "Osteichthyes",
+     "rank": "PARVPHYLUM"
+    },
+    {
+     "key": "8VR36",
+     "name": "Actinopterygii",
+     "rank": "GIGACLASS"
+    },
+    {
+     "key": "KTWM8",
+     "name": "Actinopteri",
+     "rank": "SUPERCLASS"
+    },
+    {
+     "key": "8V4VD",
+     "name": "Teleostei",
+     "rank": "CLASS"
+    },
+    {
+     "key": "KVW6L",
+     "name": "Trachichthyiformes",
+     "rank": "ORDER"
+    },
+    {
+     "key": "KVH3C",
+     "name": "Monocentridae",
+     "rank": "FAMILY"
+    },
+    {
+     "key": "KVJKV",
+     "name": "Monocentris",
+     "rank": "GENUS"
+    },
+    {
+     "key": "4456Z",
+     "name": "Monocentris neozelanicus",
+     "rank": "SPECIES"
+    }
+   ],
+   "diagnostics": {
+    "confidence": 96,
+    "issues": [
+     "SCIENTIFIC_NAME_ID_NOT_FOUND"
+    ],
+    "matchType": "VARIANT",
+    "timeTaken": 14,
+    "timings": {
+     "idMatchScientificNameID": 0,
+     "luceneMatch": 14,
+     "nameNRank": 0,
+     "nameParse": 1,
+     "sciNameMatch": 15
+    }
+   },
+   "synonym": false,
+   "usage": {
+    "authorship": "(Powell, 1938)",
+    "canonicalName": "Monocentris neozelanicus",
+    "code": "ZOOLOGICAL",
+    "formattedName": "<i>Monocentris</i> <i>neozelanicus</i> (Powell, 1938)",
+    "genericName": "Monocentris",
+    "key": "4456Z",
+    "name": "Monocentris neozelanicus (Powell, 1938)",
+    "rank": "SPECIES",
+    "specificEpithet": "neozelanicus",
+    "status": "ACCEPTED",
+    "type": "SCIENTIFIC"
+   }
+  },
+  "params": {
+   "checklistKey": "7ddf754f-d193-4cc9-b351-99906754a03b",
+   "scientificName": "Monocentris neozelanica",
+   "scientificNameID": "urn:lsid:marinespecies.org:taxname:1904645"
+  }
+ },
+ "Spicara flexuosum": {
+  "body": {
+   "classification": [
+    {
+     "key": "CS5HF",
+     "name": "Eukaryota",
+     "rank": "DOMAIN"
+    },
+    {
+     "key": "N",
+     "name": "Animalia",
+     "rank": "KINGDOM"
+    },
+    {
+     "key": "CH2",
+     "name": "Chordata",
+     "rank": "PHYLUM"
+    },
+    {
+     "key": "8V4V3",
+     "name": "Vertebrata",
+     "rank": "SUBPHYLUM"
+    },
+    {
+     "key": "8V4V5",
+     "name": "Gnathostomata",
+     "rank": "INFRAPHYLUM"
+    },
+    {
+     "key": "8VVWB",
+     "name": "Osteichthyes",
+     "rank": "PARVPHYLUM"
+    },
+    {
+     "key": "8VR36",
+     "name": "Actinopterygii",
+     "rank": "GIGACLASS"
+    },
+    {
+     "key": "KTWM8",
+     "name": "Actinopteri",
+     "rank": "SUPERCLASS"
+    },
+    {
+     "key": "8V4VD",
+     "name": "Teleostei",
+     "rank": "CLASS"
+    },
+    {
+     "key": "PC",
+     "name": "Perciformes",
+     "rank": "ORDER"
+    },
+    {
+     "key": "KVMBP",
+     "name": "Percoidei",
+     "rank": "SUBORDER"
+    },
+    {
+     "key": "KVSZW",
+     "name": "Sparidae",
+     "rank": "FAMILY"
+    },
+    {
+     "key": "KVTW8",
+     "name": "Spicara",
+     "rank": "GENUS"
+    },
+    {
+     "key": "KVTWD",
+     "name": "Spicara flexuosum",
+     "rank": "SPECIES"
+    }
+   ],
+   "diagnostics": {
+    "confidence": 100,
+    "matchType": "EXACT",
+    "matchedID": {
+     "clbDatasetKey": "2011",
+     "datasetKey": "2d59e5db-57ad-41ff-97d6-11f5fb264527",
+     "datasetTitle": "World Register of Marine Species",
+     "id": "urn:lsid:marinespecies.org:taxname:1577318",
+     "mainIndexID": "KVTWD",
+     "parentID": "urn:lsid:marinespecies.org:taxname:125949",
+     "rank": "SPECIES",
+     "recognizedVariants": [
+      "urn:lsid:marinespecies.org:taxname:1577318",
+      "worms:1577318",
+      "AphiaID:1577318",
+      "http://marinespecies.org/data.php?id=1577318",
+      "https://marinespecies.org/data.php?id=1577318",
+      "https://www.marinespecies.org/aphia.php?p=taxdetails&id=1577318"
+     ],
+     "scientificName": "Spicara flexuosum Rafinesque, 1810",
+     "status": "ACCEPTED"
+    },
+    "timeTaken": 13,
+    "timings": {
+     "checkConsistencyWithClassificationMatch": 0,
+     "checkScientificNameAndIDConsistencyScientificNameID": 1,
+     "idMatchScientificNameID": 0,
+     "luceneMatch": 12,
+     "nameNRank": 0,
+     "nameParse": 1,
+     "sciNameMatch": 13
+    }
+   },
+   "synonym": false,
+   "usage": {
+    "authorship": "Rafinesque, 1810",
+    "canonicalName": "Spicara flexuosum",
+    "code": "ZOOLOGICAL",
+    "formattedName": "<i>Spicara</i> <i>flexuosum</i> Rafinesque, 1810",
+    "genericName": "Spicara",
+    "key": "KVTWD",
+    "name": "Spicara flexuosum Rafinesque, 1810",
+    "rank": "SPECIES",
+    "specificEpithet": "flexuosum",
+    "status": "ACCEPTED",
+    "type": "SCIENTIFIC"
+   }
+  },
+  "params": {
+   "checklistKey": "7ddf754f-d193-4cc9-b351-99906754a03b",
+   "scientificName": "Spicara flexuosum",
+   "scientificNameID": "urn:lsid:marinespecies.org:taxname:1577318"
+  }
+ }
+}

@@ -12,6 +12,9 @@ from .mol_pipeline import (
 
 from .names import (
     build_name_table,
+    gbif_name_rows,
+    replace_source_rows,
+    resolved_names,
     species_of,
     species_key,
     ncbi_names,
@@ -34,6 +37,7 @@ from .tax_pipeline import (
 
 from .geo_pipeline import (
     prepare_gbif_input,
+    prepare_gbif_worms_ids,
     run_gbif_search,
     run_gbif_merge,
     run_gbif_filter,
@@ -91,6 +95,9 @@ __all__ = [
     "build_mol_summary",
     "build_mol_sequence_report",
     "build_name_table",
+    "gbif_name_rows",
+    "replace_source_rows",
+    "resolved_names",
     "species_of",
     "species_key",
     "ncbi_names",
@@ -107,6 +114,7 @@ __all__ = [
     "empty_tax_results",
     "build_tax_summary",
     "prepare_gbif_input",
+    "prepare_gbif_worms_ids",
     "run_gbif_search",
     "run_gbif_merge",
     "run_gbif_filter",

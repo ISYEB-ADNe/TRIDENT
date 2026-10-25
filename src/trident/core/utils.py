@@ -46,6 +46,12 @@ def to_binomial(name) -> str:
     return " ".join(words[:n_words])
 
 
+def as_ids(values: pd.Series) -> pd.Series:
+    """Numeric ids (e.g. AphiaIDs) as nullable integers, whatever type they were
+    stored as (SQLite gives int, float or text)."""
+    return pd.to_numeric(values, errors="coerce").astype("Int64")
+
+
 def ensure_columns(
     df: pd.DataFrame, cols: "list[str] | tuple[str, ...]", fill=pd.NA
 ) -> pd.DataFrame:

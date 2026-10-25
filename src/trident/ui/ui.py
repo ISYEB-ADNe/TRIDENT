@@ -1168,6 +1168,12 @@ def get_recent_param_sets(db_path, table_name, columns, limit=5):
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
+        # A table without one of these columns predates that setting: no preset
+        stored = {row[1] for row in cursor.execute(f"PRAGMA table_info({table_name})")}
+        if stored and not set(columns) <= stored:
+            conn.close()
+            logger.debug(f"No presets from {table_name}: written before {columns}")
+            return []
         cols_sql = ", ".join(columns)
         where_clauses = " AND ".join(
             f"{col} IS NOT NULL AND {col} <> 'None' AND {col} <> ''" for col in columns

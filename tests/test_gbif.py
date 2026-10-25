@@ -1,12 +1,16 @@
-"""Tests for pure GBIF helpers (coordinate parsing, extent naming). No network."""
+"""Tests for the GBIF client and GBIF search. No network: GBIF answers come
+from fixtures or stand-in sessions."""
 
 import inspect
+import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from trident.clients import gbif
 from trident.clients.gbif import (
+    area_params,
     counts_for_area,
     filter_taxon_matches,
     get_extent_column_name,
@@ -14,6 +18,7 @@ from trident.clients.gbif import (
     search_taxon_occurrences,
     _GBIF_TAXON_COLS,
     _match_single_taxon_name,
+    match_taxon_names,
 )
 from trident.core.utils import ensure_columns
 from trident.pipelines import geo_pipeline
@@ -112,30 +117,32 @@ def test_failed_occurrence_batch_reports_failed_keys(monkeypatch):
     assert set(failed) == {"111", "222"}
 
 
-class _FacetSession:
-    """Session returning fixed facet counts; keys absent from it zero-fill."""
+class _JsonSession:
+    """Session answering each request with answer(params) as its JSON body."""
 
-    def __init__(self, counts):
-        self._counts = counts
+    def __init__(self, answer):
+        self._answer = answer
 
-    def get(self, *a, **k):
-        counts = self._counts
+    def get(self, url, params=None, timeout=None):
+        body = self._answer(params)
 
         class R:
             def raise_for_status(self):
                 pass
 
             def json(self):
-                return {
-                    "facets": [
-                        {"counts": [{"name": n, "count": c} for n, c in counts.items()]}
-                    ]
-                }
+                return body
 
         return R()
 
     def close(self):
         pass
+
+
+def _FacetSession(counts):
+    """Session returning fixed facet counts; keys absent from it zero-fill."""
+    facets = [{"name": n, "count": c} for n, c in counts.items()]
+    return _JsonSession(lambda params: {"facets": [{"counts": facets}]})
 
 
 def test_search_returns_counts_and_zero_fills_absent(monkeypatch):
@@ -165,6 +172,7 @@ def test_run_gbif_search_routes_occurrence_errors_to_failure_sink(monkeypatch):
                     "genus": n.split()[0],
                     "kingdom": "Animalia",
                     "status": "ACCEPTED",
+                    "matched_by": "WoRMS ID",
                 }
                 for i, n in enumerate(names)
             ]
@@ -206,6 +214,7 @@ def test_failure_sink_uses_input_names_not_canonical(monkeypatch):
                     "genus": n.split()[0].lower().capitalize(),
                     "kingdom": "Animalia",
                     "status": "ACCEPTED",
+                    "matched_by": "WoRMS ID",
                 }
                 for i, n in enumerate(names)
             ]
@@ -321,5 +330,144 @@ def test_merge_drops_species_without_gbif_data(monkeypatch):
     assert {"seq_id", "scientificName", "in_mol", "gbif_extent"} <= set(merged.columns)
 
 
+def test_geo_list_takes_gbif_counts_not_gbif_names():
+    """The GEO merge adds GBIF's counts and taxon page to the TAX rows; GBIF's
+    own name of the species stays out of the GEO list."""
+    gbif_search_df = pd.DataFrame(
+        {
+            "scientificName": ["Larus saundersi"],
+            "gbif_scientificName": ["Chroicocephalus saundersi"],
+            "gbif_matched_by": ["WoRMS ID"],
+            "genus": ["Chroicocephalus"],
+            "taxonID": ["5YGFL"],
+            "taxonURL": ["https://www.gbif.org/taxon/5YGFL"],
+            "occurrences": [12],
+            "gbif_extent": [500],
+        }
+    )
+    tax_df = pd.DataFrame(
+        {
+            "seq_id": ["s1"],
+            "scientificName": ["Larus saundersi"],
+            "genus": ["Larus"],
+            "taxonID": ["343919"],
+        }
+    )
+
+    merged = inspect.unwrap(geo_pipeline.run_gbif_merge)(gbif_search_df, tax_df)
+
+    row = merged.iloc[0]
+    assert (row["genus"], row["taxonID"], row["occurrences"]) == ("Larus", "343919", 12)
+    assert row["gbif_taxonURL"] == "https://www.gbif.org/taxon/5YGFL"
+    assert not {"gbif_scientificName", "gbif_matched_by"} & set(merged.columns)
+
+
 def test_match_no_names_keeps_match_columns():
     assert list(gbif.match_taxon_names([]).columns) == gbif.GBIF_MATCH_COLUMNS
+
+
+# --- v2 match (COL XR) on real GBIF answers ---
+
+# Real v2 species/match answers (Oct 2026), queried with the WoRMS ID of each name
+V2_MATCHES = json.loads(
+    (Path(__file__).parent / "fixtures" / "gbif_v2_match.json").read_text()
+)
+
+
+def test_species_counted_under_gbif_species_of_worms_id_or_name(monkeypatch):
+    """Each name keeps its row under the GBIF species of its WoRMS ID, or of its
+    name or a variant of it; names sharing a species are both kept. A synonym
+    in GBIF of another species (a separate species in WoRMS) counts under its
+    own GBIF key; one that only changes the genus, under the accepted key. A
+    genus-only or fuzzy match is left out."""
+    answers = {name: match["body"] for name, match in V2_MATCHES.items()}
+    # A misspelt name GBIF matches fuzzily to Spicara flexuosum, without an ID
+    spicara = answers["Spicara flexuosum"]
+    answers["Spicara flexuosa"] = spicara | {
+        "diagnostics": {"matchType": "FUZZY", "confidence": 96}
+    }
+    # A name GBIF holds as a synonym of a species with the same epithet in
+    # another genus (Lestrolepis japonica)
+    answers["Arctozenus japonicus"] = answers["Lestrolepis philippina"]
+    monkeypatch.setattr(
+        gbif,
+        "create_session",
+        lambda *a, **k: _JsonSession(lambda params: answers[params["scientificName"]]),
+    )
+    worms_ids = {
+        name: match["params"]["scientificNameID"].rsplit(":", 1)[1]
+        for name, match in V2_MATCHES.items()
+    }
+
+    matches = match_taxon_names(list(answers), worms_ids=worms_ids)
+    kept = filter_taxon_matches(matches).set_index("scientificName")
+
+    assert set(kept.index) == {
+        "Larus saundersi",  # WoRMS ID, GBIF's name: Chroicocephalus saundersi
+        "Chroicocephalus saundersi",
+        "Spicara flexuosum",
+        "Monocentris neozelanica",  # name variant: neozelanicus
+        "Arctozenus japonicus",  # synonym, genus change only: L. japonica
+        "Lestrolepis philippina",  # synonym of L. japonica, separate in WoRMS
+    }
+    larus = kept.loc["Larus saundersi"]
+    assert larus["gbif_scientificName"] == "Chroicocephalus saundersi"
+    assert larus["gbif_matched_by"] == "WoRMS ID"
+    assert larus["taxonID"] == kept.loc["Chroicocephalus saundersi", "taxonID"]
+    assert larus["taxonURL"] == f"https://www.gbif.org/taxon/{larus['taxonID']}"
+    assert larus["aphia_id"] == int(worms_ids["Larus saundersi"])
+    lestrolepis = V2_MATCHES["Lestrolepis philippina"]["body"]
+    own, japonica = kept.loc["Lestrolepis philippina"], kept.loc["Arctozenus japonicus"]
+    assert own["taxonID"] == lestrolepis["usage"]["key"]
+    assert own["gbif_scientificName"] == "Lestrolepis philippina"
+    assert "synonym in GBIF of Lestrolepis japonica" in own["gbif_note"]
+    assert japonica["taxonID"] == lestrolepis["acceptedUsage"]["key"]
+
+
+def test_names_sharing_a_gbif_species_both_get_its_counts(monkeypatch):
+    def fake_match(names, **k):
+        return pd.DataFrame(
+            [
+                {
+                    "query": n,
+                    "canonicalName": "Chroicocephalus saundersi",
+                    "confidence": 100,
+                    "matchType": "EXACT",
+                    "needs_review": False,
+                    "taxonID": "5YGFL",
+                    "rank": "SPECIES",
+                    "genus": "Chroicocephalus",
+                    "matched_by": "WoRMS ID",
+                }
+                for n in names
+            ]
+        )
+
+    monkeypatch.setattr(geo_pipeline, "match_taxon_names", fake_match)
+    monkeypatch.setattr(
+        gbif, "create_session", lambda *a, **k: _FacetSession({"5YGFL": 12})
+    )
+    df, _ = geo_pipeline.run_gbif_search(
+        ["Larus saundersi", "Chroicocephalus saundersi"],
+        latitude=24.5,
+        longitude=54.4,
+        extents=[500],
+        db_path=None,
+    )
+
+    assert dict(zip(df["scientificName"], df["occurrences"])) == {
+        "Larus saundersi": 12,
+        "Chroicocephalus saundersi": 12,
+    }
+
+
+# --- search areas ---
+
+
+def test_area_params_circle_box_and_global():
+    assert area_params(24.5, 54.4, 500, "circle") == {"geoDistance": "24.5,54.4,500km"}
+    box = area_params(24.5, 54.4, 500, "box")["geometry"]
+    assert box.startswith("POLYGON((") and box.count(",") == 4
+    assert area_params(24.5, 54.4, "global", "circle") == {}
+    with pytest.raises(ValueError):
+        area_params(24.5, 54.4, 500, "square")

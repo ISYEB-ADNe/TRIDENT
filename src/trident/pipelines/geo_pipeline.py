@@ -2,6 +2,7 @@
 
 Step order:
     1. prepare_gbif_input(tax_df)                      → list[str]
+       prepare_gbif_worms_ids(tax_df)                  → dict[str, str]
     2. run_gbif_search(species_list, ...)               → (gbif_search_df, params)
     3. run_gbif_merge(gbif_search_df, tax_df, ...)      → (gbif_merge_df, params)
     4. run_gbif_filter(gbif_merge_df, ...)              → (gbif_filter_df, params)
@@ -12,14 +13,19 @@ Exploration:
 """
 
 from collections.abc import Callable
+from functools import partial
+from typing import Literal
 
 import pandas as pd
 
 from loguru import logger
 
 from trident.clients.gbif import (
+    COL_XR_CHECKLIST,
     match_taxon_names,
+    match_taxon_names_v1,
     filter_taxon_matches,
+    filter_taxon_matches_v1,
     counts_for_area,
     area_label,
     get_extent_column_name,
@@ -28,6 +34,7 @@ from trident.clients.gbif import (
 from trident.core.constants import GBIF_MIN_OCCURRENCES
 from trident.core.database import save_to_db, FullCache, CustomCache, warn_empty_params
 from trident.core.utils import (
+    as_ids,
     StepLog,
     name_list,
     pluralize,
@@ -57,6 +64,22 @@ def prepare_gbif_input(df: pd.DataFrame) -> list[str]:
     return species_list
 
 
+def prepare_gbif_worms_ids(df: pd.DataFrame) -> dict[str, str]:
+    """Return the WoRMS AphiaID of each species, which the GBIF search matches
+    first.
+
+    Args:
+        df: TAX DataFrame with 'scientificName', 'taxonID' and 'taxonID_db'.
+
+    Returns:
+        Dict of scientific name to AphiaID, for the WoRMS rows with an ID.
+    """
+    worms = df[df["taxonID_db"] == "WORMS"]
+    aphia_ids = as_ids(worms["taxonID"])
+    known = aphia_ids.notna() & worms["scientificName"].notna()
+    return dict(zip(worms.loc[known, "scientificName"], aphia_ids[known].astype(str)))
+
+
 ### SEARCH WORKFLOW ###
 
 
@@ -65,6 +88,8 @@ def _gbif_search_params(
     latitude: float | None,
     longitude: float | None,
     extents: list[float | None],
+    area: str,
+    taxonomy: str,
     **kwargs,
 ):
     """Extract parameters for GBIF search step."""
@@ -72,6 +97,8 @@ def _gbif_search_params(
         "gbif_latitude": latitude,
         "gbif_longitude": longitude,
         "gbif_extents": extents,
+        "gbif_area": area,
+        "gbif_taxonomy": taxonomy,
     }
     inputs = [
         {
@@ -79,6 +106,8 @@ def _gbif_search_params(
             "gbif_latitude": None if extent == "global" else latitude,
             "gbif_longitude": None if extent == "global" else longitude,
             "gbif_extent": extent,
+            "gbif_area": None if extent == "global" else area,
+            "gbif_taxonomy": taxonomy,
         }
         for species in species_list
         for extent in extents
@@ -112,6 +141,9 @@ def run_gbif_search(
     latitude: float | None = None,
     longitude: float | None = None,
     extents: list[float | str] | None = None,
+    area: str = "circle",
+    worms_ids: dict[str, str] | None = None,
+    taxonomy: Literal["col_xr", "backbone"] = "col_xr",
     progress_handler: Callable[[float, str], None] | None = None,
     user_agent: str | None = None,
     failure_sink: list | None = None,
@@ -120,9 +152,15 @@ def run_gbif_search(
 
     Args:
         species_list: Scientific names to match in GBIF.
-        latitude: Center latitude for bounding box calculation.
-        longitude: Center longitude for bounding box calculation.
-        extents: List of distances (km) from center to calculate bounding boxes, or "global".
+        latitude: Center latitude of the search areas.
+        longitude: Center longitude of the search areas.
+        extents: List of distances (km) from center, or "global".
+        area: "circle" (within each distance of the center) or "box" (the
+            bounding box of that circle).
+        worms_ids: WoRMS AphiaID of each name, matched first (see
+            ``prepare_gbif_worms_ids``).
+        taxonomy: "col_xr", GBIF's current taxonomy (v2 match API), or
+            "backbone", the GBIF Backbone frozen since 2023 (v1 match API).
         progress_handler: Optional callback for UI progress updates.
         user_agent: User-Agent header for HTTP requests.
         failure_sink: If provided, species whose name match errored (network or
@@ -138,9 +176,21 @@ def run_gbif_search(
 
     # 1. Taxon Matching (0% -> 30%)
     if progress_handler:
-        progress_handler(0.1, "Matching names against GBIF Backbone...")
+        progress_handler(0.1, "Matching names in GBIF...")
 
-    matches_df = match_taxon_names(species_list, user_agent=user_agent)
+    if taxonomy == "col_xr":
+        match, filter_matches, checklist_key = (
+            partial(match_taxon_names, worms_ids=worms_ids),
+            filter_taxon_matches,
+            COL_XR_CHECKLIST,
+        )
+    else:
+        match, filter_matches, checklist_key = (
+            match_taxon_names_v1,
+            filter_taxon_matches_v1,
+            None,
+        )
+    matches_df = match(species_list, user_agent=user_agent)
 
     ## Errored matches (network/403) are retry-worthy failures, distinct from
     ## genuine no-matches that need review.
@@ -150,7 +200,7 @@ def run_gbif_search(
             failure_sink.extend(errored)
 
     ## Filter to valid keys
-    good_matches = filter_taxon_matches(matches_df)
+    good_matches = filter_matches(matches_df)
     taxon_keys = good_matches["taxonID"].astype(str).tolist()
 
     results = []
@@ -166,7 +216,13 @@ def run_gbif_search(
                 progress_handler(p_current, f"Querying {label} extent...")
 
             res_df, ext_failed = counts_for_area(
-                taxon_keys, latitude, longitude, extent=dist_km, user_agent=user_agent
+                taxon_keys,
+                latitude,
+                longitude,
+                extent=dist_km,
+                area=area,
+                checklist_key=checklist_key,
+                user_agent=user_agent,
             )
             results.append(res_df)
             failed_taxon_keys.update(ext_failed)
@@ -183,16 +239,18 @@ def run_gbif_search(
 
     counts_df = pd.concat(results, ignore_index=True)
 
+    # Names sharing a GBIF species each get its counts
     gbif_search_df = good_matches.merge(
-        counts_df, on="taxonID", how="left", validate="one_to_many"
+        counts_df, on="taxonID", how="left", validate="many_to_many"
     )
 
     # Occurrence fetches that errored return their taxon keys (not a count). Drop
     # those species' rows so a transient error is not cached as "absent", and
     # route them to failure_sink for retry next run. Drop by taxonID (exact);
-    # failure_sink needs the *input* species_list strings (the cache-item keys),
-    # which strict matching guarantees equal to the result's canonicalName only
-    # case-insensitively, so map back via normalize_name.
+    # failure_sink needs the *input* species_list strings (the cache-item keys).
+    # The result's scientificName is the queried name, or with the Backbone
+    # GBIF's name, equal to it only case-insensitively, so map back via
+    # normalize_name.
     if failed_taxon_keys and "taxonID" in gbif_search_df.columns:
         gbif_search_df = gbif_search_df[
             ~gbif_search_df["taxonID"].isin(failed_taxon_keys)
@@ -307,24 +365,14 @@ def run_gbif_merge(
             f"without GBIF data ({name_list(unmatched)})"
         )
 
-    merged_df = (
-        tax_df.merge(
-            gbif_search_df,
-            on="_join_key",
-            how="left",
-            suffixes=("", "_gbif"),
-        )
-        .drop(columns="_join_key")
-        .copy()
+    # The GEO list keeps TAX's columns and adds GBIF's counts and taxon page
+    # only: GBIF's name of each species goes to the name table (gbif_name_rows).
+    gbif_counts = gbif_search_df.reindex(
+        columns=["_join_key", "taxonURL", "occurrences", "gbif_extent"]
+    ).rename(columns={"taxonURL": "gbif_taxonURL"})
+    merged_df = tax_df.merge(gbif_counts, on="_join_key", how="left").drop(
+        columns="_join_key"
     )
-
-    # Keep TAX identifiers, add GBIF URL as separate column
-    gbif_suffix_cols = [c for c in merged_df.columns if c.endswith("_gbif")]
-    merged_df = merged_df.rename(columns={"taxonURL_gbif": "gbif_taxonURL"})
-    # taxonURL_gbif only exists when gbif_search_df carried a taxonURL column.
-    if "taxonURL_gbif" in gbif_suffix_cols:
-        gbif_suffix_cols.remove("taxonURL_gbif")
-    merged_df = merged_df.drop(columns=gbif_suffix_cols)
     merged_df = reorder_taxonomy_columns(merged_df)
 
     # TAX species without GBIF data have no extent, so no cache entry can hold
@@ -391,7 +439,7 @@ def run_gbif_filter(
     logger.info(
         f"GEO filter: {filtered_df['scientificName'].nunique()} species with at "
         f"least {min_occurrences} GBIF {pluralize(min_occurrences, 'occurrence')} "
-        f"{area_label(extent)}"
+        f"{area_label(extent, gbif_merge_params.get('gbif_area'))}"
     )
 
     return filtered_df

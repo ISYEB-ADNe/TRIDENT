@@ -12,6 +12,8 @@ from trident.core.utils import pluralize, species_for_sequences
 from trident.core import config, stop
 import trident.pipelines as pipe
 from trident.clients.gbif import (
+    SEARCH_AREAS,
+    area_label,
     get_extent_column_name,
     parse_coordinate,
     plot_bounding_boxes,
@@ -49,15 +51,16 @@ from trident.ui.defaults import (
 # SEARCH FUNCTIONS
 # -------------------------------------------------------------------
 
+AREA_LABELS = {"circle": "Circle", "box": "Bounding box"}
+
 
 def display_gbif_parameters():
     st.markdown("#### 📍 Sampling Site and Extent")
     st.info(
-        "📊 **Area of Interest:** Search areas in **GBIF** are defined by rectangular "
-        "**bounding boxes** (latitude and longitude ranges). We calculate these boundaries "
-        "from your sampling site using a **Search Extent**. This value represents the minimum "
-        "distance (km) from the center to the box edges, ensuring the search covers your area "
-        "of interest in every direction."
+        "📊 **Area of Interest:** GBIF occurrences are counted around your sampling "
+        "site, within each **Search Extent** (km). The **circle** counts the "
+        "occurrences within that distance of the site. The **bounding box** is the "
+        "rectangle (latitude and longitude ranges) around that circle."
     )
 
     # Previous parameter sets selector
@@ -65,7 +68,8 @@ def display_gbif_parameters():
     param_preset_selector(
         presets,
         format_fn=lambda p: (
-            f"{p['gbif_latitude']}°, {p['gbif_longitude']}° — {p['gbif_extent']} km"
+            f"{p['gbif_latitude']}°, {p['gbif_longitude']}°: {p['gbif_extent']} km, "
+            f"{AREA_LABELS.get(p['gbif_area'], p['gbif_area']).lower()}"
         ),
         key="gbif_search_preset",
     )
@@ -137,11 +141,24 @@ def display_gbif_parameters():
             )
             return None
 
-    return latitude, longitude, extents
+    persist_value("gbif_area", stored.get("gbif_area") or "circle")
+    area = st.radio(
+        "Search area",
+        SEARCH_AREAS,
+        format_func=AREA_LABELS.get,
+        key="gbif_area",
+        horizontal=True,
+        help="Circle: the occurrences within each extent of the site. Bounding box: "
+        "the rectangle around that circle.",
+    )
+    save_widget("gbif_area")
+
+    return latitude, longitude, extents, area
 
 
 def _recent_gbif_search_presets(db_path: str, limit: int = 5) -> list[dict]:
-    """Previous GEO search windows, one per site with all its extents ("250, 500").
+    """Previous GEO search windows, one per site and area with all its extents
+    ("250, 500").
 
     The cache stores one row per extent, so a run with several extents would
     otherwise give one preset per extent, none matching the field. Global is
@@ -150,32 +167,35 @@ def _recent_gbif_search_presets(db_path: str, limit: int = 5) -> list[dict]:
     rows = get_recent_param_sets(
         db_path,
         "gbif_search_inputs",
-        ["gbif_latitude", "gbif_longitude", "gbif_extent"],
+        ["gbif_latitude", "gbif_longitude", "gbif_extent", "gbif_area"],
         limit=None,
     )
     extents_by_site = {}  # most recent site first
     for row in rows:
         if row["gbif_extent"] == "global":
             continue
-        site = (row["gbif_latitude"], row["gbif_longitude"])
+        site = (row["gbif_latitude"], row["gbif_longitude"], row["gbif_area"])
         extents_by_site.setdefault(site, set()).add(int(float(row["gbif_extent"])))
     return [
         {
             "gbif_latitude": lat,
             "gbif_longitude": lon,
             "gbif_extent": ", ".join(map(str, sorted(extents))),
+            "gbif_area": area,
         }
-        for (lat, lon), extents in list(extents_by_site.items())[:limit]
+        for (lat, lon, area), extents in list(extents_by_site.items())[:limit]
     ]
 
 
-def display_gbif_map(latitude: float, longitude: float, extents: list[int]) -> None:
-    """Render a Plotly map showing the calculated bounding box."""
+def display_gbif_map(
+    latitude: float, longitude: float, extents: list[int], area: str
+) -> None:
+    """Render a Plotly map showing the search areas."""
     show_map = st.checkbox(
-        "📍 Visualize Search Bounding Box",
+        "📍 Visualize Search Area",
         value=False,
         key="gbif_show_map",
-        help="Display the center point and the calculated coordinate boundaries on a map.",
+        help="Display the center point and the search areas sent to GBIF on a map.",
     )
 
     if not show_map:
@@ -198,12 +218,14 @@ def display_gbif_map(latitude: float, longitude: float, extents: list[int]) -> N
                     0.5,
                     step=0.1,
                     key="geo_map_padding",
-                    help="Space around the bounding boxes (as fraction of extent)",
+                    help="Space around the search areas (as fraction of extent)",
                 )
             with col3:
                 legend_size = st.slider("Legend text", 6, 20, 12, key="geo_map_legend")
             with col4:
-                show_circles = st.checkbox(
+                # A circle search always shows its circles; a box search on
+                # request
+                show_circles = area == "circle" or st.checkbox(
                     "Show circles",
                     value=False,
                     key="geo_map_circles",
@@ -216,6 +238,7 @@ def display_gbif_map(latitude: float, longitude: float, extents: list[int]) -> N
             numeric_extents,
             show_circles=show_circles,
             padding=map_padding,
+            show_boxes=area == "box",
         )
         fig.update_layout(
             height=plot_height,
@@ -238,9 +261,8 @@ def display_gbif_map(latitude: float, longitude: float, extents: list[int]) -> N
             },
         )
 
-        st.caption(
-            "The bounding boxes represent the coordinate range that will be sent to GBIF. "
-        )
+        shapes = "circles" if area == "circle" else "bounding boxes"
+        st.caption(f"The {shapes} are the areas sent to GBIF.")
 
     except Exception as e:
         st.warning(f"Could not generate map: {str(e)}")
@@ -248,6 +270,7 @@ def display_gbif_map(latitude: float, longitude: float, extents: list[int]) -> N
 
 def _gbif_search_and_merge(
     species_list,
+    worms_ids,
     tax_df,
     *,
     force_rerun,
@@ -260,7 +283,8 @@ def _gbif_search_and_merge(
 ):
     """Run GBIF search + merge in a background thread.
 
-    Returns (merged DataFrame, merge params, species whose GBIF query failed).
+    Returns (merged DataFrame, merge params, species whose GBIF query failed,
+    name table rows of the GBIF names).
     """
 
     def _update_progress(fraction, text):
@@ -272,6 +296,8 @@ def _gbif_search_and_merge(
         latitude=params["gbif_latitude"],
         longitude=params["gbif_longitude"],
         extents=params["gbif_extents"],
+        area=params["gbif_area"],
+        worms_ids=worms_ids,
         db_path=db_path,
         force_rerun=force_rerun,
         retry_empty=retry_empty,
@@ -293,7 +319,12 @@ def _gbif_search_and_merge(
     if "gbif_extent" in gbif_merge_df.columns:
         gbif_merge_df["gbif_extent"] = gbif_merge_df["gbif_extent"].astype(str)
 
-    return gbif_merge_df, gbif_merge_params, failed_items(gbif_search_df)
+    return (
+        gbif_merge_df,
+        gbif_merge_params,
+        failed_items(gbif_search_df),
+        pipe.gbif_name_rows(gbif_search_df),
+    )
 
 
 def gbif_search_job(*, force_rerun, retry_empty=False, status, progress_bar, params):
@@ -305,15 +336,17 @@ def gbif_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
 
     # 2. Prepare Inputs
     species_list = pipe.prepare_gbif_input(tax_df)
+    worms_ids = pipe.prepare_gbif_worms_ids(tax_df)
     progress_info = {"fraction": 0.0, "text": ""}
 
     # 3. Background Execution
     def _poll():
         progress_bar.progress(progress_info["fraction"], text=progress_info["text"])
 
-    gbif_merge_df, gbif_merge_params, gbif_failed = run_with_progress(
+    gbif_merge_df, gbif_merge_params, gbif_failed, gbif_names = run_with_progress(
         logsink.wrap(_gbif_search_and_merge),
         species_list,
+        worms_ids,
         tax_df,
         force_rerun=force_rerun,
         retry_empty=retry_empty,
@@ -331,6 +364,9 @@ def gbif_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     st.session_state.gbif_search_df = gbif_merge_df
     st.session_state.gbif_search_params = gbif_merge_params
     st.session_state.gbif_search_failed = gbif_failed
+    st.session_state.name_table = pipe.replace_source_rows(
+        st.session_state.name_table, gbif_names, "gbif"
+    )
 
     logsink.flush_to_ui()
     logsink.close()
@@ -349,13 +385,14 @@ def gbif_search_workflow():
         if params is None:
             return
 
-        latitude, longitude, extents = params
-        display_gbif_map(latitude, longitude, extents)
+        latitude, longitude, extents, area = params
+        display_gbif_map(latitude, longitude, extents, area)
 
         current_params = {
             "gbif_latitude": latitude,
             "gbif_longitude": longitude,
             "gbif_extents": extents,
+            "gbif_area": area,
         }
 
         unique_sp = len(st.session_state.tax_species)
@@ -365,7 +402,12 @@ def gbif_search_workflow():
             params_key="gbif_search_params",
             flag_key="gbif_search_flag",
             tab_id="geo",
-            compare_keys=["gbif_latitude", "gbif_longitude", "gbif_extents"],
+            compare_keys=[
+                "gbif_latitude",
+                "gbif_longitude",
+                "gbif_extents",
+                "gbif_area",
+            ],
             current_params=current_params,
             job_fn=gbif_search_job,
             job_kwargs={"params": current_params},
@@ -775,8 +817,8 @@ def _geo_sequence_label(seq_id):
     )
     local_count = geo_seq_df.loc[local_mask, "scientificName"].nunique()
 
-    label = get_extent_column_name(params["gbif_filter_extent"])
-    return f"{seq_id} — {local_count}/{total} species in {label}"
+    area = area_label(params["gbif_filter_extent"], params.get("gbif_area"))
+    return f"{seq_id}: {local_count}/{total} species {area}"
 
 
 def display_gbif_sequence():

@@ -2,12 +2,16 @@
 
 One row per (species, name, source). species is the WoRMS accepted name, or
 the name itself when WoRMS does not know it. TAX builds the table from the
-WoRMS check of the MOL (NCBI) names. Every step that compares names from two
-sources goes through species_of, so a synonym counts as its species; names
-match ignoring case and spacing. A name_table of None (names not checked in
-WoRMS) matches names as they are.
+WoRMS check of the MOL (NCBI) names, and GEO adds the name GBIF counts each
+species under. Every step that compares names from two sources goes through
+species_of, so a synonym counts as its species; names match ignoring case and
+spacing. A name_table of None (names not checked in WoRMS) matches names as
+they are.
 
     build_name_table(resolution_df, ncbi_taxids) → DataFrame
+    gbif_name_rows(gbif_search_df) → DataFrame
+    replace_source_rows(name_table, rows, source) → DataFrame
+    resolved_names(name_table) → DataFrame
     species_of(names, name_table) → Series
     species_key(names, name_table) → Series
     best_hits(hits, name_table, columns) → DataFrame
@@ -17,7 +21,12 @@ WoRMS) matches names as they are.
 
 import pandas as pd
 
-from trident.core.utils import normalize_name, top_hit_per_group
+from trident.core.utils import (
+    as_ids,
+    ensure_columns,
+    normalize_name,
+    top_hit_per_group,
+)
 
 
 NAME_TABLE_COLUMNS = [
@@ -27,9 +36,17 @@ NAME_TABLE_COLUMNS = [
     "source",
     "source_id",
     "matched_by",
+    "note",
     "name_key",
     "species_key",
 ]
+
+# Sources whose names stand for their species in the comparisons (species_of):
+# names WoRMS resolved to its accepted species. Rows of other sources record
+# what that source calls a species, which can be another WoRMS species (GBIF
+# calls Larus saundersi Chroicocephalus saundersi): they never merge two WoRMS
+# species.
+SYNONYM_SOURCES = ["ncbi"]
 
 
 def build_name_table(
@@ -62,20 +79,70 @@ def build_name_table(
     return pd.DataFrame(
         {
             "species": species.astype(str),
-            "aphia_id": _ids(resolved["acceptedNameUsageID"]),
+            "aphia_id": as_ids(resolved["acceptedNameUsageID"]),
             "name": names.astype(str),
             "source": "ncbi",
-            "source_id": _ids(names.map(ncbi_taxids or {})),
+            "source_id": as_ids(names.map(ncbi_taxids or {})),
             "matched_by": resolved["matchedBy"].astype("string"),
+            "note": pd.Series(pd.NA, index=resolved.index, dtype="string"),
             "name_key": names.map(normalize_name),
             "species_key": species.map(normalize_name),
         }
     )[NAME_TABLE_COLUMNS]
 
 
-def _ids(values: pd.Series) -> pd.Series:
-    """Numeric ids as nullable integers, whatever type they were stored as."""
-    return pd.to_numeric(values, errors="coerce").astype("Int64")
+def gbif_name_rows(gbif_search_df: pd.DataFrame) -> pd.DataFrame:
+    """Name table rows of the GBIF search: the name GBIF counts each species'
+    occurrences under.
+
+    Args:
+        gbif_search_df: Output of run_gbif_search (scientificName the TAX
+            species, gbif_scientificName, taxonID the GBIF key,
+            gbif_matched_by, aphia_id, gbif_note).
+
+    Returns:
+        DataFrame with NAME_TABLE_COLUMNS, source "gbif", one row per species
+        GBIF matched, note saying how a synonym in GBIF is counted; empty for
+        a Backbone search, which keeps no GBIF name.
+    """
+    matched = (
+        ensure_columns(
+            gbif_search_df.copy(),
+            ["gbif_scientificName", "gbif_matched_by", "aphia_id", "gbif_note"],
+        )
+        .dropna(subset=["scientificName", "gbif_scientificName"])
+        .drop_duplicates("scientificName")
+    )
+    species = matched["scientificName"].astype(str)
+    names = matched["gbif_scientificName"].astype(str)
+    return pd.DataFrame(
+        {
+            "species": species,
+            "aphia_id": as_ids(matched["aphia_id"]),
+            "name": names,
+            "source": "gbif",
+            "source_id": matched["taxonID"].astype("string"),
+            "matched_by": matched["gbif_matched_by"].astype("string"),
+            "note": matched["gbif_note"].astype("string"),
+            "name_key": names.map(normalize_name),
+            "species_key": species.map(normalize_name),
+        }
+    )[NAME_TABLE_COLUMNS].reset_index(drop=True)
+
+
+def replace_source_rows(
+    name_table: pd.DataFrame | None, rows: pd.DataFrame, source: str
+) -> pd.DataFrame:
+    """The name table with the rows of *source* replaced by *rows*: a step run
+    again gives the names of its new results."""
+    if name_table is None:
+        name_table = pd.DataFrame(columns=NAME_TABLE_COLUMNS)
+    kept = name_table[name_table["source"] != source]
+    if rows.empty:
+        return kept.reset_index(drop=True)
+    if kept.empty:
+        return rows.reset_index(drop=True)
+    return pd.concat([kept, rows], ignore_index=True)
 
 
 def name_keys(names: pd.Series) -> pd.Series:
@@ -87,25 +154,35 @@ def name_keys(names: pd.Series) -> pd.Series:
     return names.map(keys).astype(object)
 
 
-def _by_name(name_table: pd.DataFrame) -> pd.DataFrame:
-    """The name table indexed by name_key, one row per name (the first)."""
-    return name_table.drop_duplicates("name_key").set_index("name_key")
+def resolved_names(name_table: pd.DataFrame | None) -> pd.DataFrame:
+    """The rows of SYNONYM_SOURCES: the names WoRMS resolved, which stand for
+    their species. Empty (with its columns) without a name table."""
+    if name_table is None:
+        return pd.DataFrame(columns=NAME_TABLE_COLUMNS)
+    return name_table[name_table["source"].isin(SYNONYM_SOURCES)]
+
+
+def _by_name(name_table: pd.DataFrame | None) -> pd.DataFrame:
+    """resolved_names indexed by name_key, one row per name (the first)."""
+    return resolved_names(name_table).drop_duplicates("name_key").set_index("name_key")
 
 
 def species_of(names: pd.Series, name_table: pd.DataFrame | None) -> pd.Series:
     """The species each name stands for: its species in the name table, the
     name itself when the table does not list it."""
-    if name_table is None or name_table.empty:
+    by_name = _by_name(name_table)
+    if by_name.empty:
         return names.copy()
-    return name_keys(names).map(_by_name(name_table)["species"]).fillna(names)
+    return name_keys(names).map(by_name["species"]).fillna(names)
 
 
 def species_key(names: pd.Series, name_table: pd.DataFrame | None) -> pd.Series:
     """species_of as a join key (normalize_name)."""
     keys = name_keys(names)
-    if name_table is None or name_table.empty:
+    by_name = _by_name(name_table)
+    if by_name.empty:
         return keys
-    return keys.map(_by_name(name_table)["species_key"]).fillna(keys).astype(object)
+    return keys.map(by_name["species_key"]).fillna(keys).astype(object)
 
 
 def best_hits(
