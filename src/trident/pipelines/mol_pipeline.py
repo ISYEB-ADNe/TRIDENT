@@ -173,6 +173,7 @@ def run_ncbi_search(
         inherit_from=["search_params"],
         fingerprint_on=["ncbi_search_df"],
     ),
+    log_reuse_as="MOL filter",
 )
 @preserve_sequence_order("seq_id", "ncbi_search_df")
 def run_ncbi_filter(
@@ -238,6 +239,7 @@ def run_ncbi_filter(
         },
         inherit_from=["filter_params"],
     ),
+    log_reuse_as="MOL list",
 )
 @preserve_sequence_order("seq_id", "ncbi_filter_df")
 def finalize_mol_results(

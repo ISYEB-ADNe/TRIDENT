@@ -4,6 +4,7 @@ import sqlite3
 
 import pandas as pd
 import pytest
+from loguru import logger
 
 from datetime import datetime, timezone
 
@@ -83,6 +84,34 @@ def test_full_cache_whole_float_and_int_share_the_cache(db_path):
 
     my_step(t=90.5, extents=[500, "global"], db_path=db_path)
     assert call_count == 2
+
+
+def test_reused_step_logs_in_place_of_its_summary(db_path):
+    """A step that only processes previous results does not run when its
+    result is reused, so it logs that it was reused instead of its summary."""
+
+    @save_to_db(
+        "test_reuse", cache=FullCache(local={"t": "t"}), log_reuse_as="GEO filter"
+    )
+    def my_step(t=90):
+        logger.info("GEO filter: 3 species kept")
+        return pd.DataFrame({"val": [t]})
+
+    lines = []
+    sink = logger.add(lambda m: lines.append(m.record["message"]), level="INFO")
+    logger.enable("trident")  # as the app does (the package disables it)
+    try:
+        my_step(t=90, db_path=db_path)
+        my_step(t=90, db_path=db_path)
+        my_step(t=95, db_path=db_path)
+    finally:
+        logger.disable("trident")
+        logger.remove(sink)
+    assert lines == [
+        "GEO filter: 3 species kept",
+        "GEO filter: saved result reused (same settings)",
+        "GEO filter: 3 species kept",
+    ]
 
 
 def test_full_cache_force_rerun(db_path):

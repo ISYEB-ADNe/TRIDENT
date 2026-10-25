@@ -564,6 +564,7 @@ def mol_rejected_rows(
         local={"tax_drop_mol_rejected": "drop_mol_rejected"},
         fingerprint_on=["name_table"],
     ),
+    log_reuse_as="TAX list",
 )
 def finalize_tax_results(
     worms_merge_df: pd.DataFrame,

@@ -213,6 +213,7 @@ def _bold_filter_rebuild(input_selected, original_inputs):
         rebuild_fn=_bold_filter_rebuild,
         match_map_dict={"scientificName": "scientificName"},
     ),
+    log_reuse_as="BOLD filter",
 )
 def run_bold_filter(
     bold_search_df: pd.DataFrame,
@@ -291,6 +292,7 @@ def run_bold_filter(
         inherit_from=["bold_filter_params", "geo_params"],
         fingerprint_on=["bold_filter_df"],
     ),
+    log_reuse_as="EXTRA list",
 )
 @preserve_sequence_order("seq_id", "geo_df")
 def run_bold_merge(

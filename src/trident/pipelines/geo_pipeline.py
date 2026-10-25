@@ -295,6 +295,7 @@ def _gbif_merge_params(
         match_map_dict={"gbif_extent": "gbif_extent"},
         fingerprint_on=["gbif_search_df"],
     ),
+    log_reuse_as="GEO list",
 )
 @preserve_sequence_order("seq_id", "tax_df")
 def run_gbif_merge(
@@ -367,6 +368,7 @@ def run_gbif_merge(
         },
         inherit_from=["gbif_merge_params"],
     ),
+    log_reuse_as="GEO filter",
 )
 @preserve_sequence_order("seq_id", "gbif_merge_df")
 def run_gbif_filter(

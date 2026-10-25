@@ -755,6 +755,7 @@ def save_to_db(
     table_name: str,
     cache: CacheStrategy,
     log_as: tuple[str, str] | None = None,
+    log_reuse_as: str | None = None,
 ) -> Callable:
     """Decorator that adds SQLite caching to a pipeline function.
 
@@ -800,6 +801,10 @@ def save_to_db(
     many of its items are already in the database and how many it queries.
     Without it (the steps that only process a previous step's results), that
     line is logged at DEBUG.
+
+    *log_reuse_as* is the name a step that only processes previous results
+    gives its summary line, e.g. ``"GEO filter"``: when its whole result is
+    reused, the step does not run, so it logs that instead of its summary.
     """
     match_map = cache.match_map
 
@@ -868,6 +873,8 @@ def save_to_db(
                 _log_cache_use(
                     func.__name__, log_as, len(cached_dfs), len(uncached_items)
                 )
+                if log_reuse_as and not uncached_items:
+                    logger.info(f"{log_reuse_as}: saved result reused (same settings)")
                 # A progress tracker counts items as they are executed, so its
                 # total is what this call executes: a resumed run starts at 0
                 # and ends at its total, cached items aside.
