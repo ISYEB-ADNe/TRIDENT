@@ -12,6 +12,8 @@ Exploration:
     build_extra_summary(extra_df)
 """
 
+from collections.abc import Callable
+
 import pandas as pd
 
 from loguru import logger
@@ -132,6 +134,7 @@ def run_bold_search(
     progress_handler: dict | object | None = None,
     user_agent: str | None = None,
     failure_sink: list | None = None,
+    result_sink: Callable | None = None,
 ) -> pd.DataFrame:
     """Retrieve barcode records from BOLD for a list of species.
 
@@ -147,6 +150,8 @@ def run_bold_search(
         failure_sink: If provided, species whose query failed (e.g. network or
             403 errors) are appended here so the cache layer can skip them and
             retry on the next run instead of caching them as empty.
+        result_sink: Given by save_to_db, which saves each species as soon as
+            its query is done.
 
     Returns:
         DataFrame with the BOLD sequences of each species, or one row with
@@ -159,6 +164,7 @@ def run_bold_search(
         keep_ncbi=keep_ncbi,
         progress_handler=progress_handler,
         user_agent=user_agent,
+        result_sink=result_sink,
     )
 
     if failed_species and failure_sink is not None:

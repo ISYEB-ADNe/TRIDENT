@@ -1,5 +1,6 @@
 """Client for the WoRMS (World Register of Marine Species) REST API."""
 
+from collections.abc import Callable
 from urllib.parse import quote
 
 import pandas as pd
@@ -496,6 +497,7 @@ def get_species_from_genus_list(
     progress_handler: dict | object | None = None,
     user_agent: str | None = None,
     marine_only: bool = True,
+    result_sink: Callable | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Retrieve and consolidate WoRMS species for a list of genera.
 
@@ -514,13 +516,16 @@ def get_species_from_genus_list(
         user_agent: User-Agent header for HTTP requests.
         marine_only: If True (default), WoRMS returns only marine-flagged
             children; uncheck to include non-marine records.
+        result_sink: Called with the species of each genus and the genus once
+            it is done (see save_to_db), unless its query errored.
 
     Returns:
         Tuple of (taxonomy DataFrame, failed_genera). A genus is "failed" only
         when its query errored (network/HTTP); a genus with no AphiaID or no
         children is a valid empty, not a failure.
     """
-    all_records: list[dict] = []
+    frames: list[pd.DataFrame] = []
+    kept = skipped = 0
     failed_genera: list[str] = []
     session = create_session(user_agent=user_agent)
     log = StepLog("WoRMS search", len(genus_list))
@@ -536,6 +541,8 @@ def get_species_from_genus_list(
                     f"not in WoRMS (check: {worms_search_url(genus)})",
                     notable=True,
                 )
+                if result_sink is not None:
+                    result_sink(pd.DataFrame(), [genus])
                 continue
 
             # 2. Retrieve all children with internal pagination. An error on
@@ -551,7 +558,13 @@ def get_species_from_genus_list(
                     ]
                 stop.wait(delay)
 
-            all_records.extend(children)
+            # 3. Filter and build the genus's taxonomy DataFrame
+            df, n_kept, n_skipped = _build_taxonomy_dataframe(children, accepted_only)
+            frames.append(df)
+            kept += n_kept
+            skipped += n_skipped
+            if result_sink is not None:
+                result_sink(df, [genus])
             if children:
                 log.item(genus, f"{len(children)} {pluralize(len(children), 'record')}")
             else:
@@ -572,8 +585,12 @@ def get_species_from_genus_list(
 
     session.close()
 
-    # 3. Filter and build taxonomy DataFrame
-    df, kept, skipped = _build_taxonomy_dataframe(all_records, accepted_only)
+    non_empty = [df for df in frames if not df.empty]
+    df = (
+        pd.concat(non_empty, ignore_index=True)
+        if non_empty
+        else _build_taxonomy_dataframe([], accepted_only)[0]
+    )
     log.done(
         f"{kept} species kept, {skipped} skipped (not accepted species)",
         failed_genera,

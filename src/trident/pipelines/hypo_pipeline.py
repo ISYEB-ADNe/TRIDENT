@@ -15,6 +15,8 @@ Steps:
     6. finalize_hypo_results    label, merge check results, final df      [FullCache]
 """
 
+from collections.abc import Callable
+
 import numpy as np
 import pandas as pd
 
@@ -233,6 +235,7 @@ def run_hypo_search(
     give_up_minutes: float = BLAST_GIVE_UP / 60,
     progress_handler: dict | None = None,
     failure_sink: list | None = None,
+    result_sink: Callable | None = None,
 ) -> pd.DataFrame:
     """NCBI BLAST search on the proxy sequences of each seq_id, restricted to
     its Entrez query.
@@ -258,6 +261,8 @@ def run_hypo_search(
         failure_sink: If provided, the (proxy record id, entrez_query) of each
             proxy record (BOLD sequence) whose BLAST errored is appended here,
             so the cache layer retries it instead of caching it as empty.
+        result_sink: Given by save_to_db, which saves the proxy records of each
+            batch as soon as its BLAST is done.
 
     Returns:
         DataFrame with NCBI BLAST results for proxy sequences.
@@ -290,6 +295,22 @@ def run_hypo_search(
 
     circuit = BlastCircuit()  # shared by every job of this run
     blast_kwargs = {"evalue": 10 ** (-ev_exponent), "hitlist_size": max_hits}
+    no_hits = pd.DataFrame(columns=[*BLAST_HIT_COLUMNS, "entrez_query"])
+
+    def keep(hits: pd.DataFrame) -> pd.DataFrame:
+        """The hits above the identity cutoff, then the top N of each cache item
+        (proxy record, Entrez query) and hit species: hits under two queries do
+        not compete, so a batch's hits are kept on their own."""
+        if identity_cutoff > 0:
+            hits = hits[hits["identity_percentage"] >= identity_cutoff]
+        if ntop > 0:
+            hits = top_hit_per_group(
+                hits,
+                keys=["seq_id", "scientificName", "entrez_query"],
+                sort=["identity_percentage", "query_cover"],
+                n=ntop,
+            )
+        return hits
 
     def job(k, batch, query):
         # The label names the sequences whose BOLD records the batch searches,
@@ -299,17 +320,27 @@ def run_hypo_search(
         more = f" and {others} {pluralize(others, 'other')}" if others else ""
         records = pluralize(len(batch), "BOLD sequence")
         label = f"{k}/{len(batches)} ({len(batch)} {records}, for {owners[0]}{more})"
-        return blast_batch(
+        dfs, failed_ids = blast_batch(
             batch, label, circuit, progress_handler, entrez_query=query, **blast_kwargs
         )
+        found = [
+            process_blast_results(df, fasta_sequences=batch).assign(entrez_query=query)
+            for df in dfs
+            if not df.empty
+        ]
+        hits = keep(pd.concat(found, ignore_index=True)) if found else no_hits
+        if result_sink is not None:
+            done = [(r.id, query) for r in batch if r.id not in failed_ids]
+            result_sink(hits, done)
+        return hits, failed_ids, sum(len(df) for df in dfs)
 
     jobs = [(k, batch, query) for k, (batch, query) in enumerate(batches, start=1)]
 
-    all_results = []
+    kept_hits = []
     outcomes = run_blast_pool(job, jobs, num_threads, give_up_minutes * 60)
     failed_records = []
     n_hits = 0  # as the batch lines count them, before the cutoff and top N
-    for (_, batch, query), (dfs, failed_ids) in zip(jobs, outcomes):
+    for (_, batch, query), (hits, failed_ids, n_found) in zip(jobs, outcomes):
         # Report the proxy records whose BLAST errored, with the batch's query:
         # (proxy seq_id, entrez_query) is the cache key, so they are retried on
         # the next run rather than cached as empty. The same proxy under another
@@ -317,27 +348,10 @@ def run_hypo_search(
         failed_records.extend(f"{rid} for {owner[(rid, query)]}" for rid in failed_ids)
         if failed_ids and failure_sink is not None:
             failure_sink.extend((rid, query) for rid in failed_ids)
-        for df in dfs:
-            n_hits += len(df)
-            if not df.empty:
-                results = process_blast_results(df, fasta_sequences=batch)
-                results["entrez_query"] = query
-                all_results.append(results)
-
-    if all_results:
-        search_df = pd.concat(all_results, ignore_index=True)
-        if identity_cutoff > 0:
-            search_df = search_df[search_df["identity_percentage"] >= identity_cutoff]
-        if ntop > 0:
-            search_df = top_hit_per_group(
-                search_df,
-                # Per cache item: hits under two queries do not compete.
-                keys=["seq_id", "scientificName", "entrez_query"],
-                sort=["identity_percentage", "query_cover"],
-                n=ntop,
-            )
-    else:
-        search_df = pd.DataFrame(columns=[*BLAST_HIT_COLUMNS, "entrez_query"])
+        n_hits += n_found
+        if not hits.empty:
+            kept_hits.append(hits)
+    search_df = pd.concat(kept_hits, ignore_index=True) if kept_hits else no_hits
 
     kept = []
     if identity_cutoff > 0:
@@ -633,6 +647,7 @@ def run_hypo_check(
     give_up_minutes: float = BLAST_GIVE_UP / 60,
     progress_handler: dict | None = None,
     failure_sink: list | None = None,
+    result_sink: Callable | None = None,
 ) -> pd.DataFrame:
     """Per-species NCBI BLAST verification of HYPO candidates.
 
@@ -655,6 +670,8 @@ def run_hypo_check(
         failure_sink: If provided, the (seq_id, scientificName) of each check
             whose BLAST errored is appended here, so the cache layer retries it
             instead of caching it as a (false) no-hit.
+        result_sink: Given by save_to_db, which saves each check as soon as
+            its BLAST is done.
 
     Returns:
         DataFrame with NCBI check results per species.
@@ -686,7 +703,7 @@ def run_hypo_check(
         if blast_res is None:
             return None
         if blast_res.empty:
-            return pd.DataFrame(
+            result = pd.DataFrame(
                 {
                     "seq_id": [seq_id],
                     "scientificName": [sci_name],
@@ -694,20 +711,24 @@ def run_hypo_check(
                     "hit_found": [False],
                 }
             )
-        ncbi_data = process_blast_results(blast_res, fasta_sequences=[sequence])
-        return pd.DataFrame(
-            {
-                "seq_id": seq_id,
-                "scientificName": sci_name,
-                "dna_sequence": seq_dna,
-                "scientificName_NCBI": ncbi_data["scientificName"],
-                "query_cover": ncbi_data["query_cover"],
-                "identity_percentage": ncbi_data["identity_percentage"],
-                "hit_found": True,
-                "hit_def": ncbi_data["hit_def"],
-                "hit_url": ncbi_data["hit_url"],
-            }
-        )
+        else:
+            ncbi_data = process_blast_results(blast_res, fasta_sequences=[sequence])
+            result = pd.DataFrame(
+                {
+                    "seq_id": seq_id,
+                    "scientificName": sci_name,
+                    "dna_sequence": seq_dna,
+                    "scientificName_NCBI": ncbi_data["scientificName"],
+                    "query_cover": ncbi_data["query_cover"],
+                    "identity_percentage": ncbi_data["identity_percentage"],
+                    "hit_found": True,
+                    "hit_def": ncbi_data["hit_def"],
+                    "hit_url": ncbi_data["hit_url"],
+                }
+            )
+        if result_sink is not None:
+            result_sink(result, [(seq_id, sci_name)])
+        return result
 
     calls = list(
         zip(
@@ -736,9 +757,8 @@ def run_hypo_check(
         log.done(f"0/{len(sequences_df)} checks with hits", failed, "check")
         return pd.DataFrame(columns=HYPO_CHECK_COLUMNS)
 
-    # Missing hit columns are filled with NaN (float), not pd.NA (object): if
-    # the first rows saved have no hit, SQLite would otherwise type the columns
-    # TEXT and later hit values would come back as strings.
+    # Missing hit columns are filled with NaN (float), not pd.NA (object), so
+    # they stay numeric.
     check_df = ensure_columns(
         pd.concat(all_results, ignore_index=True), HYPO_CHECK_COLUMNS, fill=np.nan
     )

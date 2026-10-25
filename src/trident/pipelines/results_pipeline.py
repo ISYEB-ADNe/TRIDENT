@@ -16,6 +16,8 @@ taxa (run_higher_taxa_lookup), saved per name like the other steps' searches.
     plot_species_flow(links) → Plotly Sankey figure
 """
 
+from collections.abc import Callable
+
 import pandas as pd
 from loguru import logger
 
@@ -573,6 +575,7 @@ def run_higher_taxa_lookup(
     user_agent: str | None = None,
     progress_handler: dict | object | None = None,
     failure_sink: list | None = None,
+    result_sink: Callable | None = None,
 ) -> pd.DataFrame:
     """Every WoRMS record of each higher-level taxon name of the GBIF export.
 
@@ -580,6 +583,8 @@ def run_higher_taxa_lookup(
     by the rank and group of each sequence's taxon (see _fill_worms_records).
     Names whose request failed go to failure_sink, so they are not saved and
     are looked up again on the next export.
+    result_sink, given by save_to_db, saves each name as soon as its records
+    are fetched.
 
     Returns:
         DataFrame with HIGHER_TAXA_COLS, one row per record (none for a name
@@ -602,13 +607,16 @@ def run_higher_taxa_lookup(
                 notify_progress(progress_handler)
             n = len(records)
             log.item(name, f"{n} {pluralize(n, 'record')}", notable=not records)
-            rows.extend(
+            name_rows = [
                 {
                     **{col: r.get(col) for col in HIGHER_TAXA_COLS},
                     "scientificName": name,
                 }
                 for r in records
-            )
+            ]
+            rows.extend(name_rows)
+            if result_sink is not None:
+                result_sink(pd.DataFrame(name_rows, columns=HIGHER_TAXA_COLS), [name])
     finally:
         session.close()
 

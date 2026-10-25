@@ -1,6 +1,7 @@
 """Client for the BOLD (Barcode of Life Data Systems) API."""
 
 import json
+from collections.abc import Callable
 from urllib.parse import quote
 
 import pandas as pd
@@ -450,6 +451,7 @@ def get_records_from_species_list(
     keep_ncbi: bool = False,
     progress_handler: dict | object | None = None,
     user_agent: str | None = None,
+    result_sink: Callable | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Retrieve BOLD records for a list of species.
 
@@ -467,6 +469,8 @@ def get_records_from_species_list(
         keep_ncbi: If True, retain records also found in NCBI.
         progress_handler: Optional progress tracker (dict or tqdm-like).
         user_agent: User-Agent header for HTTP requests.
+        result_sink: Called with the rows of each species and the species once
+            its query is done (see save_to_db), unless it errored.
 
     Returns:
         Tuple of (bold_df, failed_species): bold_df has BOLD_SEARCH_COLUMNS,
@@ -502,6 +506,8 @@ def get_records_from_species_list(
                 log.item(species, "failed", notable=True)  # its error is logged above
             else:
                 all_records.append(rows)
+                if result_sink is not None:
+                    result_sink(rows, [species])
                 outcome = rows["bold_outcome"].iloc[0]
                 found_as = _found_as(rows)
                 if outcome == SEQUENCES:

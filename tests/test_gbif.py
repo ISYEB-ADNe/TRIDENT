@@ -191,8 +191,9 @@ def test_run_gbif_search_routes_occurrence_errors_to_failure_sink(monkeypatch):
         db_path=None,
     )
 
-    # Errored species are excluded from the result and queued for retry.
-    assert set(sink) == {"Gadus morhua", "Thunnus thynnus"}
+    # Errored species are excluded from the result and queued for retry in
+    # that area.
+    assert set(sink) == {("Gadus morhua", 500), ("Thunnus thynnus", 500)}
     assert df.empty  # both taxa errored -> dropped from the result
 
 
@@ -232,7 +233,7 @@ def test_failure_sink_uses_input_names_not_canonical(monkeypatch):
         failure_sink=sink,
         db_path=None,
     )
-    assert sink == ["GADUS MORHUA"]  # input string, not "Gadus morhua"
+    assert sink == [("GADUS MORHUA", 500)]  # input string, not "Gadus morhua"
 
 
 # --- no usable matches: filter must not crash, returns empty columned frame ---

@@ -11,6 +11,7 @@ Exploration:
     build_mol_sequence_report(mol_df, seq_id, ncbi_search_df, ...)
 """
 
+from collections.abc import Callable
 from typing import Any
 
 import pandas as pd
@@ -21,6 +22,7 @@ from loguru import logger
 from trident.clients.fasta import dataframe_to_records
 from trident.clients.ncbi import (
     BLAST_GIVE_UP,
+    BLAST_HIT_COLUMNS,
     create_sequence_batches,
     filter_blast_results,
     mol_filter_cut,
@@ -86,6 +88,7 @@ def run_ncbi_search(
     give_up_minutes: float = BLAST_GIVE_UP / 60,
     progress_handler: Any | None = None,
     failure_sink: list | None = None,
+    result_sink: Callable | None = None,
 ) -> pd.DataFrame:
     """Run BLASTn against the NCBI nt database and return processed hits.
 
@@ -106,6 +109,8 @@ def run_ncbi_search(
         failure_sink: If provided, seq_ids whose BLAST batch errored are
             appended here so the cache layer retries them instead of caching
             them as empty.
+        result_sink: Given by save_to_db, which saves the sequences of each
+            batch as soon as its BLAST is done.
 
     Returns:
         DataFrame of processed BLAST hits with taxonomy and alignment metrics.
@@ -116,18 +121,34 @@ def run_ncbi_search(
         f"NCBI BLAST: {len(batches)} {pluralize(len(batches), 'batch')} "
         f"of up to {batch_size} sequences"
     )
-    blast_results, failed_ids = run_blast_batches(
+    hits_of: dict[int, pd.DataFrame] = {}  # processed hits of each batch
+
+    def batch_done(i, dfs, failed):
+        batch = batches[i]
+        found = [df for df in dfs if not df.empty]
+        raw = pd.concat(found, ignore_index=True) if found else pd.DataFrame()
+        hits_of[i] = process_blast_results(raw, fasta_sequences=batch)
+        if result_sink is not None:
+            result_sink(hits_of[i], [rec.id for rec in batch if rec.id not in failed])
+
+    _, failed_ids = run_blast_batches(
         batches,
         n_threads=num_threads,
         evalue=10.0 ** (-ev_exponent),
         hitlist_size=max_hits,
         progress_handler=progress_handler,
         give_up=give_up_minutes * 60,
+        on_batch=batch_done,
     )
     if failed_ids and failure_sink is not None:
         failure_sink.extend(failed_ids)
 
-    ncbi_df = process_blast_results(blast_results, fasta_sequences=sequences)
+    found = [hits_of[i] for i in sorted(hits_of) if not hits_of[i].empty]
+    ncbi_df = (
+        pd.concat(found, ignore_index=True)
+        if found
+        else pd.DataFrame(columns=BLAST_HIT_COLUMNS)
+    )
 
     log.done(
         f"{len(ncbi_df)} {pluralize(len(ncbi_df), 'hit')}",

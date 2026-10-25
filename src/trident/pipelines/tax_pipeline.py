@@ -14,6 +14,7 @@ Names: build_name_table (see names.py) makes the name table of the MOL names
 from run_name_resolution; the later steps take it to compare names.
 """
 
+from collections.abc import Callable
 from typing import NamedTuple
 
 import pandas as pd
@@ -111,6 +112,7 @@ def run_name_resolution(
     user_agent: str | None = None,
     progress_handler: dict | object | None = None,
     failure_sink: list | None = None,
+    result_sink: Callable | None = None,
 ) -> pd.DataFrame:
     """Resolve MOL (NCBI) names to their WoRMS accepted name + AphiaID (R3).
 
@@ -128,6 +130,8 @@ def run_name_resolution(
         progress_handler: Optional progress tracker (dict 'current' / .update()).
         failure_sink: If provided, names whose query errored are appended so the
             cache layer skips them and retries next run.
+        result_sink: Given by save_to_db, which saves each name as soon as
+            it is resolved.
 
     Returns:
         DataFrame with columns scientificName, acceptedName, acceptedNameUsageID,
@@ -161,16 +165,17 @@ def run_name_resolution(
                 log.item(name, f"synonym of {resolved['accepted_name']}")
             else:
                 log.item(name, "accepted name")
-            rows.append(
-                {
-                    "scientificName": name,
-                    "acceptedName": resolved["accepted_name"],
-                    "acceptedNameUsageID": resolved["aphia_id"],
-                    "is_synonym": resolved["is_synonym"],
-                    "matchedBy": resolved["matched_by"],
-                    "note": resolved["note"],
-                }
-            )
+            row = {
+                "scientificName": name,
+                "acceptedName": resolved["accepted_name"],
+                "acceptedNameUsageID": resolved["aphia_id"],
+                "is_synonym": resolved["is_synonym"],
+                "matchedBy": resolved["matched_by"],
+                "note": resolved["note"],
+            }
+            rows.append(row)
+            if result_sink is not None:
+                result_sink(pd.DataFrame([row]), [name])
     finally:
         session.close()
 
@@ -293,6 +298,7 @@ def run_worms_search(
     user_agent: str | None = None,
     marine_only: bool = True,
     failure_sink: list | None = None,
+    result_sink: Callable | None = None,
 ) -> pd.DataFrame:
     """Query WoRMS for species belonging to the given genera.
 
@@ -305,6 +311,8 @@ def run_worms_search(
             species; uncheck to include non-marine WoRMS records.
         failure_sink: If provided, genera whose query errored are appended here
             so the cache layer skips them and retries on the next run.
+        result_sink: Given by save_to_db, which saves each genus as soon as
+            its species are fetched.
 
     Returns:
         DataFrame with WoRMS species data for the requested genera.
@@ -315,6 +323,7 @@ def run_worms_search(
         progress_handler=progress_handler,
         user_agent=user_agent,
         marine_only=marine_only,
+        result_sink=result_sink,
     )
 
     if failed_genera and failure_sink is not None:

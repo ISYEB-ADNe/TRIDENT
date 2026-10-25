@@ -933,6 +933,7 @@ def run_blast_batches(
     progress_handler: dict | object | None = None,
     circuit: BlastCircuit | None = None,
     give_up: float | None = None,
+    on_batch: Callable[[int, list[pd.DataFrame], list[str]], None] | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Execute multiple NCBI BLAST batches in parallel.
 
@@ -959,6 +960,10 @@ def run_blast_batches(
         give_up: Seconds a job may wait at NCBI before it is resubmitted
             once, then counted as failed (default BLAST_GIVE_UP, see
             ``BlastGaveUp``).
+        on_batch: Called in the worker thread when a batch is done, with its
+            index in *batches*, its result DataFrames and the ids of its
+            sequences whose query errored. The results then go to on_batch
+            only: the returned DataFrame is empty.
 
     Returns:
         Tuple of (concatenated DataFrame of successful batch results,
@@ -983,7 +988,13 @@ def run_blast_batches(
 
     def worker(batch, i) -> tuple[list[pd.DataFrame], list[str]]:
         label = f"{i + 1}/{len(batches)}"
-        return blast_batch(batch, label, circuit, progress_handler, **blast_kwargs)
+        dfs, failed_ids = blast_batch(
+            batch, label, circuit, progress_handler, **blast_kwargs
+        )
+        if on_batch is None:
+            return dfs, failed_ids
+        on_batch(i, dfs, failed_ids)
+        return [], failed_ids
 
     outcomes = run_blast_pool(
         worker, [(batch, i) for i, batch in enumerate(batches)], n_threads, give_up

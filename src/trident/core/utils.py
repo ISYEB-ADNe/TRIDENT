@@ -168,8 +168,8 @@ class StepLog:
     item it queries ("BOLD search 12/33: Gadus morhua, 45 records") and an end
     line ("BOLD search done after 6 min: 1240 records").
 
-    An item is logged at INFO when the last line is at least ITEM_INTERVAL
-    seconds old, otherwise at DEBUG: a slow source (BOLD takes about 10 s per
+    The first item is logged at INFO, then an item when the last line is at
+    least ITEM_INTERVAL seconds old, otherwise at DEBUG: a slow source (BOLD takes about 10 s per
     species) shows every item, a fast one (WoRMS, GBIF) one line every few
     seconds, so a long step is never silent and a quick one does not flood the
     log. A failed item, or one worth a look (*notable*: not found, doubtful
@@ -190,7 +190,7 @@ class StepLog:
         with self._lock:
             self._count += 1
             now = time.monotonic()
-            due = now - self._last >= self.ITEM_INTERVAL
+            due = self._count == 1 or now - self._last >= self.ITEM_INTERVAL
             if due:
                 self._last = now
             return f"{self.step} {self._count}/{self.total}", due

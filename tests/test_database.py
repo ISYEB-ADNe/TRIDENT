@@ -1,10 +1,14 @@
 """Tests for trident.core.database — save_to_db decorator and cache strategies."""
 
+import sqlite3
+
 import pandas as pd
 import pytest
 
 from datetime import datetime, timezone
 
+from trident.core import database
+from trident.core.stop import run_threads
 from trident.core.utils import notify_progress
 from trident.core.database import (
     CustomCache,
@@ -555,6 +559,119 @@ def test_failed_items_leave_no_orphan_rows(db_path):
     step([("P2", "C"), ("P3", "D")], db_path=db_path)
     df, _ = step([("P3", "D")], db_path=db_path)  # served from the cache
     assert df.empty
+
+
+# --- Saving each item as it finishes (result_sink) ---
+
+
+def test_item_reported_to_result_sink_survives_a_crash(db_path):
+    """An item the step reports as finished, from a worker thread, is saved at
+    once: when the step then crashes, also during a forced rerun, the next run
+    queries only the other items."""
+    queried = []
+
+    @save_to_db("test_sink", cache=PartialCache(items_kwarg="names", item_key="name"))
+    def step(names, crash=False, result_sink=None):
+        queried.extend(names)
+
+        def finish(name):
+            result_sink(pd.DataFrame({"name": [name], "v": [1]}), [name])
+
+        run_threads(finish, [(names[0],)], n_jobs=2)
+        if crash:
+            raise RuntimeError("process killed")
+        return pd.DataFrame({"name": names, "v": [1] * len(names)})
+
+    step(["a", "b"], db_path=db_path)
+    with pytest.raises(RuntimeError):
+        step(["a", "b"], crash=True, force_rerun=True, db_path=db_path)
+
+    queried.clear()
+    df, _ = step(["a", "b"], db_path=db_path)
+    assert queried == ["b"]
+    assert sorted(df["name"]) == ["a", "b"]
+
+
+def test_items_saved_alone_come_back_with_every_column_of_the_step(db_path):
+    """An item saved on its own has only its own columns (a check without a
+    hit has no hit columns): read back, it gets every column the step
+    returned."""
+
+    @save_to_db(
+        "test_sink_cols", cache=PartialCache(items_kwarg="names", item_key="name")
+    )
+    def step(names, result_sink=None):
+        for name in names:
+            result_sink(pd.DataFrame({"name": [name], "hit_found": [False]}), [name])
+        return pd.DataFrame(
+            {"name": names, "hit_found": False, "query_cover": float("nan")}
+        )
+
+    step(["a"], db_path=db_path)
+    df, _ = step(["a"], db_path=db_path)  # served from the cache
+    assert "query_cover" in df.columns
+
+
+def test_failed_save_leaves_the_step_running_and_no_stray_rows(db_path, monkeypatch):
+    """A save that fails after writing the rows does not stop the step: its
+    item is saved when the step returns, and the rows the failed save left are
+    deleted by the next call."""
+    real_write_provenance = database._write_provenance
+    fail_once = [True]
+
+    def flaky_write_provenance(*args):
+        if fail_once.pop() if fail_once else False:
+            raise sqlite3.OperationalError("database is locked")
+        real_write_provenance(*args)
+
+    monkeypatch.setattr(database, "_write_provenance", flaky_write_provenance)
+
+    @save_to_db(
+        "test_sink_fail", cache=PartialCache(items_kwarg="names", item_key="name")
+    )
+    def step(names, result_sink=None):
+        for name in names:
+            result_sink(pd.DataFrame({"name": [name], "v": [1]}), [name])
+        return pd.DataFrame({"name": names, "v": [1] * len(names)})
+
+    df, _ = step(["a"], db_path=db_path)
+    assert df["name"].tolist() == ["a"]
+    step(["b"], db_path=db_path)
+
+    df, _ = step(["a", "b"], db_path=db_path)  # served from the cache
+    assert sorted(df["name"]) == ["a", "b"]
+    with get_connection(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM test_sink_fail").fetchone()[0] == 2
+
+
+def test_rows_match_their_item_when_a_number_column_became_float(db_path):
+    """pandas turns an int column with a missing value into floats: the row of
+    extent 500.0 is still saved as the result of the item of extent 500."""
+
+    @save_to_db(
+        "test_float_key", cache=PartialCache(items_kwarg="extents", item_key="extent")
+    )
+    def step(extents):
+        return pd.DataFrame({"extent": [float(e) for e in extents], "n": [3]})
+
+    step([500], db_path=db_path)
+    df, _ = step([500], db_path=db_path)  # served from the cache
+    assert df["n"].tolist() == [3]
+
+
+def test_column_empty_in_the_first_saved_rows_keeps_later_values(db_path):
+    """A column with no value in the rows that create the table does not take
+    a type from them: an id saved later comes back as the same int."""
+    ids = {"not found": None, "found": 126160}
+
+    @save_to_db("test_types", cache=PartialCache(items_kwarg="names", item_key="name"))
+    def step(names):
+        return pd.DataFrame({"name": names, "aphia_id": [ids[n] for n in names]})
+
+    step(["not found"], db_path=db_path)
+    step(["found"], db_path=db_path)
+    df, _ = step(["found"], db_path=db_path)  # served from the cache
+    assert df["aphia_id"].tolist() == [126160]
 
 
 # --- Fingerprint / content-based invalidation ---

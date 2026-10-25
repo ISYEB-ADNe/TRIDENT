@@ -610,7 +610,7 @@ def gbif_filter_workflow():
             current_params=current_params,
             job_fn=gbif_filter_job,
             job_kwargs={"min_occurrences": min_occurrences, "extent": extent},
-            new_string=f"Ready to filter GBIF results for **{len(st.session_state.gbif_search_df)}** records.",
+            new_string=f"Ready to filter **{species_for_sequences(st.session_state.gbif_search_df)}**.",
             btn_key="gbif_filter_apply",
             status_label="🔍 Filtering GBIF results...",
         )

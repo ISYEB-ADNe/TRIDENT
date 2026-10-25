@@ -1,8 +1,10 @@
 import functools
 import hashlib
 import inspect
+import itertools
 import json
 import sqlite3
+import threading
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -204,9 +206,10 @@ def load_provenance(db_path: str | Path, table_name: str | None = None) -> pd.Da
 # Step columns
 #
 # An empty result stores no rows, so on a cache hit it would come back without
-# columns, and any consumer reading a column would fail. Each step records
-# every column its function has returned, and an empty result is given those
-# columns.
+# columns, and any consumer reading a column would fail; nor do the rows of an
+# item saved alone carry the columns only other items fill (a HYPO check
+# without a hit has no hit columns). Each step records every column its
+# function has returned, and a result read back is given those columns.
 # ---------------------------------------------------------------------------
 
 _COLUMNS_TABLE = "step_columns"
@@ -269,37 +272,55 @@ def _fingerprint_params(kwargs: dict, fingerprint_on: list[str] | None) -> dict:
     return {f"_fp_{name}": fingerprint(kwargs.get(name)) for name in fingerprint_on}
 
 
-def _failed_item_filter(
-    failure_sink: list, match_map: dict[str, str] | None
+def _item_filter(
+    values: list, match_map: dict[str, str] | None
 ) -> Callable[[dict], bool]:
-    """Build a predicate that returns True for cache items that failed.
+    """Build a predicate that returns True for the cache items *values* names.
 
-    *failure_sink* holds the identifying values (e.g. species names) the
-    pipeline function reported as failed. A plain value is matched against the
-    first ``match_map`` key of each cache item, a tuple against all its keys in
-    the order of ``match_map``. With no failures or no match_map the predicate
-    is always False (nothing is treated as failed).
+    *values* holds identifying values (e.g. species names) the pipeline
+    function reported to ``failure_sink`` (``result_sink`` reads its values
+    the same way). A plain value is
+    matched against the first ``match_map`` key of each cache item, a tuple
+    against all its keys in the order of ``match_map``. With no values or no
+    match_map the predicate is always False.
 
-    A plain value fails every item sharing that first key. This is intentional
-    for gbif: failures are per-species but cached per (species, extent), so a
-    failed species drops all its extents. A step whose first key recurs across
-    items that fail independently (the HYPO proxy records, shared by several
-    MOTUs) reports tuples instead, so a failure drops only its own item.
+    A plain value names every item sharing that first key. This is intentional
+    for gbif: name matches fail per species but are cached per (species,
+    extent), so a failed species drops all its extents. A step whose first key
+    recurs across items that fail independently (the HYPO proxy records,
+    shared by several MOTUs) reports tuples instead, so a failure drops only
+    its own item.
     """
-    if not failure_sink or not match_map:
+    if not values or not match_map:
         return lambda item: False
     keys = list(match_map.keys())
     # Tuples compare as strings, like the run_id assignment of result rows.
-    failed_keys = {
-        tuple(str(v) for v in value)
-        for value in failure_sink
-        if isinstance(value, tuple)
+    tuple_keys = {
+        tuple(map(_key_str, value)) for value in values if isinstance(value, tuple)
     }
-    failed_values = {value for value in failure_sink if not isinstance(value, tuple)}
+    plain_values = {value for value in values if not isinstance(value, tuple)}
     return lambda item: (
-        item.get(keys[0]) in failed_values
-        or tuple(str(item.get(k)) for k in keys) in failed_keys
+        item.get(keys[0]) in plain_values or _item_key(item, match_map) in tuple_keys
     )
+
+
+def _key_str(value) -> str:
+    """*value* as a key string. A whole float is written as an int, as in the
+    inputs table: pandas turns an int column with a missing value into floats,
+    and the row of extent 500.0 still belongs to the item of extent 500."""
+    return str(_normalize_number(value))
+
+
+def _item_key(item: dict, match_map: dict[str, str] | None) -> tuple:
+    """The values of *item* its result rows carry (see ``_row_keys``), as
+    strings; () for a step without match_map (one item)."""
+    return tuple(_key_str(item.get(k)) for k in match_map or {})
+
+
+def _row_keys(df: pd.DataFrame, match_map: dict[str, str]) -> pd.Series:
+    """The item key (``_item_key``) of each row of *df*."""
+    columns = [df[col].map(_key_str) for col in match_map.values()]
+    return pd.Series(list(zip(*columns)), index=df.index, dtype=object)
 
 
 def _find_cached_run_id(
@@ -382,6 +403,153 @@ def _next_run_id(conn: sqlite3.Connection, table_name: str) -> int:
         return (max_id or 0) + 1
     except sqlite3.OperationalError:
         return 1
+
+
+def _delete_orphan_rows(conn: sqlite3.Connection, table_name: str) -> None:
+    """Delete the result rows without an inputs row, left by a process killed
+    while saving (see ``_save_items``): their run_id may be given again."""
+    inputs_table = f"{table_name}_inputs"
+    if not (_table_exists(conn, table_name) and _table_exists(conn, inputs_table)):
+        return
+    cursor = conn.execute(
+        f"DELETE FROM {table_name} "
+        f"WHERE run_id NOT IN (SELECT run_id FROM {inputs_table})"
+    )
+    conn.commit()
+    if cursor.rowcount:
+        logger.debug(f"{table_name}: deleted {cursor.rowcount} rows of no item")
+
+
+def _append_rows(conn: sqlite3.Connection, table_name: str, df: pd.DataFrame) -> None:
+    """Append *df* to *table_name*, creating the table with the first rows.
+
+    A column with no value in the rows that create the table is added untyped,
+    like a column added later (``_add_missing_columns``): pandas would type it
+    from those rows alone (TEXT for None, REAL for NaN), and SQLite would then
+    store its later values as text or floats (an id 126160 as '126160' or
+    126160.0).
+    """
+    if _table_exists(conn, table_name):
+        _add_missing_columns(conn, table_name, df)
+        df.to_sql(name=table_name, con=conn, if_exists="append", index=False)
+    else:
+        empty = df.columns[df.isna().all()]
+        df.drop(columns=empty).to_sql(name=table_name, con=conn, index=False)
+        _add_missing_columns(conn, table_name, df)
+
+
+def _save_items(
+    conn: sqlite3.Connection,
+    table_name: str,
+    items: list[dict],
+    df: pd.DataFrame | None,
+    match_map: dict[str, str] | None,
+    new_ids: Iterator[int],
+) -> None:
+    """Save the cache *items*, which finished without failing: their rows of
+    *df* (rows of other items are left out), one inputs row each (also for an
+    item without rows, so a genuine empty is not queried again) and their
+    provenance, the UTC date they were queried from the live source. Each item
+    takes the next run_id of *new_ids*, shared by the saves of one call.
+
+    pandas commits each table it writes, so the inputs rows, which make the
+    items cached, are written last: a process killed in between leaves rows
+    without their item, never an item without its rows. The next call deletes
+    those rows (``_delete_orphan_rows``) before giving their run_id again.
+    """
+    if not match_map and len(items) != 1:
+        raise ValueError(
+            f"{table_name}: match_map is empty but {len(items)} items to save. "
+            "Cannot assign run_ids without mapping."
+        )
+    _set_schema_version(conn)
+    run_ids = {_item_key(item, match_map): next(new_ids) for item in items}
+
+    n_rows = 0
+    if df is not None and len(df) > 0:
+        if match_map:
+            ids = _row_keys(df, match_map).map(run_ids)
+        else:
+            ids = pd.Series(next(iter(run_ids.values())), index=df.index)
+        rows = df[ids.notna()].assign(run_id=ids.dropna().astype(int))
+        if len(rows) > 0:
+            _append_rows(conn, table_name, rows)
+        n_rows = len(rows)
+
+    inputs_df = pd.DataFrame(
+        [
+            {
+                **_params_to_sql_values(item),
+                "run_id": run_ids[_item_key(item, match_map)],
+            }
+            for item in items
+        ]
+    )
+    _add_missing_columns(conn, f"{table_name}_inputs", inputs_df)
+    # Committed with the inputs rows.
+    _write_provenance(
+        conn, table_name, list(run_ids.values()), _today_utc(), _trident_version()
+    )
+    inputs_df.to_sql(
+        name=f"{table_name}_inputs", con=conn, if_exists="append", index=False
+    )
+    logger.debug(f"{table_name}: saved {n_rows} rows of {len(items)} items")
+
+
+def _result_sink(
+    db_path: str | Path,
+    table_name: str,
+    items: list[dict],
+    match_map: dict[str, str] | None,
+    saved: set[tuple],
+    new_ids: Iterator[int],
+) -> Callable[[pd.DataFrame, list], None]:
+    """The ``result_sink`` given to a step function (see ``save_to_db``).
+
+    Called with the rows of items that just finished and their identifying
+    values (as for ``failure_sink``), it saves those of *items* not saved yet
+    and adds their keys to *saved*. It may be called from the step's worker
+    threads: each call saves on its own connection, one call at a time. It
+    never raises: items it cannot save are saved when the step returns, and
+    the step goes on.
+    """
+    lock = threading.Lock()
+    first_key = next(iter(match_map))
+    by_key = {_item_key(item, match_map): item for item in items}
+    by_first: dict = {}  # items sharing their first key value (see _item_filter)
+    for item in items:
+        by_first.setdefault(item.get(first_key), []).append(item)
+
+    def result_sink(df: pd.DataFrame, done: list) -> None:
+        finished = [
+            item
+            for value in done
+            for item in (
+                [by_key.get(tuple(map(_key_str, value)))]
+                if isinstance(value, tuple)
+                else by_first.get(value, [])
+            )
+            if item is not None
+        ]
+        with lock:
+            batch = [
+                item for item in finished if _item_key(item, match_map) not in saved
+            ]
+            if not batch:
+                return
+            try:
+                with get_connection(db_path) as conn:
+                    _record_step_columns(conn, table_name, df)
+                    _save_items(conn, table_name, batch, df, match_map, new_ids)
+            except Exception as exc:
+                logger.warning(
+                    f"Could not save {len(batch)} results to the analysis file "
+                    f"yet ({exc}): they are saved when the step ends."
+                )
+                return
+            saved.update(_item_key(item, match_map) for item in batch)
+
+    return result_sink
 
 
 def warn_empty_params(params: dict, name: str) -> None:
@@ -601,7 +769,7 @@ def save_to_db(
     list to append the identifying values of items whose query failed: a value
     of the first ``match_map`` key, or a tuple of all its keys to fail one item
     only. Those items are excluded from caching and retried on the next run
-    (see ``_failed_item_filter``). The values reported during this call are also
+    (see ``_item_filter``). The values reported during this call are also
     exposed as ``df.attrs["failed_items"]`` on the returned DataFrame, so the
     UI can tell failed items from genuinely empty ones. The attribute lives in
     memory only (not stored in SQLite) and describes this call: items that
@@ -609,12 +777,20 @@ def save_to_db(
     they fail again. pandas may copy ``attrs`` onto frames derived from the
     result; only read it on the frame returned here.
 
+    If it declares a ``result_sink`` parameter (given only with a db_path and
+    a per-item cache, one with a ``match_map``), it
+    receives a function to call with the rows of items that just finished and
+    their identifying values, as for ``failure_sink``: those items are saved at
+    once, so a crash or a killed process loses only the items still running.
+    It may be called from worker threads. The function still returns all its
+    rows; the items it did not report are saved when it returns.
+
     A ``progress_handler`` (a dict with a ``"total"`` key, or tqdm-like) gets
     as total the number of items this call executes, so a run resumed from the
     cache ends its progress bar full. The function must count one step per
     item.
 
-    An empty result keeps its columns: each step records the columns its
+    A result keeps its columns, even empty: each step records the columns its
     function returns, and they are restored on a cache hit. With no items to
     look up (empty input), the function is called directly and nothing is
     cached.
@@ -702,130 +878,75 @@ def save_to_db(
                 # 2. Execute uncached items. A function that accepts a
                 # ``failure_sink`` can report items whose query failed (e.g.
                 # network/403); those are excluded from caching below so they
-                # are retried on the next run instead of cached as empty.
+                # are retried on the next run instead of cached as empty. One
+                # that accepts a ``result_sink`` saves each item as it finishes.
                 failure_sink: list = []
+                saved: set[tuple] = set()  # keys of the items result_sink saved
                 if uncached_items:
                     run_kwargs = cache.rebuild(uncached_items, bound_kwargs)
                     if "failure_sink" in sig.parameters:
                         run_kwargs["failure_sink"] = failure_sink
+                    _delete_orphan_rows(conn, table_name)
+                    new_ids = itertools.count(_next_run_id(conn, table_name))
+                    if "result_sink" in sig.parameters and match_map:
+                        run_kwargs["result_sink"] = _result_sink(
+                            db_path,
+                            table_name,
+                            uncached_items,
+                            match_map,
+                            saved,
+                            new_ids,
+                        )
+                    # result_sink writes on its own connections, which this
+                    # one would block with uncommitted deletions.
+                    conn.commit()
                     new_df = func(**run_kwargs)
                 else:
                     new_df = None
 
-                # 3. Save new results and cache entries
+                # 3. Save the items not saved yet. Items the function reported
+                # as failed get neither result rows nor an inputs row, so they
+                # are retried next run; their rows are still returned.
                 if uncached_items:
-                    _set_schema_version(conn)
-                    if isinstance(new_df, pd.DataFrame):
-                        _record_step_columns(conn, table_name, new_df)
-                    base_run_id = _next_run_id(conn, table_name)
-
-                    # Items the function reported as failed get neither result
-                    # rows nor an inputs row, so they are retried next run. A
-                    # result row without its inputs row would be orphaned, and
-                    # its run_id could later be reused by another item.
-                    failed = _failed_item_filter(failure_sink, match_map)
-                    failed_run_ids = {
-                        base_run_id + i
-                        for i, item in enumerate(uncached_items)
-                        if failed(item)
-                    }
-
-                    # 3a. Save result rows (if any)
-                    if new_df is not None and len(new_df) > 0:
-                        if not isinstance(new_df, pd.DataFrame):
-                            raise TypeError(
-                                f"{func.__name__} must return a pandas DataFrame, "
-                                f"got {type(new_df)}"
-                            )
-
-                        if not match_map:
-                            if len(uncached_items) != 1:
-                                raise ValueError(
-                                    f"{func.__name__}: match_map is empty but "
-                                    f"{len(uncached_items)} uncached items found. "
-                                    "Cannot assign run_ids without mapping."
-                                )
-                            new_df["run_id"] = base_run_id
-                        else:
-                            item_to_run_id = {
-                                tuple(
-                                    str(item[k]) for k in match_map.keys()
-                                ): base_run_id + i
-                                for i, item in enumerate(uncached_items)
-                            }
-
-                            def assign_run_id(row):
-                                key = tuple(str(row[col]) for col in match_map.values())
-                                return item_to_run_id.get(key)
-
-                            new_df["run_id"] = new_df.apply(assign_run_id, axis=1)
-
-                        unmatched = new_df["run_id"].isna().sum()
-                        if unmatched > 0:
-                            logger.warning(
-                                f"{unmatched} rows could not be matched to a cache entry"
-                            )
-                            new_df = new_df.dropna(subset=["run_id"])
-
-                        new_df["run_id"] = new_df["run_id"].astype(int)
-
-                        # Rows of failed items are returned for this run but
-                        # not saved (see failed_run_ids above).
-                        to_save = new_df[~new_df["run_id"].isin(failed_run_ids)]
-                        if len(to_save) > 0:
-                            _add_missing_columns(conn, table_name, to_save)
-                            to_save.to_sql(
-                                name=table_name,
-                                con=conn,
-                                if_exists="append",
-                                index=False,
-                            )
-                        logger.debug(
-                            f"Saved {len(to_save)} rows across "
-                            f"{len(uncached_items) - len(failed_run_ids)} run_ids"
+                    if new_df is not None and not isinstance(new_df, pd.DataFrame):
+                        raise TypeError(
+                            f"{func.__name__} must return a pandas DataFrame, "
+                            f"got {type(new_df)}"
                         )
-                        cached_dfs.append(new_df.drop("run_id", axis=1))
-
-                    # 3b. Cache input entries (even for 0-row results) so
-                    # legitimately empty queries are not re-executed. Items the
-                    # function reported as failed are skipped, so a transient
-                    # failure is retried next run rather than cached as empty.
-                    kept = [
-                        (i, item)
-                        for i, item in enumerate(uncached_items)
-                        if base_run_id + i not in failed_run_ids
+                    if new_df is not None:
+                        _record_step_columns(conn, table_name, new_df)
+                    failed = _item_filter(failure_sink, match_map)
+                    rest = [
+                        item
+                        for item in uncached_items
+                        if not failed(item) and _item_key(item, match_map) not in saved
                     ]
-                    n_failed = len(failed_run_ids)
+                    if rest:
+                        _save_items(conn, table_name, rest, new_df, match_map, new_ids)
+                    n_failed = sum(map(failed, uncached_items))
                     if n_failed:
                         logger.debug(
                             f"{func.__name__}: {n_failed} item(s) failed and were "
                             "not cached (will retry on next run)"
                         )
 
-                    if kept:
-                        inputs_rows = [
-                            {**_params_to_sql_values(item), "run_id": base_run_id + i}
-                            for i, item in kept
-                        ]
-                        inputs_df = pd.DataFrame(inputs_rows)
-                        _add_missing_columns(conn, f"{table_name}_inputs", inputs_df)
-                        inputs_df.to_sql(
-                            name=f"{table_name}_inputs",
-                            con=conn,
-                            if_exists="append",
-                            index=False,
-                        )
-                        logger.debug(f"Saved {len(inputs_rows)} input rows")
-
-                        # 3c. Record provenance: the UTC date these items were
-                        # queried from the live source, shared across the batch.
-                        _write_provenance(
-                            conn,
-                            table_name,
-                            [base_run_id + i for i, _ in kept],
-                            _today_utc(),
-                            _trident_version(),
-                        )
+                    if new_df is not None and len(new_df) > 0:
+                        if match_map:
+                            keys = {
+                                _item_key(item, match_map) for item in uncached_items
+                            }
+                            matched = (
+                                _row_keys(new_df, match_map)
+                                .map(keys.__contains__)
+                                .astype(bool)
+                            )
+                            if not matched.all():
+                                logger.warning(
+                                    f"{(~matched).sum()} rows could not be matched "
+                                    "to a cache entry"
+                                )
+                            new_df = new_df[matched]
+                        cached_dfs.append(new_df)
 
                 # 4. Combine and return
                 non_empty = [df for df in cached_dfs if not df.empty]
@@ -834,8 +955,7 @@ def save_to_db(
                     if non_empty
                     else pd.DataFrame()
                 )
-                if result_df.empty:
-                    ensure_columns(result_df, _load_step_columns(conn, table_name))
+                ensure_columns(result_df, _load_step_columns(conn, table_name))
                 result_df.attrs["failed_items"] = list(failure_sink)
                 return result_df, params
 

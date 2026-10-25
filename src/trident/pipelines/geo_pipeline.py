@@ -147,6 +147,7 @@ def run_gbif_search(
     progress_handler: Callable[[float, str], None] | None = None,
     user_agent: str | None = None,
     failure_sink: list | None = None,
+    result_sink: Callable | None = None,
 ) -> pd.DataFrame:
     """Run GBIF occurrence search for a list of taxa.
 
@@ -166,7 +167,11 @@ def run_gbif_search(
         failure_sink: If provided, species whose name match errored (network or
             403, ``matchType == "ERROR"``) are appended here so the cache layer
             skips them and retries on the next run. A genuine no-match (needs
-            review) is a valid empty, not a failure.
+            review) is a valid empty, not a failure. A species whose
+            occurrence count errored in one area is appended with that area,
+            as (species, extent).
+        result_sink: Given by save_to_db, which saves each area as soon as its
+            counts are in.
 
     Returns:
         DataFrame with GBIF taxon metadata and occurrence count columns.
@@ -203,10 +208,13 @@ def run_gbif_search(
     good_matches = filter_matches(matches_df)
     taxon_keys = good_matches["taxonID"].astype(str).tolist()
 
+    # The species whose match did not fail: each of their areas is saved once
+    # counted, also for a species GBIF does not hold (a genuine empty).
+    match_failed = set(errored)
+    queried = [s for s in species_list if s not in match_failed]
     results = []
 
     # 2. Extent-based counts (30% -> 90%)
-    failed_taxon_keys: set[str] = set()
     if latitude is not None and longitude is not None and extents:
         n_extents = len(extents)
         for i, dist_km in enumerate(extents):
@@ -224,8 +232,39 @@ def run_gbif_search(
                 checklist_key=checklist_key,
                 user_agent=user_agent,
             )
-            results.append(res_df)
-            failed_taxon_keys.update(ext_failed)
+            # Names sharing a GBIF species each get its counts
+            area_df = good_matches.merge(
+                res_df, on="taxonID", how="left", validate="many_to_many"
+            )
+
+            # Occurrence fetches that errored return their taxon keys (not a
+            # count). Drop those species' rows in this area so a transient
+            # error is not cached as "absent", and route (species, area) to
+            # failure_sink for retry next run. Drop by taxonID (exact);
+            # failure_sink needs the *input* species_list strings (the
+            # cache-item keys). The result's scientificName is the queried
+            # name, or with the Backbone GBIF's name, equal to it only
+            # case-insensitively, so map back via normalize_name.
+            area_errored = []
+            if ext_failed and "taxonID" in area_df.columns:
+                area_df = area_df[~area_df["taxonID"].isin(ext_failed)]
+                errored_norm = set(
+                    good_matches.loc[
+                        good_matches["taxonID"].isin(ext_failed), "scientificName"
+                    ]
+                    .map(normalize_name)
+                    .dropna()
+                )
+                area_errored = sorted(
+                    s for s in species_list if normalize_name(s) in errored_norm
+                )
+                errored += [s for s in area_errored if s not in errored]
+                if failure_sink is not None:
+                    failure_sink.extend((s, dist_km) for s in area_errored)
+            results.append(area_df)
+            if result_sink is not None:
+                done = [(s, dist_km) for s in queried if s not in area_errored]
+                result_sink(area_df, done)
 
     # 3. Finalizing (90% -> 100%)
     if progress_handler:
@@ -237,37 +276,7 @@ def run_gbif_search(
             good_matches.iloc[:0].copy(), ["occurrences", "gbif_extent"]
         )
 
-    counts_df = pd.concat(results, ignore_index=True)
-
-    # Names sharing a GBIF species each get its counts
-    gbif_search_df = good_matches.merge(
-        counts_df, on="taxonID", how="left", validate="many_to_many"
-    )
-
-    # Occurrence fetches that errored return their taxon keys (not a count). Drop
-    # those species' rows so a transient error is not cached as "absent", and
-    # route them to failure_sink for retry next run. Drop by taxonID (exact);
-    # failure_sink needs the *input* species_list strings (the cache-item keys).
-    # The result's scientificName is the queried name, or with the Backbone
-    # GBIF's name, equal to it only case-insensitively, so map back via
-    # normalize_name.
-    if failed_taxon_keys and "taxonID" in gbif_search_df.columns:
-        gbif_search_df = gbif_search_df[
-            ~gbif_search_df["taxonID"].isin(failed_taxon_keys)
-        ]
-        errored_norm = set(
-            good_matches.loc[
-                good_matches["taxonID"].isin(failed_taxon_keys), "scientificName"
-            ]
-            .map(normalize_name)
-            .dropna()
-        )
-        errored_inputs = sorted(
-            s for s in species_list if normalize_name(s) in errored_norm
-        )
-        errored += errored_inputs
-        if errored_inputs and failure_sink is not None:
-            failure_sink.extend(errored_inputs)
+    gbif_search_df = pd.concat(results, ignore_index=True)
 
     n_species = (
         gbif_search_df["scientificName"].nunique()
