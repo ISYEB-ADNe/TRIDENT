@@ -951,10 +951,7 @@ def plot_bounding_boxes(
                     lat=circle_lats,
                     mode="lines",
                     name=label,
-                    line=dict(color=color, width=1),
-                    fill="toself",
-                    fillcolor=color,
-                    opacity=0.1,
+                    line=dict(color=color, width=2),
                     hovertemplate=f"<b>Circle {label}</b><br>Lat: %{{lat:.4f}}<br>Lon: %{{lon:.4f}}<extra></extra>",
                 )
             )
