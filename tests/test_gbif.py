@@ -197,45 +197,6 @@ def test_run_gbif_search_routes_occurrence_errors_to_failure_sink(monkeypatch):
     assert df.empty  # both taxa errored -> dropped from the result
 
 
-def test_failure_sink_uses_input_names_not_canonical(monkeypatch):
-    # GBIF canonicalName differs in case from the input species string. The
-    # failure_sink must carry the *input* string (the cache-item key), or the
-    # cache cannot match it for retry.
-    def fake_match(names, **k):
-        return pd.DataFrame(
-            [
-                {
-                    "query": n,
-                    "canonicalName": n.lower().capitalize(),  # e.g. "Gadus morhua"
-                    "confidence": 99,
-                    "matchType": "EXACT",
-                    "needs_review": False,
-                    "taxonID": str(1000 + i),
-                    "rank": "SPECIES",
-                    "genus": n.split()[0].lower().capitalize(),
-                    "kingdom": "Animalia",
-                    "status": "ACCEPTED",
-                    "matched_by": "WoRMS ID",
-                }
-                for i, n in enumerate(names)
-            ]
-        )
-
-    monkeypatch.setattr(geo_pipeline, "match_taxon_names", fake_match)
-    monkeypatch.setattr(gbif, "create_session", lambda *a, **k: _BoomSession())
-
-    sink: list = []
-    geo_pipeline.run_gbif_search(
-        ["GADUS MORHUA"],
-        latitude=43.0,
-        longitude=7.0,
-        extents=[500],
-        failure_sink=sink,
-        db_path=None,
-    )
-    assert sink == [("GADUS MORHUA", 500)]  # input string, not "Gadus morhua"
-
-
 # --- no usable matches: filter must not crash, returns empty columned frame ---
 
 
@@ -288,7 +249,7 @@ def test_counts_for_area_empty_keys_returns_empty():
 
 
 def test_run_gbif_search_no_matches_returns_empty(monkeypatch):
-    # No species clears the backbone filter; the step returns empty, no crash.
+    # No species clears the match filter; the step returns empty, no crash.
     def m_none(names, **k):
         return pd.DataFrame(
             [

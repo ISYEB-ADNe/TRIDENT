@@ -188,7 +188,7 @@ By default only marine-flagged species are kept ("Marine species only", an advan
 
 | Parameter | Default | Meaning / rationale |
 |---|---|---|
-| Name-match confidence | 95 | GBIF backbone match confidence required to accept a name. |
+| Name-match confidence | 95 | GBIF name-match confidence required to accept a name. |
 | Search extent(s) (km) | 500 (+ global) | Radius of the occurrence search box around the study point. |
 | Minimum occurrences | 3 | Minimum GBIF records inside the extent to keep a species; guards against single stray records. |
 

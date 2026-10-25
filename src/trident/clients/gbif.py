@@ -193,7 +193,8 @@ def get_bounding_box(
 ### GBIF API ###
 
 # GBIF's current taxonomy, the Catalogue of Life eXtended Release (COL XR).
-# Without it, occurrence searches use the GBIF Backbone, frozen since 2023.
+# Occurrence searches send it too: without it, GBIF reads the keys as keys of
+# the GBIF Backbone, frozen since 2023.
 COL_XR_CHECKLIST = "7ddf754f-d193-4cc9-b351-99906754a03b"
 
 # Ranks of the classification columns a GBIF match carries
@@ -217,6 +218,8 @@ def _match_error(name: str, error: Exception) -> dict:
         "matchType": "ERROR",
         "needs_review": True,
         "taxonID": None,
+        "matched_by": None,
+        "left_out": None,
     }
 
 
@@ -301,78 +304,6 @@ def _match_single_taxon_name(
             session.close()
 
 
-def _match_single_taxon_name_v1(
-    name: str,
-    session: requests.Session | None = None,
-    user_agent: str | None = None,
-) -> dict:
-    """Match a single taxon name to the GBIF Backbone (frozen since 2023) via
-    the v1 species/match API.
-
-    Args:
-        name: Species or taxon name to match.
-        session: Optional requests session for connection reuse.
-        user_agent: User-Agent header, used only when creating an own session.
-
-    Returns:
-        Dict with GBIF match metadata and taxon keys.
-        Includes 'needs_review' flag for low-confidence matches.
-    """
-    key_columns = [
-        "kingdomKey",
-        "phylumKey",
-        "classKey",
-        "orderKey",
-        "familyKey",
-        "genusKey",
-        "speciesKey",
-        "usageKey",
-        "acceptedUsageKey",
-    ]
-
-    own_session = session is None
-    try:
-        stop.check_stop()  # a stopped step builds no session for nothing
-        if own_session:
-            session = create_session(user_agent=user_agent)
-        response = session.get(
-            "https://api.gbif.org/v1/species/match", params={"name": name}, timeout=15
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        data["query"] = name
-
-        # Force key columns to string (handle float/None/empty)
-        for key_col in key_columns:
-            if key_col in data and data[key_col] not in [None, ""]:
-                data[key_col] = str(int(float(data[key_col])))
-            else:
-                data[key_col] = None
-
-        # Main taxonID as string
-        if data.get("status") == "SYNONYM" and data.get("acceptedUsageKey"):
-            data["taxonID"] = str(int(float(data["acceptedUsageKey"])))
-        elif data.get("speciesKey"):
-            data["taxonID"] = str(int(float(data["speciesKey"])))
-        else:
-            data["taxonID"] = None
-
-        data["needs_review"] = (
-            data.get("confidence", 0) < GBIF_CONFIDENCE
-            or data.get("matchType") == "NONE"
-        )
-
-        return data
-
-    except Exception as e:
-        return _match_error(name, e) | {key_col: None for key_col in key_columns}
-
-    finally:
-        if own_session and session is not None:
-            session.close()
-
-
 def gbif_search_url(name: str) -> str:
     """GBIF web search for a taxon name, for log lines to check it by hand."""
     return f"https://www.gbif.org/species/search?q={quote(name)}"
@@ -398,47 +329,13 @@ def match_taxon_names(
         n_jobs: Number of parallel threads.
         user_agent: User-Agent header for HTTP requests.
 
+    Each call creates its own session: requests.Session is not thread-safe, so
+    sharing one across the threading backend can corrupt the pool state.
+
     Returns:
         DataFrame with one row per name containing GBIF match metadata.
     """
     worms_ids = worms_ids or {}
-    return _match_names(
-        names,
-        lambda name: _match_single_taxon_name(
-            name, worms_ids.get(name), user_agent=user_agent
-        ),
-        n_jobs,
-    )
-
-
-def match_taxon_names_v1(
-    names: list[str], n_jobs: int = 10, user_agent: str | None = None
-) -> pd.DataFrame:
-    """Match species/taxon names to GBIF Backbone keys using parallel requests.
-
-    Args:
-        names: List of scientific names to match.
-        n_jobs: Number of parallel threads.
-        user_agent: User-Agent header for HTTP requests.
-
-    Returns:
-        DataFrame with one row per name containing GBIF match metadata.
-    """
-    return _match_names(
-        names,
-        lambda name: _match_single_taxon_name_v1(name, user_agent=user_agent),
-        n_jobs,
-    )
-
-
-def _match_names(
-    names: list[str], match_one: Callable[[str], dict], n_jobs: int
-) -> pd.DataFrame:
-    """Run *match_one* on every name in parallel, logging each result.
-
-    Each call creates its own session: requests.Session is not thread-safe, so
-    sharing one across the threading backend can corrupt the pool state.
-    """
     if len(names) == 0:
         logger.debug("Empty names list")
         return pd.DataFrame(columns=GBIF_MATCH_COLUMNS)
@@ -447,7 +344,9 @@ def _match_names(
 
     def match(name):
         with log.query(name):
-            result = match_one(name)
+            result = _match_single_taxon_name(
+                name, worms_ids.get(name), user_agent=user_agent
+            )
         match_type = str(result.get("matchType", "")).lower()
         check = f"check: {gbif_search_url(name)}"
         if match_type == "error":
@@ -484,8 +383,6 @@ def _match_names(
 
     results_df = pd.DataFrame(results)
     errored = results_df["matchType"] == "ERROR"
-    # A v1 match has no left_out: the Backbone filter decides on its own rules
-    ensure_columns(results_df, ["left_out", "matched_by"])
     matched = (
         ~results_df["needs_review"]
         & results_df["taxonID"].notna()
@@ -742,106 +639,6 @@ def filter_taxon_matches(
     return filtered_df
 
 
-def filter_taxon_matches_v1(
-    matches_df: pd.DataFrame,
-    confidence_threshold: int = GBIF_CONFIDENCE,
-    strict_name_match: bool = True,
-) -> pd.DataFrame:
-    """Filter GBIF Backbone matches by confidence and name quality.
-
-    Args:
-        matches_df: DataFrame from match_taxon_names_v1()
-        confidence_threshold: Min confidence score
-        strict_name_match: Require query == canonicalName
-
-    Returns:
-        Filtered DataFrame with high-quality taxon matches only. Always carries
-        the standardised taxonomy columns, even when empty.
-    """
-    if matches_df.empty:
-        logger.debug("Empty DataFrame provided to filter_taxon_matches_v1")
-        return pd.DataFrame(columns=_GBIF_TAXON_COLS)
-
-    # Quality filters
-    mask = (
-        (
-            pd.to_numeric(matches_df["confidence"], errors="coerce")
-            >= confidence_threshold
-        )
-        & (matches_df["matchType"] != "NONE")
-        & matches_df["taxonID"].notna()
-    )
-
-    if strict_name_match:
-        if "canonicalName" in matches_df.columns:
-            mask &= (
-                matches_df["query"].str.lower()
-                == matches_df["canonicalName"].str.lower()
-            )
-        else:
-            # No row carried a canonicalName (every match was NONE/ERROR), so
-            # none can satisfy the strict name check.
-            mask &= False
-
-    filtered_df = matches_df[mask].copy()
-
-    # Nothing passed: return an empty, correctly-columned frame before the
-    # row-wise steps below (apply(axis=1) on an empty frame yields a DataFrame,
-    # which cannot be assigned back to a single column).
-    if filtered_df.empty:
-        logger.debug("No matches passed quality filters")
-        return pd.DataFrame(columns=_GBIF_TAXON_COLS)
-
-    # Drop redundant/internal columns (keep useful taxonomy!)
-    drop_cols = [
-        "query",  # Replaced by canonicalName
-        "scientificName",  # canonicalName is cleaner
-        "confidence",  # Already filtered
-        "matchType",  # Already filtered
-        "synonym",  # Status tells us this
-        "usageKey",  # taxonID is what we need
-        "status",  # Resolved via taxonID
-        "needs_review",  # Already filtered
-        "species",  # Redundant with canonicalName
-    ]
-
-    # Safe drop (only existing columns)
-    existing_drops = [col for col in drop_cols if col in filtered_df.columns]
-    filtered_df = filtered_df.drop(columns=existing_drops).reset_index(drop=True)
-    filtered_df = filtered_df.rename(
-        columns={
-            "canonicalName": "scientificName",
-            "rank": "taxonRank",
-        }
-    )
-
-    # Remove duplicate taxonIDs (keep first)
-    before_dedup = len(filtered_df)
-    filtered_df = filtered_df.drop_duplicates(subset=["taxonID"], keep="first")
-
-    filtered_df["taxonID_db"] = "gbif"
-    filtered_df["taxonURL"] = filtered_df["taxonID"].apply(
-        lambda x: f"https://www.gbif.org/species/{x}" if pd.notna(x) else None
-    )
-    filtered_df["specificEpithet"] = filtered_df.apply(
-        lambda row: extract_specific_epithet(row["scientificName"], row["genus"]),
-        axis=1,
-    )
-
-    ensure_columns(filtered_df, _GBIF_TAXON_COLS)
-    filtered_df = filtered_df[_GBIF_TAXON_COLS]
-
-    dups_removed = before_dedup - len(filtered_df)
-    dups_str = pluralize(dups_removed, "duplicate")
-    dups_message = f" ({dups_removed} {dups_str} removed)" if dups_removed > 0 else ""
-    logger.info(
-        f"GBIF search: {len(filtered_df)}/{len(matches_df)} species kept for the "
-        f"occurrence counts{dups_message}"
-    )
-
-    return filtered_df
-
-
 SEARCH_AREAS = ["circle", "box"]
 
 
@@ -887,7 +684,6 @@ def area_params(
 def search_taxon_occurrences(
     taxon_keys: list[str],
     area_filter: dict | None = None,
-    checklist_key: str | None = None,
     batch_size: int = 100,
     user_agent: str | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
@@ -902,8 +698,6 @@ def search_taxon_occurrences(
         taxon_keys: List of GBIF taxon key strings.
         area_filter: Search params of the area (see ``area_params``); none
             for worldwide counts.
-        checklist_key: Taxonomy of the keys: ``COL_XR_CHECKLIST``, or None for
-            GBIF Backbone keys.
         batch_size: Number of taxon keys per facet request.
         user_agent: User-Agent header for HTTP requests.
 
@@ -922,9 +716,8 @@ def search_taxon_occurrences(
         "facet": "taxonKey",
         "facetLimit": 10 * batch_size,  # Get more facets to avoid missing keys
         "limit": 0,
+        "checklistKey": COL_XR_CHECKLIST,
     }
-    if checklist_key:
-        params_base["checklistKey"] = checklist_key
 
     # Split into 100-species batches
     batches = [
@@ -1033,7 +826,6 @@ def counts_for_area(
     longitude: float | None = None,
     extent: int | float | str = "global",
     area: str = "circle",
-    checklist_key: str | None = COL_XR_CHECKLIST,
     progress_handler: Callable[[float, str], None] | None = None,
     user_agent: str | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
@@ -1048,8 +840,6 @@ def counts_for_area(
         longitude: Center longitude (required for non-global extents).
         extent: Search radius in km, or ``"global"`` for worldwide counts.
         area: ``"circle"`` or ``"box"`` around the point.
-        checklist_key: Taxonomy of the keys: ``COL_XR_CHECKLIST``, or None for
-            GBIF Backbone keys.
         progress_handler: Optional callable ``(fraction, message)`` for UI
             progress updates. Receives values in [0, 1].
         user_agent: User-Agent header for HTTP requests.
@@ -1061,7 +851,7 @@ def counts_for_area(
 
     col_name = get_extent_column_name(extent)
 
-    # No keys to query (e.g. no species cleared the backbone filter): skip the
+    # No keys to query (e.g. no species cleared the match filter): skip the
     # request and return an empty, correctly-columned frame so the caller's
     # reindex/merge does not fail.
     if not taxon_keys:
@@ -1073,7 +863,6 @@ def counts_for_area(
     counts, failed_keys = search_taxon_occurrences(
         taxon_keys,
         area_params(latitude, longitude, extent, area),
-        checklist_key,
         user_agent=user_agent,
     )
 

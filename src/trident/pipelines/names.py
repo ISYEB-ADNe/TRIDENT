@@ -117,7 +117,7 @@ def gbif_name_rows(gbif_search_df: pd.DataFrame) -> pd.DataFrame:
         GBIF matched (a subspecies name when GBIF holds it as one), source_id
         GBIF's species for it (the counted key in a search saved before it
         was kept), note saying how a synonym or subspecies in GBIF is
-        counted; empty for a Backbone search, which keeps no GBIF name.
+        counted.
     """
     matched = (
         ensure_columns(
