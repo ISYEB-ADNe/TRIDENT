@@ -14,6 +14,13 @@ from trident.clients.bold import (
     query_species,
     with_sequences,
 )
+from trident.pipelines.extra_pipeline import prepare_bold_other_names
+from trident.pipelines.names import (
+    bold_name_rows,
+    build_name_table,
+    gbif_name_rows,
+    replace_source_rows,
+)
 
 
 def _rec(**over):
@@ -182,3 +189,60 @@ def test_each_queried_species_gets_its_sequences_or_why_it_has_none(monkeypatch)
     sequences = df[df["bold_outcome"] == bold.SEQUENCES]
     assert len(with_sequences(df)) == len(sequences) == 8
     assert set(sequences["scientificName"]) == {"Leucophaeus pipixcan"}
+
+
+def test_a_species_bold_files_under_another_name_is_found_under_it(monkeypatch):
+    # WoRMS accepts Larus pipixcan, which BOLD does not know; GBIF (and BOLD)
+    # call it Leucophaeus pipixcan. The other GBIF names stand for other
+    # species, so they are never searched: Chroicocephalus saundersi is
+    # another WoRMS species, Larus genei is the NCBI name of Chroicocephalus
+    # genei (a made-up lump, to test the rule), and GBIF lumps Larus
+    # novaehollandiae and Larus scopulinus as Chroicocephalus novaehollandiae.
+    _stub_bold(monkeypatch)
+    gbif = {
+        "Larus pipixcan": "Leucophaeus pipixcan",
+        "Larus saundersi": "Chroicocephalus saundersi",
+        "Chroicocephalus saundersi": "Chroicocephalus saundersi",
+        "Larus ridibundus": "Larus genei",
+        "Larus novaehollandiae": "Chroicocephalus novaehollandiae",
+        "Larus scopulinus": "Chroicocephalus novaehollandiae",
+    }
+    ncbi = build_name_table(
+        pd.DataFrame(
+            {
+                "scientificName": ["Larus genei"],
+                "acceptedName": ["Chroicocephalus genei"],
+                "acceptedNameUsageID": [137149],
+                "matchedBy": ["name"],
+            }
+        )
+    )
+    gbif_rows = gbif_name_rows(
+        pd.DataFrame(
+            {
+                "scientificName": list(gbif),
+                "gbif_scientificName": list(gbif.values()),
+                "taxonID": ["6Q4RB", "5YGFL", "5YGFL", "9VMHX", "5YGFR", "5YGFR"],
+            }
+        )
+    )
+    name_table = replace_source_rows(ncbi, gbif_rows, "gbif")
+    species = [
+        "Larus pipixcan",
+        "Larus saundersi",
+        "Larus ridibundus",
+        "Larus novaehollandiae",
+        "Larus scopulinus",
+    ]
+    other_names = prepare_bold_other_names(species, name_table)
+    assert other_names == {"Larus pipixcan": [("Leucophaeus pipixcan", "gbif")]}
+
+    df, failed = get_records_from_species_list(
+        ["Larus pipixcan"], other_names, rate_limit_delay=0
+    )
+    assert failed == []
+    assert outcomes_by_species(df).to_dict() == {"Larus pipixcan": bold.SEQUENCES}
+    assert len(with_sequences(df)) == 8
+    assert bold_name_rows(df)[["species", "name", "matched_by"]].values.tolist() == [
+        ["Larus pipixcan", "Leucophaeus pipixcan", "gbif"]
+    ]

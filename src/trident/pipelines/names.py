@@ -3,15 +3,18 @@
 One row per (species, name, source). species is the WoRMS accepted name, or
 the name itself when WoRMS does not know it. TAX builds the table from the
 WoRMS check of the MOL (NCBI) names, and GEO adds the name GBIF counts each
-species under. Every step that compares names from two sources goes through
+species under, and EXTRA the name BOLD files its sequences under. Every step
+that compares names from two sources goes through
 species_of, so a synonym counts as its species; names match ignoring case and
 spacing. A name_table of None (names not checked in WoRMS) matches names as
 they are.
 
     build_name_table(resolution_df, ncbi_taxids) → DataFrame
     gbif_name_rows(gbif_search_df) → DataFrame
+    bold_name_rows(bold_search_df) → DataFrame
     replace_source_rows(name_table, rows, source) → DataFrame
     resolved_names(name_table) → DataFrame
+    other_names(species, name_table, sources) → dict
     species_of(names, name_table) → Series
     species_key(names, name_table) → Series
     best_hits(hits, name_table, columns) → DataFrame
@@ -113,17 +116,68 @@ def gbif_name_rows(gbif_search_df: pd.DataFrame) -> pd.DataFrame:
         .dropna(subset=["scientificName", "gbif_scientificName"])
         .drop_duplicates("scientificName")
     )
-    species = matched["scientificName"].astype(str)
-    names = matched["gbif_scientificName"].astype(str)
+    return _source_rows(
+        matched,
+        "gbif",
+        name_col="gbif_scientificName",
+        matched_by_col="gbif_matched_by",
+        aphia_ids=as_ids(matched["aphia_id"]),
+        notes=matched["gbif_note"],
+    )
+
+
+def bold_name_rows(bold_search_df: pd.DataFrame) -> pd.DataFrame:
+    """Name table rows of the BOLD search: the name BOLD files each species'
+    sequences under.
+
+    Args:
+        bold_search_df: Output of run_bold_search (scientificName the queried
+            species, bold_scientificName, taxonID the BOLD taxid,
+            bold_matched_by, bold_outcome).
+
+    Returns:
+        DataFrame with NAME_TABLE_COLUMNS, source "bold", one row per species
+        and BOLD name with sequences (a species BOLD splits has several);
+        empty for a search saved before BOLD names were kept.
+    """
+    found = (
+        ensure_columns(
+            bold_search_df.copy(),
+            ["dna_sequence", "bold_scientificName", "bold_matched_by", "taxonID"],
+        )
+        .dropna(subset=["dna_sequence", "scientificName", "bold_scientificName"])
+        .drop_duplicates(["scientificName", "bold_scientificName"])
+    )
+    return _source_rows(
+        found, "bold", name_col="bold_scientificName", matched_by_col="bold_matched_by"
+    )
+
+
+def _source_rows(
+    df: pd.DataFrame,
+    source: str,
+    name_col: str,
+    matched_by_col: str,
+    aphia_ids: pd.Series | None = None,
+    notes: pd.Series | None = None,
+) -> pd.DataFrame:
+    """Name table rows of a search: the species from scientificName, the name
+    the source gives it from *name_col*, source_id from taxonID."""
+    species = df["scientificName"].astype(str)
+    names = df[name_col].astype(str)
+    if aphia_ids is None:
+        aphia_ids = pd.Series(pd.NA, index=df.index, dtype="Int64")
+    if notes is None:
+        notes = pd.Series(pd.NA, index=df.index)
     return pd.DataFrame(
         {
             "species": species,
-            "aphia_id": as_ids(matched["aphia_id"]),
+            "aphia_id": aphia_ids,
             "name": names,
-            "source": "gbif",
-            "source_id": matched["taxonID"].astype("string"),
-            "matched_by": matched["gbif_matched_by"].astype("string"),
-            "note": matched["gbif_note"].astype("string"),
+            "source": source,
+            "source_id": df["taxonID"].astype("string"),
+            "matched_by": df[matched_by_col].astype("string"),
+            "note": notes.astype("string"),
             "name_key": names.map(normalize_name),
             "species_key": species.map(normalize_name),
         }
@@ -160,6 +214,50 @@ def resolved_names(name_table: pd.DataFrame | None) -> pd.DataFrame:
     if name_table is None:
         return pd.DataFrame(columns=NAME_TABLE_COLUMNS)
     return name_table[name_table["source"].isin(SYNONYM_SOURCES)]
+
+
+def other_names(
+    species: list[str],
+    name_table: pd.DataFrame | None,
+    sources: list[str],
+) -> dict[str, list[tuple[str, str]]]:
+    """The names *sources* give each species besides its own, to search
+    another source under when the species name finds nothing.
+
+    A name that stands for another species is left out: another species of
+    the table, a name WoRMS resolved to another species, or a name the
+    sources give to several species. A source can lump
+    two WoRMS species under one name (GBIF calls Larus saundersi
+    Chroicocephalus saundersi), and searching it would give one species the
+    other's data.
+
+    Returns:
+        {species: [(name, source), ...]}, sources in the order given, each
+        name once; species without another name are left out.
+    """
+    if name_table is None or name_table.empty or not species:
+        return {}
+    queried = pd.Series(species, dtype=object)
+    queried_keys = dict(zip(name_keys(queried), queried))
+    species_keys = set(name_table["species_key"]) | set(queried_keys)
+    rows = name_table[
+        name_table["source"].isin(sources)
+        & name_table["species_key"].isin(queried_keys)
+        & (name_table["name_key"] != name_table["species_key"])
+        & ~name_table["name_key"].isin(species_keys)
+    ]
+    resolved_to = rows["name_key"].map(_by_name(name_table)["species_key"])
+    rows = rows[resolved_to.isna() | (resolved_to == rows["species_key"])]
+    named = name_table[name_table["source"].isin(sources)]
+    n_species = named.groupby("name_key")["species_key"].nunique()
+    rows = rows[rows["name_key"].map(n_species) == 1]
+    order = {source: i for i, source in enumerate(sources)}
+    rows = rows.sort_values("source", key=lambda s: s.map(order), kind="stable")
+    rows = rows.drop_duplicates(["species_key", "name_key"])
+    names = {}
+    for key, name, source in zip(rows["species_key"], rows["name"], rows["source"]):
+        names.setdefault(queried_keys[key], []).append((name, source))
+    return names
 
 
 def _by_name(name_table: pd.DataFrame | None) -> pd.DataFrame:

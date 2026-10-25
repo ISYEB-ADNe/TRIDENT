@@ -166,8 +166,17 @@ BOLD_RECORD_COLUMNS = [
 
 # Columns of the search: scientificName is the queried species (the name the
 # EXTRA merge joins on), bold_scientificName the name BOLD files the records
-# under. A species without sequences has one row, with its bold_outcome only.
-BOLD_SEARCH_COLUMNS = BOLD_RECORD_COLUMNS + ["bold_scientificName", "bold_outcome"]
+# under, bold_matched_by the name that found them (SPECIES_NAME, or the source
+# of another name of the species, e.g. "gbif"). A species without sequences
+# has one row, with its bold_outcome, and the name BOLD knows it by if any.
+BOLD_SEARCH_COLUMNS = BOLD_RECORD_COLUMNS + [
+    "bold_scientificName",
+    "bold_matched_by",
+    "bold_outcome",
+]
+
+# bold_matched_by of a species found under its own name.
+SPECIES_NAME = "species name"
 
 
 def _filter_records(
@@ -292,37 +301,117 @@ def query_species(
 
 def _species_rows(
     species: str,
+    name: str,
+    matched_by: str,
     in_bold: bool,
     records: list[dict],
     keep_only_COI5P: bool,
     keep_ncbi: bool,
 ) -> pd.DataFrame:
-    """Search rows of one queried species: its usable sequences, or one row
-    with the reason it has none."""
-    if in_bold:
-        cleaned, outcome = _clean_records(records, keep_only_COI5P, keep_ncbi)
-    else:
-        outcome = NOT_IN_BOLD
-    if outcome:
+    """Search rows of one queried species under one of its names: its usable
+    sequences, or one row with the reason it has none."""
+    if not in_bold:
         # Typed object like the record columns: the first save of the step
         # sets the SQLite column types, and a float taxonID column would read
         # later IDs back as floats.
         return pd.DataFrame(
-            [{"scientificName": species, "bold_outcome": outcome}],
+            [{"scientificName": species, "bold_outcome": NOT_IN_BOLD}],
+            columns=BOLD_SEARCH_COLUMNS,
+            dtype=object,
+        )
+    cleaned, outcome = _clean_records(records, keep_only_COI5P, keep_ncbi)
+    if outcome:
+        return pd.DataFrame(
+            [
+                {
+                    "scientificName": species,
+                    "bold_scientificName": name,
+                    "bold_matched_by": matched_by,
+                    "bold_outcome": outcome,
+                }
+            ],
             columns=BOLD_SEARCH_COLUMNS,
             dtype=object,
         )
     return cleaned.assign(
         bold_scientificName=cleaned["scientificName"],
+        bold_matched_by=matched_by,
         scientificName=species,
         bold_outcome=SEQUENCES,
     )[BOLD_SEARCH_COLUMNS]
 
 
+def _search_species(
+    species: str,
+    other_names: list[tuple[str, str]],
+    session: requests.Session,
+    keep_only_COI5P: bool,
+    keep_ncbi: bool,
+    rate_limit_delay: float,
+) -> pd.DataFrame | None:
+    """Search rows of one species (see _species_rows). Without a usable
+    sequence under the species name, its other names (name, source) are tried
+    in turn until one gives some; a species none gives any keeps the outcome
+    of the name that got furthest through the filters. None if a query fails.
+    """
+    best = None
+    names = [(species, SPECIES_NAME), *other_names]
+    for i, (name, matched_by) in enumerate(names):
+        if i > 0 and rate_limit_delay > 0:
+            stop.wait(rate_limit_delay)
+        result = query_species(name, session=session)
+        if result is None:
+            return None
+        rows = _species_rows(
+            species, name, matched_by, *result, keep_only_COI5P, keep_ncbi
+        )
+        outcome = rows["bold_outcome"].iloc[0]
+        if outcome == SEQUENCES:
+            return rows
+        if best is None or _progress(outcome) > _progress(best["bold_outcome"].iloc[0]):
+            best = rows
+    return best
+
+
+def _progress(outcome: str) -> int:
+    """How far through the filters a name got (OUTCOMES_WITHOUT_SEQUENCES
+    order)."""
+    return OUTCOMES_WITHOUT_SEQUENCES.index(outcome)
+
+
+def under_other_name(bold_search_df: pd.DataFrame) -> pd.Series:
+    """Which rows of the search come from another name of their species than
+    its own (all False in a search saved before BOLD names were kept)."""
+    if "bold_matched_by" not in bold_search_df.columns:
+        return pd.Series(False, index=bold_search_df.index)
+    matched_by = bold_search_df["bold_matched_by"]
+    return matched_by.notna() & (matched_by != SPECIES_NAME)
+
+
+def names_in_bold(bold_search_df: pd.DataFrame) -> pd.Series:
+    """bold_scientificName of the rows from another name of their species
+    (see under_other_name), empty (NaN) elsewhere."""
+    other = under_other_name(bold_search_df)
+    if not other.any():
+        return pd.Series(pd.NA, index=bold_search_df.index, dtype=object)
+    return bold_search_df["bold_scientificName"].where(other)
+
+
+def _found_as(rows: pd.DataFrame) -> str:
+    """The note "(as <name>, <source> name)" when the rows of one species come
+    from another of its names, empty otherwise."""
+    rows = rows[under_other_name(rows)]
+    names = ", ".join(rows["bold_scientificName"].dropna().unique())
+    if not names:
+        return ""
+    return f" (as {names}, {rows['bold_matched_by'].iloc[0].upper()} name)"
+
+
 # Columns only the search needs: bold_outcome is always SEQUENCES on a
-# sequence row, and bold_scientificName (the name BOLD files a record under,
-# so far always the queried name) is for looking at the search itself.
-SEARCH_ONLY_COLUMNS = ["bold_scientificName", "bold_outcome"]
+# sequence row, and bold_scientificName and bold_matched_by (the name BOLD
+# files a record under, and which name found it) are for looking at the
+# search itself.
+SEARCH_ONLY_COLUMNS = ["bold_scientificName", "bold_matched_by", "bold_outcome"]
 
 
 def with_sequences(bold_search_df: pd.DataFrame) -> pd.DataFrame:
@@ -354,6 +443,7 @@ def outcomes_by_species(bold_search_df: pd.DataFrame) -> pd.Series:
 
 def get_records_from_species_list(
     species_list: list[str],
+    other_names: dict[str, list[tuple[str, str]]] | None = None,
     rate_limit_delay: float = 10.0,
     session: requests.Session | None = None,
     keep_only_COI5P: bool = True,
@@ -368,6 +458,9 @@ def get_records_from_species_list(
 
     Args:
         species_list: Species names to query.
+        other_names: Other names of each species, as (name, source), tried
+            in that order when the species name gives no usable sequence
+            (see _search_species).
         rate_limit_delay: Seconds to wait between queries (rate limiting).
         session: Optional requests session for connection reuse.
         keep_only_COI5P: If True, only retain COI-5P marker records.
@@ -391,9 +484,16 @@ def get_records_from_species_list(
     for i, species in enumerate(species_list):
         try:
             with log.query(species):
-                result = query_species(species, session=active_session)
+                rows = _search_species(
+                    species,
+                    (other_names or {}).get(species, []),
+                    active_session,
+                    keep_only_COI5P,
+                    keep_ncbi,
+                    rate_limit_delay,
+                )
 
-            if result is None:
+            if rows is None:
                 # None means the query errored (network/403/parse), as opposed
                 # to a genuine empty result. Only errors count as failures so
                 # the cache layer retries them instead of caching them as
@@ -401,14 +501,20 @@ def get_records_from_species_list(
                 failed_species.append(species)
                 log.item(species, "failed", notable=True)  # its error is logged above
             else:
-                rows = _species_rows(species, *result, keep_only_COI5P, keep_ncbi)
                 all_records.append(rows)
                 outcome = rows["bold_outcome"].iloc[0]
+                found_as = _found_as(rows)
                 if outcome == SEQUENCES:
                     n = len(rows)
-                    log.item(species, f"{n} BOLD {pluralize(n, 'sequence')}")
+                    log.item(
+                        species,
+                        f"{n} BOLD {pluralize(n, 'sequence')}{found_as}",
+                        notable=bool(found_as),
+                    )
                 else:
-                    log.item(species, outcome, notable=outcome == NOT_IN_BOLD)
+                    log.item(
+                        species, f"{outcome}{found_as}", notable=outcome == NOT_IN_BOLD
+                    )
 
         except Exception as e:
             log.failed(species, e)
@@ -454,10 +560,28 @@ def _log_outcomes(log: StepLog, bold_search_df: pd.DataFrame, failed: list[str])
         f"{len(sequences)} BOLD {pluralize(len(sequences), 'sequence')} for "
         f"{n_species} {pluralize(n_species, 'species')}"
     )
+    found_as = _found_under_other_names(bold_search_df)
+    if found_as:
+        summary += f" ({len(found_as)} under another name)"
     outcomes = outcomes_by_species(bold_search_df)
     counts = outcome_counts(outcomes, "species")
     log.done(f"{summary}, {counts}" if counts else summary, failed, "species")
+    if found_as:
+        logger.info(f"BOLD search, found under another name: {name_list(found_as)}")
     for outcome in OUTCOMES_WITHOUT_SEQUENCES:
         names = sorted(outcomes.index[outcomes == outcome])
         if names:
             logger.info(f"BOLD search, {outcome}: {name_list(names)}")
+
+
+def _found_under_other_names(bold_search_df: pd.DataFrame) -> list[str]:
+    """Each species whose sequences come from another of its names, with the
+    note of _found_as."""
+    sequences = bold_search_df[
+        under_other_name(bold_search_df) & (bold_search_df["bold_outcome"] == SEQUENCES)
+    ]
+    found = (
+        (species, _found_as(rows))
+        for species, rows in sequences.groupby("scientificName", sort=True)
+    )
+    return [f"{species}{note}" for species, note in found if note]

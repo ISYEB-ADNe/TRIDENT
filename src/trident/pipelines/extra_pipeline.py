@@ -2,7 +2,8 @@
 
 Step order:
     1. prepare_bold_input(geo_df, ncbi_search_df)       → list[str]
-    2. run_bold_search(species_list, ...)               → (bold_search_df, params)
+       prepare_bold_other_names(species_list, name_table) → dict
+    2. run_bold_search(species_list, other_names, ...)  → (bold_search_df, params)
     3. run_bold_filter(bold_search_df, ...)             → (bold_filter_df, params)
     4. run_bold_merge(bold_filter_df, geo_df, ...)      → (bold_merge_df, params)
     5. finalize_extra_results(bold_merge_df, ...)       → (extra_df, params)
@@ -29,7 +30,7 @@ from trident.core.database import save_to_db, PartialCache, FullCache, CustomCac
 from trident.core.sequence_selection import select_longest_sequences
 
 from trident.clients.bold import get_records_from_species_list, with_sequences
-from trident.pipelines.names import found_by_blast
+from trident.pipelines.names import found_by_blast, other_names as names_besides
 
 
 ### DATA PREPARATION ###
@@ -92,6 +93,21 @@ def prepare_bold_input(
     return species_list, n_excluded
 
 
+# Sources of the other names a species is searched under in BOLD, in the
+# order they are tried: BOLD's taxonomy often follows NCBI or Catalogue of
+# Life (GBIF) where they differ from WoRMS (Larus pipixcan is Leucophaeus
+# pipixcan in BOLD).
+BOLD_OTHER_NAME_SOURCES = ["ncbi", "gbif"]
+
+
+def prepare_bold_other_names(
+    species_list: list[str], name_table: pd.DataFrame | None
+) -> dict[str, list[tuple[str, str]]]:
+    """Other names of each species to query in BOLD when its own name gives
+    no usable sequence (see other_names)."""
+    return names_besides(species_list, name_table, BOLD_OTHER_NAME_SOURCES)
+
+
 ### BOLD SEARCH ###
 
 
@@ -110,6 +126,7 @@ def prepare_bold_input(
 )
 def run_bold_search(
     species_list: list[str],
+    other_names: dict[str, list[tuple[str, str]]] | None = None,
     keep_only_COI5P: bool = True,
     keep_ncbi: bool = False,
     progress_handler: dict | object | None = None,
@@ -120,6 +137,9 @@ def run_bold_search(
 
     Args:
         species_list: Species names to query.
+        other_names: See prepare_bold_other_names. Not part of the cache
+            key: a species cached without a sequence is queried under its
+            other names by "Retry empty results".
         keep_only_COI5P: If True, only retain COI-5P marker records.
         keep_ncbi: If True, retain records also found in NCBI.
         progress_handler: Optional progress tracker (dict or tqdm-like).
@@ -134,6 +154,7 @@ def run_bold_search(
     """
     bold_search_df, failed_species = get_records_from_species_list(
         species_list,
+        other_names,
         keep_only_COI5P=keep_only_COI5P,
         keep_ncbi=keep_ncbi,
         progress_handler=progress_handler,

@@ -13,6 +13,7 @@ from .mol_pipeline import (
 from .names import (
     build_name_table,
     gbif_name_rows,
+    bold_name_rows,
     replace_source_rows,
     resolved_names,
     species_of,
@@ -50,6 +51,7 @@ from .geo_pipeline import (
 from .extra_pipeline import (
     needs_proxy,
     prepare_bold_input,
+    prepare_bold_other_names,
     run_bold_search,
     run_bold_filter,
     run_bold_merge,
@@ -96,6 +98,7 @@ __all__ = [
     "build_mol_sequence_report",
     "build_name_table",
     "gbif_name_rows",
+    "bold_name_rows",
     "replace_source_rows",
     "resolved_names",
     "species_of",
@@ -124,6 +127,7 @@ __all__ = [
     "classify_gbif_extents",
     "needs_proxy",
     "prepare_bold_input",
+    "prepare_bold_other_names",
     "run_bold_search",
     "run_bold_filter",
     "run_bold_merge",

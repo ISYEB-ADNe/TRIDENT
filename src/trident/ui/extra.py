@@ -15,6 +15,7 @@ from trident.clients.bold import (
     bold_search_url,
     outcome_counts,
     outcomes_by_species,
+    names_in_bold,
     with_sequences,
 )
 import trident.pipelines as pipe
@@ -73,6 +74,7 @@ def bold_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     bold_search_df, bold_search_params = run_with_progress(
         logsink.wrap(pipe.run_bold_search),
         species_list,
+        pipe.prepare_bold_other_names(species_list, st.session_state.name_table),
         keep_only_COI5P=params["bold_keep_only_COI5P"],
         keep_ncbi=params["bold_keep_ncbi"],
         db_path=st.session_state.db_path,
@@ -89,6 +91,9 @@ def bold_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     st.session_state.bold_search_df = bold_search_df
     st.session_state.bold_search_params = bold_search_params
     st.session_state.bold_search_failed = failed_items(bold_search_df)
+    st.session_state.name_table = pipe.replace_source_rows(
+        st.session_state.name_table, pipe.bold_name_rows(bold_search_df), "bold"
+    )
 
     # Cleanup
     logsink.close()
@@ -172,7 +177,7 @@ def bold_search_workflow():
                 st.session_state.bold_search_failed, "species", "species", source="BOLD"
             )
             show_species_without_sequences_banner()
-        sequences = with_sequences(st.session_state.bold_search_df)
+        sequences = _with_bold_names(st.session_state.bold_search_df)
         with st.expander(
             f"Inspect full BOLD search results ({len(sequences):,} sequences)",
             expanded=False,
@@ -184,6 +189,7 @@ def bold_search_workflow():
                 hide_index=True,
                 column_order=[
                     "scientificName",
+                    "bold_scientificName",
                     "seq_url",
                     "genus",
                     "specificEpithet",
@@ -197,6 +203,7 @@ def bold_search_workflow():
                 column_config={
                     "seq_id": None,
                     "scientificName": COL["scientificName"],
+                    "bold_scientificName": COL["bold_scientificName"],
                     "seq_url": COL["bold_seq_url"],
                     "genus": COL["genus"],
                     "specificEpithet": COL["specificEpithet"],
@@ -219,6 +226,25 @@ REASON_NOT_SAVED = "no usable sequence (reason not saved)"
 REASONS = [*OUTCOMES_WITHOUT_SEQUENCES, REASON_NOT_SAVED, QUERY_FAILED, SEQUENCES]
 
 
+def _with_bold_names(bold_search_df: pd.DataFrame) -> pd.DataFrame:
+    """with_sequences, with the name in BOLD of the rows found under another
+    name (see names_in_bold)."""
+    sequences = with_sequences(bold_search_df)
+    if sequences.empty:
+        return sequences
+    return sequences.assign(bold_scientificName=names_in_bold(bold_search_df))
+
+
+def _bold_name_by_species(bold_search_df: pd.DataFrame) -> pd.Series:
+    """names_in_bold of each queried species, indexed by scientificName."""
+    if "scientificName" not in bold_search_df.columns:
+        return pd.Series(dtype=object)
+    names = pd.Series(
+        names_in_bold(bold_search_df).to_numpy(), index=bold_search_df["scientificName"]
+    )
+    return names.groupby(level=0).first()
+
+
 def _species_outcomes() -> pd.Series:
     """bold_outcome of each of this run's queried species, QUERY_FAILED for a
     failed query."""
@@ -235,16 +261,26 @@ def show_why_no_sequence(names: list[str]) -> None:
     """Expander listing *names* (species without a BOLD sequence) with the
     reason and a link to each species' BOLD search."""
     outcomes = _species_outcomes().reindex(names)
+    bold_names = _bold_name_by_species(st.session_state.bold_search_df).reindex(
+        outcomes.index
+    )
     table = pd.DataFrame(
         {
             "scientificName": outcomes.index,
+            "bold_scientificName": bold_names.to_numpy(),
             "bold_outcome": pd.Categorical(outcomes.to_numpy(), categories=REASONS),
-            "bold_url": [bold_search_url(n) for n in outcomes.index],
+            "bold_url": [
+                bold_search_url(b if pd.notna(b) else n)
+                for n, b in zip(outcomes.index, bold_names)
+            ],
         }
     ).sort_values(["bold_outcome", "scientificName"])
     with st.expander(f"⚠️ {len(names)} species without a BOLD sequence"):
         st.caption(
-            "Not in BOLD: BOLD does not know the name. Only GenBank copies: "
+            "Not in BOLD: BOLD does not know the name searched. When the "
+            "species name gives no usable sequence, its NCBI and GBIF names "
+            "are searched too; Name in BOLD is the one BOLD gave this result "
+            "for. Only GenBank copies: "
             "the COI-5P records BOLD has for the species are copies of "
             "GenBank sequences, already in NCBI; as proxies they would only "
             "confirm themselves in HYPO, so they are left out."
@@ -255,6 +291,7 @@ def show_why_no_sequence(names: list[str]) -> None:
             width="stretch",
             column_config={
                 "scientificName": COL["scientificName"],
+                "bold_scientificName": COL["bold_scientificName"],
                 "bold_outcome": "Why",
                 "bold_url": COL["bold_seq_url"],
             },

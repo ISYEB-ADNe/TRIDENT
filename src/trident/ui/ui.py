@@ -146,6 +146,11 @@ COL = {
         "Taxon DB", help="Source taxonomy database for the taxon ID."
     ),
     "bold_seq_url": st.column_config.LinkColumn("BOLD Link", display_text="🔗 View"),
+    "bold_scientificName": st.column_config.TextColumn(
+        "Name in BOLD",
+        help="The name BOLD files the records under, when the species was "
+        "found under another of its names (NCBI or GBIF).",
+    ),
     "bold_dna_sequence": st.column_config.TextColumn(
         "BOLD DNA Sequence", width="large"
     ),

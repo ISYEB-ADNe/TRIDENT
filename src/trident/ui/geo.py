@@ -364,8 +364,11 @@ def gbif_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     st.session_state.gbif_search_df = gbif_merge_df
     st.session_state.gbif_search_params = gbif_merge_params
     st.session_state.gbif_search_failed = gbif_failed
+    # The BOLD names belong to the EXTRA search this run resets.
     st.session_state.name_table = pipe.replace_source_rows(
-        st.session_state.name_table, gbif_names, "gbif"
+        pipe.replace_source_rows(st.session_state.name_table, gbif_names, "gbif"),
+        gbif_names.iloc[:0],
+        "bold",
     )
 
     logsink.flush_to_ui()
