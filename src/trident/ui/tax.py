@@ -300,8 +300,9 @@ def render_worms_metrics():
         "Not found in WoRMS",
         len(not_found),
         help=(
-            "MOL names that match no WoRMS record: taxa outside WoRMS, or open "
-            "nomenclature such as 'Genus sp.'. 'Genus in TAX' in the list tells "
+            "MOL names that match no WoRMS record (taxa outside WoRMS, or open "
+            "nomenclature such as 'Genus sp.'), or whose records give no single "
+            "accepted species. 'Genus in TAX' in the list tells "
             "whether their genus was expanded anyway. Names whose lookup failed "
             "are not counted: they are retried on the next run."
         ),
@@ -341,7 +342,7 @@ def render_worms_metrics():
         n_not_found = len(not_found)
         with st.expander(
             f"View the {n_not_found:,} MOL {pluralize(n_not_found, 'name')} "
-            "not found in WoRMS",
+            "WoRMS did not resolve",
             expanded=False,
         ):
             st.dataframe(
@@ -350,6 +351,14 @@ def render_worms_metrics():
                 hide_index=True,
                 column_config={
                     "scientificName": "MOL name",
+                    "note": st.column_config.TextColumn(
+                        "Why",
+                        help=(
+                            "Empty: WoRMS has no record of the name. Otherwise "
+                            "WoRMS has records but none gives one accepted "
+                            "species, so the name is kept as NCBI gives it."
+                        ),
+                    ),
                     "genusInTax": st.column_config.CheckboxColumn(
                         "Genus in TAX",
                         help=(

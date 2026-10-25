@@ -115,8 +115,9 @@ def run_name_resolution(
     """Resolve MOL (NCBI) names to their WoRMS accepted name + AphiaID (R3).
 
     One AphiaRecordsByName lookup per unique name (cached per item, so only new
-    names cost a call). A name WoRMS does not know is looked up a second time
-    through its NCBI taxid, when given. Names found neither way are returned
+    names cost a call). A name WoRMS does not know, or whose records give no
+    single accepted species, is looked up a second time through its NCBI
+    taxid, when given. Names found neither way are returned
     unchanged (acceptedName == input, no AphiaID). Only genuine network/HTTP
     errors reach failure_sink; a 404 is a valid not-found, not a failure.
 
@@ -131,7 +132,8 @@ def run_name_resolution(
     Returns:
         DataFrame with columns scientificName, acceptedName, acceptedNameUsageID,
         is_synonym, matchedBy ('name', 'ncbi_taxid', or empty when not found),
-        one row per input name.
+        note (why records of a name not found did not resolve it), one row
+        per input name.
     """
     session = create_session(user_agent=user_agent)
     ncbi_taxids = ncbi_taxids or {}
@@ -153,7 +155,8 @@ def run_name_resolution(
                 notify_progress(progress_handler)
             if not resolved["matched_by"]:
                 link = worms_search_url(name)
-                log.item(name, f"not in WoRMS (check: {link})", notable=True)
+                why = resolved["note"] or "not in WoRMS"
+                log.item(name, f"{why} (check: {link})", notable=True)
             elif resolved["is_synonym"]:
                 log.item(name, f"synonym of {resolved['accepted_name']}")
             else:
@@ -165,6 +168,7 @@ def run_name_resolution(
                     "acceptedNameUsageID": resolved["aphia_id"],
                     "is_synonym": resolved["is_synonym"],
                     "matchedBy": resolved["matched_by"],
+                    "note": resolved["note"],
                 }
             )
     finally:
@@ -189,6 +193,7 @@ def run_name_resolution(
             "acceptedNameUsageID",
             "is_synonym",
             "matchedBy",
+            "note",
         ],
     )
 
@@ -199,7 +204,7 @@ class NameResolutionSummary(NamedTuple):
     n_names: int  # distinct MOL (NCBI) names
     n_species: int  # distinct WoRMS accepted names they resolve to
     renamed: pd.DataFrame  # scientificName, acceptedName, matchedBy
-    not_found: pd.DataFrame  # scientificName, genusInTax: names with no record
+    not_found: pd.DataFrame  # scientificName, note, genusInTax: names unresolved
 
 
 def summarize_name_resolution(
@@ -224,8 +229,10 @@ def summarize_name_resolution(
 
     Returns:
         A NameResolutionSummary. renamed has one row per MOL name whose WoRMS
-        accepted name differs; not_found one row per MOL name with no WoRMS
-        record, sorted, with genusInTax True when its genus is in the TAX list.
+        accepted name differs; not_found one row per MOL name WoRMS did not
+        resolve, sorted, with the note saying why when WoRMS has records of it
+        (see resolve_accepted_name), and genusInTax True when its genus is in
+        the TAX list.
     """
     raw = mol_df["scientificName"].dropna()
     table = resolved_names(name_table).drop_duplicates("name_key")
@@ -250,7 +257,7 @@ def summarize_name_resolution(
         else set()
     )
     not_found = (
-        table.loc[table["aphia_id"].isna(), ["name"]]
+        table.loc[table["aphia_id"].isna(), ["name", "note"]]
         .rename(columns={"name": "scientificName"})
         .assign(
             genusInTax=lambda d: (

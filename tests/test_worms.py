@@ -74,7 +74,7 @@ def test_get_aphia_record_returns_none_on_404():
         def get(self, *a, **k):
             return Resp()
 
-    assert worms.get_aphia_record("Ammodytes sp.", session=Sess()) is None
+    assert worms.get_aphia_records("Ammodytes sp.", session=Sess()) == []
 
 
 def test_answer_that_is_not_json_is_an_error_not_a_not_found():
@@ -94,12 +94,14 @@ def test_answer_that_is_not_json_is_an_error_not_a_not_found():
 def test_resolve_accepted_passthrough(monkeypatch):
     monkeypatch.setattr(
         worms,
-        "get_aphia_record",
-        lambda name, session=None: {
-            "valid_name": "Gadus morhua",
-            "valid_AphiaID": 126436,
-            "status": "accepted",
-        },
+        "get_aphia_records",
+        lambda name, session=None: [
+            {
+                "valid_name": "Gadus morhua",
+                "valid_AphiaID": 126436,
+                "status": "accepted",
+            }
+        ],
     )
     r = worms.resolve_accepted_name("Gadus morhua")
     assert r["accepted_name"] == "Gadus morhua"
@@ -110,12 +112,14 @@ def test_resolve_accepted_passthrough(monkeypatch):
 def test_resolve_maps_synonym(monkeypatch):
     monkeypatch.setattr(
         worms,
-        "get_aphia_record",
-        lambda name, session=None: {
-            "valid_name": "Gadus macrocephalus",
-            "valid_AphiaID": 126437,
-            "status": "unaccepted",
-        },
+        "get_aphia_records",
+        lambda name, session=None: [
+            {
+                "valid_name": "Gadus macrocephalus",
+                "valid_AphiaID": 126437,
+                "status": "unaccepted",
+            }
+        ],
     )
     r = worms.resolve_accepted_name("Gadus ogac")
     assert r["accepted_name"] == "Gadus macrocephalus"
@@ -124,7 +128,7 @@ def test_resolve_maps_synonym(monkeypatch):
 
 
 def test_resolve_not_found_keeps_input(monkeypatch):
-    monkeypatch.setattr(worms, "get_aphia_record", lambda name, session=None: None)
+    monkeypatch.setattr(worms, "get_aphia_records", lambda name, session=None: [])
     r = worms.resolve_accepted_name("Ammodytes sp.")
     assert r["accepted_name"] == "Ammodytes sp."
     assert r["aphia_id"] is None
@@ -265,6 +269,58 @@ def test_failed_page_fails_the_genus_instead_of_a_partial_list(monkeypatch):
     assert df.empty
 
 
+def test_name_whose_records_lead_to_several_species_stays_as_ncbi_names_it(
+    monkeypatch,
+):
+    """WoRMS's records of Delphinus capensis (real answer, Oct 2026): none is
+    accepted, two synonyms of different species and a nomen dubium without an
+    accepted name. The name is not resolved through the first record, and the
+    reason is kept."""
+    records = [
+        {
+            "AphiaID": 383816,
+            "scientificname": "Delphinus capensis",
+            "authority": "Rapp, 1837",
+            "status": "nomen dubium",
+            "rank": "Species",
+            "valid_AphiaID": None,
+            "valid_name": None,
+        },
+        {
+            "AphiaID": 383815,
+            "scientificname": "Delphinus capensis",
+            "authority": "G. Cuvier, 1829",
+            "status": "unaccepted",
+            "rank": "Species",
+            "valid_AphiaID": 254978,
+            "valid_name": "Cephalorhynchus heavisidii",
+        },
+        {
+            "AphiaID": 137093,
+            "scientificname": "Delphinus capensis",
+            "authority": "Gray, 1828",
+            "status": "unaccepted",
+            "rank": "Species",
+            "valid_AphiaID": 137094,
+            "valid_name": "Delphinus delphis",
+        },
+    ]
+    monkeypatch.setattr(worms, "get_aphia_records", lambda name, session=None: records)
+    monkeypatch.setattr(worms, "get_aphia_record_by_ncbi_taxid", lambda *a, **k: None)
+    r = worms.resolve_accepted_name("Delphinus capensis", ncbi_taxid=103584)
+    assert r["accepted_name"] == "Delphinus capensis"
+    assert r["aphia_id"] is None and r["matched_by"] is None
+    assert r["note"] == (
+        "ambiguous in WoRMS: synonym of Cephalorhynchus heavisidii or synonym of "
+        "Delphinus delphis"
+    )
+
+    # Without the Cuvier record, the synonyms lead to one species.
+    del records[1]
+    r = worms.resolve_accepted_name("Delphinus capensis")
+    assert r["accepted_name"] == "Delphinus delphis" and r["aphia_id"] == 137094
+
+
 # --- NCBI taxid as a complement to the name ---
 
 
@@ -276,7 +332,11 @@ def _lookups(monkeypatch, by_name, by_taxid):
         calls.append(taxid)
         return by_taxid
 
-    monkeypatch.setattr(worms, "get_aphia_record", lambda name, session=None: by_name)
+    monkeypatch.setattr(
+        worms,
+        "get_aphia_records",
+        lambda name, session=None: [by_name] if by_name else [],
+    )
     monkeypatch.setattr(worms, "get_aphia_record_by_ncbi_taxid", taxid_lookup)
     return calls
 

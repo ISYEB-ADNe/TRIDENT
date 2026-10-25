@@ -295,7 +295,8 @@ def test_not_found_names_exclude_failed_lookups_and_tell_their_genus():
     name not found whose genus is in TAX lost no candidates."""
     tax = pd.DataFrame({"genus": ["Liparis"]})
     summary = summarize_name_resolution(*_resolved_mol(), tax_df=tax)
-    assert summary.not_found.values.tolist() == [["Liparis sp.", True]]
+    not_found = summary.not_found[["scientificName", "genusInTax"]]
+    assert not_found.values.tolist() == [["Liparis sp.", True]]
 
 
 def test_hits_without_a_name_are_neither_resolved_nor_expanded():

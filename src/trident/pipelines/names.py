@@ -71,9 +71,15 @@ def build_name_table(
     """
     if resolution_df is None or resolution_df.empty:
         return pd.DataFrame(columns=NAME_TABLE_COLUMNS)
-    # Rows cached before matchedBy existed lack that column.
+    # Rows cached before matchedBy or note existed lack those columns.
     resolved = resolution_df.reindex(
-        columns=["scientificName", "acceptedName", "acceptedNameUsageID", "matchedBy"]
+        columns=[
+            "scientificName",
+            "acceptedName",
+            "acceptedNameUsageID",
+            "matchedBy",
+            "note",
+        ]
     )
     names = resolved["scientificName"]
     species = resolved["acceptedName"].fillna(names)
@@ -87,7 +93,7 @@ def build_name_table(
             "source": "ncbi",
             "source_id": as_ids(names.map(ncbi_taxids or {})),
             "matched_by": resolved["matchedBy"].astype("string"),
-            "note": pd.Series(pd.NA, index=resolved.index, dtype="string"),
+            "note": resolved["note"].astype("string"),
             "name_key": names.map(normalize_name),
             "species_key": species.map(normalize_name),
         }

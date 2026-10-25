@@ -125,17 +125,6 @@ def pick_record(
     return candidates[0] if candidates else None
 
 
-def get_aphia_record(
-    taxon_name: str,
-    session: requests.Session | None = None,
-) -> dict | None:
-    """Retrieve the WoRMS record of a taxon name (see pick_record), or None."""
-    record = pick_record(get_aphia_records(taxon_name, session=session))
-    if record:
-        logger.debug(f"Found AphiaID {record['AphiaID']} for taxon '{taxon_name}'")
-    return record
-
-
 def get_genus_aphia_ids(
     genus: str,
     session: requests.Session | None = None,
@@ -209,11 +198,11 @@ def resolve_accepted_name(
     MOL (NCBI) names before cross-source matching so synonyms are not treated
     as distinct species.
 
-    The name is looked up first. Only when WoRMS has no record for it, the
-    NCBI taxid (if given) is looked up through the WoRMS link to NCBI, which
-    finds names WoRMS knows under another genus (e.g. 'Microcarbo niger' ->
-    'Phalacrocorax niger'). A taxid that leads to a subspecies resolves to its
-    species.
+    The name is looked up first. Only when WoRMS has no record for it, or
+    none that resolves it (see _record_of_name), the NCBI taxid (if given) is
+    looked up through the WoRMS link to NCBI, which finds names WoRMS knows
+    under another genus (e.g. 'Microcarbo niger' -> 'Phalacrocorax niger'). A
+    taxid that leads to a subspecies resolves to its species.
 
     Args:
         taxon_name: The name to resolve (typically an NCBI scientific name).
@@ -231,6 +220,7 @@ def resolve_accepted_name(
                 or None when not found.
             is_synonym: True when accepted_name differs from the input.
             matched_by: 'name', 'ncbi_taxid', or None when not found.
+            note: why WoRMS records of the name did not resolve it, or None.
 
     Raises:
         Network/HTTP errors (other than 404, which means "not found") propagate
@@ -243,21 +233,22 @@ def resolve_accepted_name(
         "status": None,
         "is_synonym": False,
         "matched_by": None,
+        "note": None,
     }
     matched_by = "name"
-    record = get_aphia_record(taxon_name, session=session)
+    record, note = _record_of_name(get_aphia_records(taxon_name, session=session))
     if record is None and ncbi_taxid is not None and not pd.isna(ncbi_taxid):
         record = get_aphia_record_by_ncbi_taxid(ncbi_taxid, session=session)
         matched_by = "ncbi_taxid"
     if record is None:
-        return not_found
+        return {**not_found, "note": note}
 
     accepted = record.get("valid_name") or record.get("scientificname") or taxon_name
     aphia_id = record.get("valid_AphiaID") or record.get("AphiaID")
     if matched_by == "ncbi_taxid" and record.get("rank") in INFRASPECIFIC_RANKS:
         species = _species_of(record)
         if species is None:
-            return not_found
+            return {**not_found, "note": note}
         accepted, aphia_id = species
     return {
         "input": taxon_name,
@@ -266,7 +257,38 @@ def resolve_accepted_name(
         "status": record.get("status"),
         "is_synonym": normalize_name(accepted) != normalize_name(taxon_name),
         "matched_by": matched_by,
+        "note": None,
     }
+
+
+def _record_of_name(records: list[dict]) -> tuple[dict | None, str | None]:
+    """The record a name resolves through (see pick_record), or None with the
+    reason when WoRMS gives no clear answer.
+
+    Without an accepted record, the name resolves only when its records lead
+    to one accepted species: Delphinus capensis is a synonym of Delphinus
+    delphis (Gray, 1828) and of Cephalorhynchus heavisidii (G. Cuvier, 1829),
+    and a nomen dubium (Rapp, 1837), so it is left as NCBI names it rather
+    than resolved through the first record.
+    """
+    record = pick_record(records)
+    if record is None or record.get("status") == "accepted":
+        return record, None
+    targets = [r for r in records if r.get("valid_name") and r.get("valid_AphiaID")]
+    if len({r["valid_AphiaID"] for r in targets}) == 1:
+        return targets[0], None
+    if targets:
+        # A record can point to itself (e.g. a taxon inquirendum).
+        options = sorted(
+            {
+                f"the name itself ({r.get('status')})"
+                if r["valid_AphiaID"] == r.get("AphiaID")
+                else f"synonym of {r['valid_name']}"
+                for r in targets
+            }
+        )
+        return None, f"ambiguous in WoRMS: {' or '.join(options)}"
+    return None, f"no accepted name in WoRMS ({record.get('status')})"
 
 
 @with_optional_session(retries=5, backoff_factor=0.5)
