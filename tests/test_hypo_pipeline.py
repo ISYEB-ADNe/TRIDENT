@@ -19,9 +19,10 @@ from Bio.SeqRecord import SeqRecord
 
 import trident.pipelines.hypo_pipeline as hypo_pipeline
 from trident.core.database import view_cached_runs
-from trident.pipelines.names import build_name_table
+from trident.pipelines.names import build_name_table, gbif_name_rows
 from trident.pipelines.hypo_pipeline import (
     count_hypo_searches,
+    hypo_check_queries,
     hypo_queries,
     prepare_hypo_input,
     run_hypo_check,
@@ -376,6 +377,45 @@ def test_hypo_search_batches_motus_sharing_a_query(tmp_path, monkeypatch):
 
 
 # --- run_hypo_check ---
+
+
+def test_hypo_check_searches_every_name_of_the_species(tmp_path, monkeypatch):
+    """A species is checked under its own name and the names other sources
+    give it: NCBI finds nothing for Phalacrocorax pygmaeus, which it files as
+    Microcarbo pygmaeus, GBIF's name. A check made before the species had
+    another name is made again."""
+    queries = []
+
+    def blast(batch, entrez_query=None, **kwargs):
+        queries.append(entrez_query)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(hypo_pipeline, "submit_blast_batch", blast)
+    species = "Phalacrocorax pygmaeus"
+    filter_df = pd.DataFrame(
+        {"seq_id": ["t1"], "scientificName": [species], "dna_sequence": ["ACGT"]}
+    )
+    name_table = gbif_name_rows(
+        pd.DataFrame(
+            {
+                "scientificName": [species],
+                "gbif_scientificName": ["Microcarbo pygmaeus"],
+                "taxonID": ["9LDJ8"],
+                "gbif_matched_by": ["WoRMS ID"],
+                "aphia_id": [148763],
+            }
+        )
+    )
+    db_path = str(tmp_path / "hypo.db")
+
+    run_hypo_check(filter_df, db_path=db_path)
+    check_queries = hypo_check_queries([species], name_table)
+    run_hypo_check(filter_df, check_queries=check_queries, db_path=db_path)
+
+    assert queries == [
+        '("Phalacrocorax pygmaeus"[orgn])',
+        '("Phalacrocorax pygmaeus"[orgn] OR "Microcarbo pygmaeus"[orgn])',
+    ]
 
 
 def test_hypo_check_failed_species_does_not_evict_its_siblings(tmp_path, monkeypatch):

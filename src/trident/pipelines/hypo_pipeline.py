@@ -10,7 +10,8 @@ Steps:
     2. run_hypo_search          NCBI BLAST on proxy sequences            [CustomCache]
     3. run_hypo_merge           map proxy IDs back to targets (EXTRA)     [FullCache]
     4. run_hypo_filter          threshold on identity / query cover       [FullCache]
-    5. run_hypo_check           per-species NCBI BLAST verification       [CustomCache]
+    5. hypo_check_queries       Entrez query of each hypothetical species
+       run_hypo_check           per-species NCBI BLAST verification       [CustomCache]
     6. finalize_hypo_results    label, merge check results, final df      [FullCache]
 """
 
@@ -55,10 +56,15 @@ from trident.clients.ncbi import (
     process_blast_results,
     submit_blast_batch,
 )
-from trident.pipelines.names import ncbi_names
+from trident.pipelines.names import ncbi_names, other_names
 
 
 ### DATA PREPARATION ###
+
+
+def orgn_query(names: list[str]) -> str:
+    """Entrez query of the records of any of *names*."""
+    return "(" + " OR ".join(f'"{n}"[orgn]' for n in names) + ")"
 
 
 def hypo_queries(tax_df, mol_df, name_table) -> pd.DataFrame:
@@ -98,9 +104,7 @@ def hypo_queries(tax_df, mol_df, name_table) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "seq_id": species.index,
-            "entrez_query": [
-                "(" + " OR ".join(f'"{n}"[orgn]' for n in s) + ")" for s in species
-            ],
+            "entrez_query": [orgn_query(s) for s in species],
             "mol_species": ["; ".join(s) for s in species],
         }
     )[columns]
@@ -540,9 +544,41 @@ HYPO_CHECK_COLUMNS = [
 ]
 
 
+# Sources of the other names a hypothetical species is checked under. NCBI
+# knows many old names as synonyms, but not all: it finds nothing for
+# Phalacrocorax pygmaeus, which it files as Microcarbo pygmaeus.
+HYPO_CHECK_NAME_SOURCES = ["ncbi", "bold", "gbif"]
+
+
+def hypo_check_queries(species: list[str], name_table) -> dict[str, str]:
+    """Entrez organism query of each hypothetical species: its own name and
+    the other names the name table gives it (see other_names, which leaves
+    out a name that stands for another species).
+
+    Args:
+        species: Names of the hypothetical species (scientificName of the
+            HYPO filter).
+        name_table: See build_name_table.
+
+    Returns:
+        {species: entrez_query}
+    """
+    others = other_names(list(species), name_table, HYPO_CHECK_NAME_SOURCES)
+    return {
+        name: orgn_query([name, *(n for n, _ in others.get(name, []))])
+        for name in species
+    }
+
+
+def _check_query(name: str, check_queries: dict[str, str] | None) -> str:
+    """Entrez query a species is checked under (see hypo_check_queries)."""
+    return (check_queries or {}).get(name) or orgn_query([name])
+
+
 def _hypo_check_params(
     hypo_filter_df: pd.DataFrame,
     ev_exponent: int,
+    check_queries: dict[str, str] | None = None,
     **kwargs,
 ):
     """Prepare parameters dict for HYPO check step."""
@@ -550,10 +586,13 @@ def _hypo_check_params(
     params = {
         "hypo_check_ev_exponent": ev_exponent,
     }
+    # The query is part of each item, so a species checks again when it gets
+    # another name.
     inputs = [
         {
             "seq_id": row["seq_id"],
             "scientificName": row["scientificName"],
+            "entrez_query": _check_query(row["scientificName"], check_queries),
             **params,
         }
         for _, row in sequences_df.iterrows()
@@ -588,6 +627,7 @@ def _hypo_check_rebuild(input_selected, original_inputs):
 @preserve_sequence_order("seq_id", "hypo_filter_df")
 def run_hypo_check(
     hypo_filter_df: pd.DataFrame,
+    check_queries: dict[str, str] | None = None,
     ev_exponent: int = HYPO_CHECK_EV_EXPONENT,
     num_threads: int = 4,
     give_up_minutes: float = BLAST_GIVE_UP / 60,
@@ -596,12 +636,15 @@ def run_hypo_check(
 ) -> pd.DataFrame:
     """Per-species NCBI BLAST verification of HYPO candidates.
 
-    BLASTs each target sequence against NCBI filtered to that species
-    to confirm the species has the target marker in GenBank. The checks are
-    independent jobs, run as one parallel BLAST run (``run_blast_pool``).
+    BLASTs each target sequence against NCBI filtered to that species, under
+    all its names, to confirm the species has the target marker in GenBank.
+    The checks are independent jobs, run as one parallel BLAST run
+    (``run_blast_pool``).
 
     Args:
         hypo_filter_df: Filtered DataFrame from run_hypo_filter.
+        check_queries: Entrez query of each species (see hypo_check_queries);
+            a species without one is checked under its own name only.
         ev_exponent: Negative exponent for E-value threshold.
         num_threads: Checks run at once at normal pace, plus
             BLAST_SLOW_THREADS while jobs are slow (NCBI's request spacing
@@ -630,7 +673,7 @@ def run_hypo_check(
         try:
             blast_res = submit_blast_batch(
                 [sequence],
-                entrez_query=f'"{sci_name}"[orgn]',
+                entrez_query=_check_query(sci_name, check_queries),
                 evalue=10 ** (-ev_exponent),
                 batch_id=f"{index + 1}/{len(sequences_df)} ({seq_id}: {sci_name})",
                 job_name="Check",

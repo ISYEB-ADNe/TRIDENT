@@ -592,6 +592,10 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
     hypo_check_df, hypo_check_params = run_with_progress(
         logsink.wrap(pipe.run_hypo_check, before=lambda: set_ncbi_email(email)),
         hypo_filter_df=hypo_filter_df,
+        check_queries=pipe.hypo_check_queries(
+            sequences_df["scientificName"].unique().tolist(),
+            st.session_state.name_table,
+        ),
         ev_exponent=params["hypo_check_ev_exponent"],
         num_threads=params["num_threads"],
         give_up_minutes=params["give_up_minutes"],

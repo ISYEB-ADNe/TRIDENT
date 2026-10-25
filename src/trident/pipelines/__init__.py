@@ -65,6 +65,7 @@ from .extra_pipeline import (
 from .hypo_pipeline import (
     count_hypo_searches,
     hypo_queries,
+    hypo_check_queries,
     prepare_hypo_input,
     run_hypo_search,
     run_hypo_merge,
@@ -143,6 +144,7 @@ __all__ = [
     "run_hypo_search",
     "run_hypo_merge",
     "run_hypo_filter",
+    "hypo_check_queries",
     "run_hypo_check",
     "finalize_hypo_results",
     "empty_hypo_results",
