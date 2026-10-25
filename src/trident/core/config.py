@@ -112,7 +112,7 @@ def is_streamlit_cloud() -> bool:
 
 
 def results_dir() -> Path:
-    """Folder of the full analyses, the same whatever folder TRIDENT starts from.
+    """Folder of the saved analyses, the same whatever folder TRIDENT starts from.
 
     The RESULTS_DIR setting wins. Otherwise it is results/ at the repository
     root, or in the user's home for an installed package.

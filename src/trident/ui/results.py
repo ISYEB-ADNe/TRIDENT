@@ -14,6 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from trident.clients.gbif import area_label
+from trident.core.config import is_streamlit_cloud
 from trident.core.database import load_provenance
 from trident.core.utils import (
     name_list,
@@ -1135,16 +1136,24 @@ def show_exports(curated_df):
         db_path = st.session_state.get("db_path")
         if not db_path or not Path(db_path).is_file():
             return
+        # On Cloud the analysis is on the server, not on the user's computer.
+        keep = (
+            "Download it to keep it or to share it."
+            if is_streamlit_cloud()
+            else "It is already saved on this computer: download it to keep a "
+            "copy elsewhere or to share it."
+        )
         st.caption(
-            "The full analysis in one file: the results of every step, the "
-            "database searches and the settings used. Open it from the Start "
-            "tab to continue the analysis later, or send it to a colleague."
+            "The whole analysis in one file: the results of every step, the "
+            f"database searches and the settings used. {keep}"
         )
         st.download_button(
-            label=f"📥 Full analysis ({Path(db_path).name})",
+            label=f"📥 Analysis file ({Path(db_path).name})",
             data=Path(db_path).read_bytes,
             file_name=f"{analysis_name}.db",
             mime="application/x-sqlite3",
+            help="One SQLite file: it can be uploaded again on the Start tab, or "
+            "read with any SQLite tool.",
             width="stretch",
             key="db_download",
         )

@@ -101,10 +101,10 @@ def check_schema_version(db_path: str | Path) -> tuple[bool, str]:
         with get_connection(db_path) as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
     except sqlite3.DatabaseError:
-        return False, "This file is not a TRIDENT full analysis."
+        return False, "This file is not a TRIDENT analysis file."
     if version > SCHEMA_VERSION:
         return False, (
-            f"This database was created by a newer version of TRIDENT "
+            f"This analysis file was created by a newer version of TRIDENT "
             f"(schema v{version} > v{SCHEMA_VERSION}). Update TRIDENT to open it."
         )
     return True, ""
@@ -578,12 +578,9 @@ def _log_cache_use(
     if not n_cached:
         logger.info(f"{step}: {n} {noun} to query")
     elif not n_new:
-        logger.info(f"{step}: all {n} {noun} already in the full analysis")
+        logger.info(f"{step}: all {n} {noun} already queried")
     else:
-        logger.info(
-            f"{step}: {n} {noun}, {n_cached} already in the full analysis, "
-            f"{n_new} to query"
-        )
+        logger.info(f"{step}: {n} {noun}, {n_cached} already queried, {n_new} to query")
 
 
 def save_to_db(

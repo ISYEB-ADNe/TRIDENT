@@ -77,7 +77,7 @@ def _start_fasta_analysis(file_name: str, data: bytes, settings: dict | None = N
     handle.name = file_name
 
     db_path = _db_path(base_name)
-    logger.info(f"Full analysis saved in {db_path}")
+    logger.info(f"Analysis saved in {db_path}")
     with st.spinner(f"Processing {file_name}...", show_time=True):
         seqs_df, _ = pipe.run_fasta_workflow(handle, db_path=db_path)
 
@@ -107,6 +107,31 @@ def _free_name(name: str) -> str:
     return candidate
 
 
+def _saved_copy(data: bytes, name: str, active: str | None = None) -> Path | None:
+    """The saved analysis of the results folder with exactly these bytes, or
+    None: uploading it again opens it instead of copying it. Among identical
+    copies, the *active* one comes first (its upload is then seen as already
+    active), then the one named *name*. A file without sequences is not an
+    analysis to open.
+
+    Not on Streamlit Cloud, where the folder holds every user's analyses.
+    """
+    if is_streamlit_cloud():
+        return None
+    paths = sorted(
+        results_dir().glob("*.db"),
+        key=lambda path: (path.stem != active, path.stem != name),
+    )
+    for path in paths:
+        if (
+            path.stat().st_size == len(data)
+            and path.read_bytes() == data
+            and _has_sequences(path)
+        ):
+            return path
+    return None
+
+
 def _has_sequences(db_path: Path) -> bool:
     """Whether the database holds the sequences an analysis is restored from
     (an empty file, a file that is not SQLite or another tool's SQLite file
@@ -134,7 +159,7 @@ def _restore_db(uploaded_file, name: str):
 
     compatible, message = check_schema_version(str(upload_path))
     if compatible and not _has_sequences(upload_path):
-        compatible, message = False, "This file is not a TRIDENT full analysis."
+        compatible, message = False, "This file is not a TRIDENT analysis file."
     if not compatible:
         upload_path.unlink(missing_ok=True)
         st.error(message)
@@ -143,8 +168,22 @@ def _restore_db(uploaded_file, name: str):
     _open_analysis(name)
 
 
+def _open_saved(path: Path):
+    """Open the saved analysis at *path*, if it is still there and this version
+    of TRIDENT can read it."""
+    # Checked first: opening a missing file would create an empty one.
+    if not path.is_file():
+        st.error("This analysis is no longer in the results folder.")
+        return
+    compatible, message = check_schema_version(str(path))
+    if not compatible:
+        st.error(message)
+        return
+    _open_analysis(path.stem)
+
+
 def _open_analysis(name: str):
-    """Make the full analysis *name* (in the results folder) the active one."""
+    """Make the saved analysis *name* (in the results folder) the active one."""
     reset_for_new_analysis("analysis_name")
     st.session_state.analysis_name = name
     st.session_state.db_path = _db_path(name)
@@ -157,7 +196,7 @@ def _open_analysis(name: str):
 
 
 def _saved_analyses() -> list[Path]:
-    """The full analyses of the results folder, newest first, the active one
+    """The saved analyses of the results folder, newest first, the active one
     left out."""
     paths = [
         path
@@ -178,7 +217,7 @@ def _analysis_label(path: Path) -> str:
 
 
 def open_saved_analysis():
-    """Open a full analysis already in the results folder, without copying it.
+    """Open an analysis already in the results folder, without copying it.
 
     Not on Streamlit Cloud, where the folder holds every user's analyses.
     """
@@ -189,7 +228,7 @@ def open_saved_analysis():
         return
     labels = {str(path): _analysis_label(path) for path in paths}
     choice = st.selectbox(
-        "Or open a full analysis saved on this computer",
+        "Or open an analysis saved on this computer",
         list(labels),
         index=None,
         format_func=labels.get,
@@ -203,15 +242,7 @@ def open_saved_analysis():
         disabled=choice is None,
         width="stretch",
     ):
-        # Checked first: opening a missing file would create an empty one.
-        if not Path(choice).is_file():
-            st.error("This analysis is no longer in the results folder.")
-            return
-        compatible, message = check_schema_version(choice)
-        if not compatible:
-            st.error(message)
-            return
-        _open_analysis(Path(choice).stem)
+        _open_saved(Path(choice))
 
 
 def _auto_restore_from_db():
@@ -238,16 +269,34 @@ def _auto_restore_from_db():
                 # Restore the DB path too, otherwise later steps run with the
                 # empty default and fail to open the database.
                 st.session_state.db_path = str(db_path)
-                logger.info(f"Full analysis opened from {db_path}")
+                logger.info(f"Analysis opened from {db_path}")
                 st.rerun()
         except Exception as e:
             st.error(f"Could not restore sequences: {e}")
 
 
+def _clear_upload(notice: str):
+    """Clear the uploader, *notice* shown above the choices: a file kept there
+    would be read again on every rerun, and offered as an old copy once a step
+    runs."""
+    st.session_state._upload_notice = notice
+    st.session_state.fasta_uploader_key += 1
+    st.rerun()
+
+
+def _is_active(name: str) -> bool:
+    """Whether *name* is the analysis open now, its sequences loaded."""
+    return (
+        st.session_state.get("sequences_df") is not None
+        and st.session_state.get("analysis_name") == name
+    )
+
+
 def handle_file_upload():
     """Single file uploader handling both FASTA and DB files."""
     uploaded_file = st.file_uploader(
-        "Upload a FASTA file or a previously exported .db file",
+        "Upload a FASTA file to start a new analysis, or an analysis file (.db) "
+        "to import",
         type=sorted(FASTA_EXTENSIONS | DB_EXTENSIONS),
         key=f"file_upload_{st.session_state.fasta_uploader_key}",
     )
@@ -259,6 +308,32 @@ def handle_file_upload():
     name = Path(uploaded_file.name).stem
 
     if ext in DB_EXTENSIONS:
+        # Compared once per upload: the folder's files are read in full.
+        cached = st.session_state.get("_upload_saved_copy")
+        if cached and cached[0] == uploaded_file.file_id:
+            saved = cached[1]
+        else:
+            saved = _saved_copy(
+                uploaded_file.getvalue(), name, st.session_state.get("analysis_name")
+            )
+            st.session_state._upload_saved_copy = (uploaded_file.file_id, saved)
+        if saved is not None:
+            if _is_active(saved.stem):
+                _clear_upload(f"ℹ️ {saved.stem} already active.")
+            st.caption(
+                f"This analysis is already saved on this computer as "
+                f"**{saved.stem}**: TRIDENT opens it, without making a copy."
+            )
+            if st.button(
+                "Open Analysis",
+                icon=":material/folder_open:",
+                type="primary",
+                width="stretch",
+                key="open_uploaded_analysis",
+            ):
+                _open_saved(saved)
+            return
+
         restore_name = st.text_input(
             "Save as:",
             value=_free_name(name),
@@ -277,12 +352,12 @@ def handle_file_upload():
             st.caption(
                 f"TRIDENT keeps a copy in its results folder "
                 f"(`{_db_path(restore_name)}`) and works on that copy: your file "
-                "is left unchanged. To continue it later, open it from the list "
-                "below instead of uploading it again."
+                "is left unchanged. To continue it later, open it from the saved "
+                "analyses below instead of uploading it again."
             )
         if Path(_db_path(restore_name)).exists():
             st.warning(
-                f"A full analysis named **{restore_name}** already exists: "
+                f"An analysis named **{restore_name}** already exists: "
                 "restoring replaces it. Change the name to keep both."
             )
         if st.button(
@@ -294,12 +369,8 @@ def handle_file_upload():
             _restore_db(uploaded_file, restore_name)
 
     elif ext in FASTA_EXTENSIONS:
-        # Skip if already loaded
-        if st.session_state.get(
-            "sequences_df"
-        ) is not None and name == st.session_state.get("analysis_name"):
-            st.info(f"ℹ️ {uploaded_file.name} already active.")
-            return
+        if _is_active(name):
+            _clear_upload(f"ℹ️ {name} already active.")
 
         if st.button(
             "Process FASTA",
@@ -320,15 +391,15 @@ def load_example_button():
         and st.session_state.get("analysis_name") == EXAMPLE_FASTA.stem
     )
     if st.button(
-        f"Load the example ({EXAMPLE_FASTA.name})",
+        f"Try the example ({EXAMPLE_FASTA.name})",
         icon=":material/science:",
+        type="tertiary",
         disabled=active,
         help=(
             "The four Svalbard 16S sequences of the paper's worked example. "
             "The GEO window is set to the paper's (78.5° N, 14.5° E, 250 km; 500 km is "
             "also searched for comparison)."
         ),
-        width="stretch",
     ):
         _start_fasta_analysis(
             EXAMPLE_FASTA.name, EXAMPLE_FASTA.read_bytes(), EXAMPLE_SETTINGS
@@ -343,7 +414,7 @@ def display_analysis_status():
         st.markdown(f"### 📊 Active Analysis: **{active_name}**")
         # On Cloud the path is on the server, of no use to the user.
         if not is_streamlit_cloud() and st.session_state.get("db_path"):
-            st.caption(f"Full analysis saved in `{st.session_state.db_path}`")
+            st.caption(f"Saved in `{st.session_state.db_path}`")
 
         display_fasta_sequence_table()
 
@@ -361,19 +432,35 @@ def upload_and_start_analysis():
     """Main entry point for starting analysis."""
     st.header("🚀 **Start Analysis**")
     st.caption(
-        "Upload a FASTA file with (M)OTUs/ASVs sequences, or restore a previous analysis from a .db file."
+        "Start an analysis from a FASTA file with (M)OTUs/ASVs sequences, or "
+        "open a saved one."
     )
     st.divider()
 
     _auto_restore_from_db()
+    # Set when an upload turned out to be the active analysis: shown here, as
+    # the upload's own section is folded again.
+    if notice := st.session_state.pop("_upload_notice", None):
+        st.info(notice)
 
+    if st.session_state.get("sequences_df") is None:
+        _analysis_choices()
+        return
+
+    display_analysis_status()
+    # Folded while working, so the example is not one click away. Keyed by the
+    # uploader key, which every switch changes: it opens folded again after one.
+    with st.expander(
+        "Start or open another analysis",
+        icon=":material/swap_horiz:",
+        key=f"switch_analysis_{st.session_state.fasta_uploader_key}",
+    ):
+        _analysis_choices()
+
+
+def _analysis_choices():
+    """The ways to start or open an analysis, the most common first: a file,
+    a saved analysis, then the example."""
     handle_file_upload()
     open_saved_analysis()
     load_example_button()
-
-    st.divider()
-
-    if st.session_state.get("sequences_df") is not None:
-        display_analysis_status()
-    else:
-        st.info("👆 **Get started** by uploading a file above, or load the example.")

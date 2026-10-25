@@ -115,7 +115,7 @@ Copy `.streamlit/secrets.toml.example` to start; the notebooks and scripts read 
 
 If BLAST searches start failing after a change on NCBI's side, `BLAST_CLIENT = "qblast"` in `secrets.toml` switches to Biopython's BLAST client.
 
-Each full analysis (`.db` file) is saved in the `results/` folder of TRIDENT, whatever folder you start it from; the Start tab shows its path. `RESULTS_DIR` in `secrets.toml` (an absolute path) sets another folder.
+Each analysis is saved as a `.db` file in the `results/` folder of TRIDENT, whatever folder you start it from; the Start tab shows its path. `RESULTS_DIR` in `secrets.toml` (an absolute path) sets another folder.
 
 </details>
 
@@ -130,7 +130,7 @@ Each full analysis (`.db` file) is saved in the `results/` folder of TRIDENT, wh
 
 - **Full results CSV**: every species with its validation path and warning flags.
 - **GBIF-compatible CSV**: one row per MOTU/ASV; multi-species MOTUs are resolved to their lowest common taxon.
-- **SQLite database (`.db`)**: the complete analysis. Re-upload it on the Start tab to restore your work later.
+- **Analysis file (`.db`, SQLite)**: the whole analysis, already saved in `results/`. Download it to keep a copy elsewhere or to share it.
 
 ### Online demo
 
@@ -138,7 +138,7 @@ A hosted demo is live on Streamlit Cloud: <https://trident-nxanjv7pk4z2fnkyulzvw
 
 ## Example
 
-`example/example.fasta` holds the 4 Svalbard MOTUs of the paper's worked example (16S, Vert16S primers). Click "Load the example" on the Start tab for a quick end-to-end demo of the pipeline: it also sets the GEO window to the sampling area (latitude 78.5, longitude 14.5, extents 250 and 500 km). If you upload the file instead, enter these values in the GEO step.
+`example/example.fasta` holds the 4 Svalbard MOTUs of the paper's worked example (16S, Vert16S primers). Click "Try the example" on the Start tab for a quick end-to-end demo of the pipeline: it also sets the GEO window to the sampling area (latitude 78.5, longitude 14.5, extents 250 and 500 km). If you upload the file instead, enter these values in the GEO step.
 
 <details>
 <summary><strong>Run the example as a notebook (advanced)</strong></summary>
