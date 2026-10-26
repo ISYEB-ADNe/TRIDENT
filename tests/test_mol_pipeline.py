@@ -46,70 +46,39 @@ def _finalize(ncbi_filter_df, **kwargs):
     return finalize_mol_results(ncbi_filter_df, **kwargs)
 
 
-# --- finalize_mol_results ---
+# --- finalize_mol_results and build_mol_summary ---
 
 
-class TestFinalizeMolResults:
-    def test_adds_warning_column(self, ncbi_filter_df):
-        mol_df, params = _finalize(ncbi_filter_df)
-        assert "low_identity_warning" in mol_df.columns
-        s1 = mol_df[mol_df["seq_id"] == "s1"]
-        assert not s1["low_identity_warning"].any()
-        s2 = mol_df[mol_df["seq_id"] == "s2"]
-        assert s2["low_identity_warning"].all()
-
-    def test_enforce_removes_low(self, ncbi_filter_df):
+class TestMolResults:
+    def test_enforced_threshold_removes_the_hits_below_it(
+        self, sequences_df, ncbi_filter_df
+    ):
+        """Without enforcement every hit is kept; with it, a sequence whose hits
+        are all below loses them but keeps the filter method in the summary."""
+        assert len(_finalize(ncbi_filter_df, enforce_threshold=False)[0]) == 4
         mol_df, _ = _finalize(ncbi_filter_df, enforce_threshold=True)
-        assert "s2" not in mol_df["seq_id"].values
-        assert len(mol_df) == 2
-
-    def test_enforce_false_keeps_all(self, ncbi_filter_df):
-        mol_df, _ = _finalize(ncbi_filter_df, enforce_threshold=False)
-        assert len(mol_df) == 4
-
-    def test_returns_tuple(self, ncbi_filter_df):
-        result = _finalize(ncbi_filter_df)
-        assert isinstance(result, tuple)
-        assert isinstance(result[0], pd.DataFrame)
-        assert isinstance(result[1], dict)
-
-
-# --- build_mol_summary ---
-
-
-class TestBuildMolSummary:
-    def test_all_sequences_present(self, sequences_df, ncbi_filter_df):
-        mol_df, _ = _finalize(ncbi_filter_df)
-        summary = build_mol_summary(mol_df, sequences_df)
-        assert set(summary["seq_id"]) == {"s1", "s2", "s3"}
-
-    def test_empty_sequence_row(self, sequences_df, ncbi_filter_df):
-        mol_df, _ = _finalize(ncbi_filter_df)
-        summary = build_mol_summary(mol_df, sequences_df)
-        s3 = summary[summary["seq_id"] == "s3"]
-        assert s3.iloc[0]["n_hits"] == 0
-        assert s3.iloc[0]["n_species"] == 0
-
-    def test_top_identity_uses_max(self, sequences_df, ncbi_filter_df):
-        mol_df, _ = _finalize(ncbi_filter_df)
-        summary = build_mol_summary(mol_df, sequences_df)
-        s1 = summary[summary["seq_id"] == "s1"]
-        assert s1.iloc[0]["top_identity"] == 99.0
-
-    def test_filter_method_recovery(self, sequences_df, ncbi_filter_df):
-        """When enforce_threshold removes all hits, filter_method is recovered."""
-        mol_df, _ = _finalize(ncbi_filter_df, enforce_threshold=True)
+        assert mol_df["seq_id"].tolist() == ["s1", "s1"]
         summary = build_mol_summary(mol_df, sequences_df, ncbi_filter_df=ncbi_filter_df)
         s2 = summary[summary["seq_id"] == "s2"]
         assert s2.iloc[0]["filter_method"] == "similarity"
 
-    def test_preserves_sequence_order(self, ncbi_filter_df):
+    def test_hits_are_flagged_by_their_sequences_best_identity(self, ncbi_filter_df):
+        mol_df, _ = _finalize(ncbi_filter_df)
+        flags = mol_df.groupby("seq_id")["low_identity_warning"].agg(["any", "all"])
+        assert not flags.loc["s1", "any"]
+        assert flags.loc["s2", "all"]
+
+    def test_summary_has_one_row_per_sequence_in_input_order(self, ncbi_filter_df):
+        """A sequence without hits gets a row with no hits and no species; the
+        top identity is the best hit."""
         sequences_df = pd.DataFrame(
-            {"seq_id": ["s2", "s1"], "dna_sequence": ["G", "A"]}
+            {"seq_id": ["s3", "s2", "s1"], "dna_sequence": ["T", "G", "A"]}
         )
         mol_df, _ = _finalize(ncbi_filter_df)
-        summary = build_mol_summary(mol_df, sequences_df)
-        assert list(summary["seq_id"]) == ["s2", "s1"]
+        summary = build_mol_summary(mol_df, sequences_df).set_index("seq_id")
+        assert summary.index.tolist() == ["s3", "s2", "s1"]
+        assert summary.loc["s3", ["n_hits", "n_species"]].tolist() == [0, 0]
+        assert summary.loc["s1", "top_identity"] == 99.0
 
     def test_low_identity_warning_flags_a_species_below(self, sequences_df):
         """A sequence is flagged when a species kept for it has its best hit

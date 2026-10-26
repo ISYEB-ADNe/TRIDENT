@@ -3,12 +3,10 @@
 All functions here are pure (no network), so they are exercised directly.
 """
 
-import numpy as np
 import pandas as pd
 import pytest
 
 from trident.clients.ncbi import (
-    compute_barcoding_gap,
     filter_by_barcoding_gap,
     filter_by_similarity,
     filter_blast_results,
@@ -23,55 +21,7 @@ def _hits(rows):
     )
 
 
-# --- compute_barcoding_gap ---
-
-
-def test_compute_barcoding_gap_drop_to_next():
-    df = _hits(
-        [
-            ("s1", 99.0, 100, "A"),
-            ("s1", 96.0, 100, "B"),
-            ("s1", 90.0, 100, "C"),
-        ]
-    )
-    out = compute_barcoding_gap(df)
-    drops = out["identity_drop"].tolist()
-    assert drops[0] == pytest.approx(3.0)  # 99 -> 96
-    assert drops[1] == pytest.approx(6.0)  # 96 -> 90
-    assert np.isnan(drops[2])  # last row has no next hit
-
-
 # --- filter_by_barcoding_gap ---
-
-
-def test_gap_found_keeps_above_gap():
-    # 99, 98 then an 8-point drop to 90: gap after the 98 hit.
-    df = _hits(
-        [
-            ("s1", 99.0, 100, "A"),
-            ("s1", 98.0, 100, "B"),
-            ("s1", 90.0, 100, "C"),
-        ]
-    )
-    gap_df, no_gap_df, method = filter_by_barcoding_gap(df, gap_size=2, gap_min_top=97)
-    assert method["s1"] == "barcoding_gap"
-    assert sorted(gap_df["identity_percentage"].tolist()) == [98.0, 99.0]
-    assert no_gap_df.empty
-
-
-def test_no_gap_falls_back_to_similarity():
-    # All drops < gap_size -> no detectable gap.
-    df = _hits(
-        [
-            ("s1", 99.0, 100, "A"),
-            ("s1", 98.5, 100, "B"),
-            ("s1", 98.0, 100, "C"),
-        ]
-    )
-    gap_df, no_gap_df, method = filter_by_barcoding_gap(df, gap_size=2, gap_min_top=97)
-    assert method["s1"] == "similarity"
-    assert gap_df.empty
-    assert len(no_gap_df) == 3
 
 
 def test_gap_below_min_top_is_not_a_gap():
@@ -125,13 +75,13 @@ def test_filter_blast_results_rejecting_every_hit_keeps_columns(method):
 
 
 def test_filter_blast_results_unknown_method_raises():
-    df = _hits([("s1", 99.0, 100, "A")])
+    """A misspelled method is refused, never replaced by another filter."""
     with pytest.raises(ValueError, match="Unknown filtering method"):
-        filter_blast_results(df, method="nonsense")
+        filter_blast_results(_hits([("s1", 99.0, 100, "A")]), method="barcode_gap")
 
 
-def test_filter_blast_results_barcoding_gap_tags_methods():
-    # s1 has a gap; s2 has none -> falls back to similarity.
+def test_gap_found_keeps_the_hits_above_it_else_similarity_is_used():
+    # s1: 99, 98 then an 8-point drop to 90, a gap after the 98 hit; s2 has none.
     df = _hits(
         [
             ("s1", 99.0, 100, "A"),
@@ -143,5 +93,6 @@ def test_filter_blast_results_barcoding_gap_tags_methods():
     )
     out = filter_blast_results(df, query_cover=90, method="barcoding_gap", gap_size=2)
     methods = dict(zip(out["seq_id"], out["filter_method"]))
-    assert methods["s1"] == "barcoding_gap"
-    assert methods["s2"] == "similarity"
+    assert methods == {"s1": "barcoding_gap", "s2": "similarity"}
+    s1 = out[out["seq_id"] == "s1"]["identity_percentage"]
+    assert sorted(s1) == [98.0, 99.0]

@@ -10,6 +10,8 @@ taxa (run_higher_taxa_lookup), saved per name like the other steps' searches.
     resolve_sequences(results_df) → DataFrame (species count and shared rank per MOTU/ASV)
     add_check_hit(df) → DataFrame
     add_low_identity_warning(df, threshold) → DataFrame
+    best_identity_per_sequence(df, query_cover) → DataFrame (identity and via per MOTU/ASV)
+    flag_low_identity(df, threshold, best_identity) → DataFrame
     build_species_flow(seq_id, ..., name_table) → list of (source, target, names) links
     species_flow_table(seq_id, links, ...) → DataFrame (one row per name)
     flow_lost_at(links) → (step, names) where a sequence without a species lost them
@@ -109,6 +111,53 @@ def add_low_identity_warning(df, threshold, identity_col="mol_identity"):
     df["low_identity_warning"] = (
         df[identity_col].lt(threshold) & df[identity_col].notna()
     )
+    return df
+
+
+def best_identity_per_sequence(df, query_cover):
+    """Best NCBI identity of each sequence's species, and the MOL species it
+    comes through (via) when it is not the species' own hit.
+
+    A MOL+GEO species has its MOL hit, a HYPO species its check hit; only hits
+    covering at least the MOL query cover count (a partial hit's identity is
+    over part of the sequence only). A HYPO species without such a check hit
+    has no hit of its own: it takes the sequence's MOL hit on the species its CO1
+    proxy matched, the only NCBI evidence for the sequence.
+
+    Returns:
+        DataFrame indexed by seq_id with columns identity and via.
+    """
+    direct = (
+        df["mol_identity"]
+        .where(df["mol_query_cover"] >= query_cover)
+        .fillna(
+            df["hypo_check_identity"].where(df["hypo_check_query_cover"] >= query_cover)
+        )
+    )
+    hypo = df["validation_step"].eq("HYPO")
+    via = df["via_mol_identity"].where(hypo & direct.isna())
+    rows = pd.DataFrame(
+        {
+            "seq_id": df["seq_id"],
+            "identity": direct.fillna(via),
+            "via": df["proxy_hit_species"].where(via.notna()),
+        }
+    )
+    # On a tie, the species' own hit wins over one through another species.
+    rows["_direct"] = rows["via"].isna()
+    return (
+        rows.dropna(subset=["identity"])
+        .sort_values(["identity", "_direct"], ascending=False)
+        .drop_duplicates("seq_id")
+        .set_index("seq_id")[["identity", "via"]]
+    )
+
+
+def flag_low_identity(df, threshold, best_identity):
+    """Flag the rows of sequences whose best identity is below threshold."""
+    df = df.copy()
+    best = df["seq_id"].map(best_identity)
+    df["low_identity_warning"] = best.notna() & (best < threshold)
     return df
 
 

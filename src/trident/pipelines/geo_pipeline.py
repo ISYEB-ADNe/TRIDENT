@@ -107,15 +107,23 @@ def _gbif_search_params(
 
 
 def _gbif_search_params_rebuild(input_selected, original_inputs):
-    """Rebuild GBIF search parameters from stored kwargs."""
-
-    species_to_keep = {item["species"] for item in input_selected}
-    extents_to_keep = {item["gbif_extent"] for item in input_selected}
-    inputs = original_inputs.copy() | {
-        "species_list": list(species_to_keep),
-        "extents": list(extents_to_keep),
+    """The search's kwargs for the (species, extent) pairs not saved yet: each
+    extent counts only its own missing species."""
+    species_by_extent: dict = {}
+    for item in input_selected:
+        species_by_extent.setdefault(item["gbif_extent"], []).append(item["species"])
+    species = {s for names in species_by_extent.values() for s in names}
+    return original_inputs.copy() | {
+        "species_list": [
+            s for s in dict.fromkeys(original_inputs["species_list"]) if s in species
+        ],
+        "extents": [
+            e
+            for e in dict.fromkeys(original_inputs["extents"])
+            if e in species_by_extent
+        ],
+        "_species_by_extent": species_by_extent,
     }
-    return inputs
 
 
 @save_to_db(
@@ -136,6 +144,7 @@ def run_gbif_search(
     worms_ids: dict[str, str] | None = None,
     progress_handler: Callable[[float, str], None] | None = None,
     user_agent: str | None = None,
+    _species_by_extent: dict[float | str, list[str]] | None = None,
     failure_sink: list | None = None,
     result_sink: Callable | None = None,
 ) -> pd.DataFrame:
@@ -152,6 +161,8 @@ def run_gbif_search(
             ``prepare_gbif_worms_ids``).
         progress_handler: Optional callback for UI progress updates.
         user_agent: User-Agent header for HTTP requests.
+        _species_by_extent: Set by the cache only, for a resumed search: the
+            species to count in each extent, the pairs not saved yet.
         failure_sink: If provided, species whose name match errored (network or
             403, ``matchType == "ERROR"``) are appended here so the cache layer
             skips them and retries on the next run. A genuine no-match (needs
@@ -184,7 +195,6 @@ def run_gbif_search(
 
     ## Filter to valid keys
     good_matches = filter_taxon_matches(matches_df)
-    taxon_keys = good_matches["taxonID"].astype(str).tolist()
 
     # The species whose match did not fail: each of their areas is saved once
     # counted, also for a species GBIF does not hold (a genuine empty).
@@ -193,6 +203,7 @@ def run_gbif_search(
     results = []
 
     # 2. Extent-based counts (30% -> 90%)
+    species_by_extent = _species_by_extent or {e: species_list for e in extents or []}
     if latitude is not None and longitude is not None and extents:
         n_extents = len(extents)
         for i, dist_km in enumerate(extents):
@@ -201,8 +212,11 @@ def run_gbif_search(
                 label = get_extent_column_name(dist_km)
                 progress_handler(p_current, f"Querying {label} extent...")
 
+            wanted = set(species_by_extent[dist_km])
+            here = good_matches[good_matches["scientificName"].isin(wanted)]
+            in_area = [s for s in queried if s in wanted]
             res_df, ext_failed = counts_for_area(
-                taxon_keys,
+                here["taxonID"].astype(str).tolist(),
                 latitude,
                 longitude,
                 extent=dist_km,
@@ -210,7 +224,7 @@ def run_gbif_search(
                 user_agent=user_agent,
             )
             # Names sharing a GBIF species each get its counts
-            area_df = good_matches.merge(
+            area_df = here.merge(
                 res_df, on="taxonID", how="left", validate="many_to_many"
             )
 
@@ -224,18 +238,14 @@ def run_gbif_search(
             if ext_failed and "taxonID" in area_df.columns:
                 area_df = area_df[~area_df["taxonID"].isin(ext_failed)]
                 area_errored = sorted(
-                    set(
-                        good_matches.loc[
-                            good_matches["taxonID"].isin(ext_failed), "scientificName"
-                        ]
-                    )
+                    set(here.loc[here["taxonID"].isin(ext_failed), "scientificName"])
                 )
                 errored += [s for s in area_errored if s not in errored]
                 if failure_sink is not None:
                     failure_sink.extend((s, dist_km) for s in area_errored)
             results.append(area_df)
             if result_sink is not None:
-                done = [(s, dist_km) for s in queried if s not in area_errored]
+                done = [(s, dist_km) for s in in_area if s not in area_errored]
                 result_sink(area_df, done)
 
     # 3. Finalizing (90% -> 100%)

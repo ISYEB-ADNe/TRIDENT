@@ -36,6 +36,8 @@ from trident.pipelines.results_pipeline import (
     resolve_sequences,
     EXPORT_COLS,
     build_gbif_export_df,
+    best_identity_per_sequence,
+    flag_low_identity,
 )
 from trident.ui.defaults import NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
 from trident.ui.geo import display_gbif_sequence_table
@@ -140,53 +142,6 @@ LOSS_REASONS = {
 # -------------------------------------------------------------------
 
 
-def _best_identity(df, query_cover):
-    """Best NCBI identity of each sequence's species, and the MOL species it
-    comes through (via) when it is not the species' own hit.
-
-    A MOL+GEO species has its MOL hit, a HYPO species its check hit; only hits
-    covering at least the MOL query cover count (a partial hit's identity is
-    over part of the sequence only). A HYPO species without such a check hit
-    has no hit of its own: it takes the sequence's MOL hit on the species its CO1
-    proxy matched, the only NCBI evidence for the sequence.
-
-    Returns:
-        DataFrame indexed by seq_id with columns identity and via.
-    """
-    direct = (
-        df["mol_identity"]
-        .where(df["mol_query_cover"] >= query_cover)
-        .fillna(
-            df["hypo_check_identity"].where(df["hypo_check_query_cover"] >= query_cover)
-        )
-    )
-    hypo = df["validation_step"].eq("HYPO")
-    via = df["via_mol_identity"].where(hypo & direct.isna())
-    rows = pd.DataFrame(
-        {
-            "seq_id": df["seq_id"],
-            "identity": direct.fillna(via),
-            "via": df["proxy_hit_species"].where(via.notna()),
-        }
-    )
-    # On a tie, the species' own hit wins over one through another species.
-    rows["_direct"] = rows["via"].isna()
-    return (
-        rows.dropna(subset=["identity"])
-        .sort_values(["identity", "_direct"], ascending=False)
-        .drop_duplicates("seq_id")
-        .set_index("seq_id")[["identity", "via"]]
-    )
-
-
-def _flag_low_identity(df, threshold, best_identity):
-    """Flag the rows of sequences whose best identity is below threshold."""
-    df = df.copy()
-    best = df["seq_id"].map(best_identity)
-    df["low_identity_warning"] = best.notna() & (best < threshold)
-    return df
-
-
 # The session tables of the species flow, named as build_species_flow's arguments.
 FLOW_TABLES = ["ncbi_search_df", "mol_df", "tax_df", "geo_df", "extra_df", "hypo_df"]
 
@@ -233,7 +188,7 @@ def _assignments(curated_df, threshold):
     species_rows = curated_df.dropna(subset=["scientificName"])
     by_seq = species_rows.groupby("seq_id")
 
-    best = _best_identity(species_rows, mol_query_cover())
+    best = best_identity_per_sequence(species_rows, mol_query_cover())
     table["best_identity"] = table["seq_id"].map(best["identity"])
     table["best_via"] = table["seq_id"].map(best["via"])
     table["low_identity"] = table["best_identity"] < threshold
@@ -773,7 +728,7 @@ def _show_candidates(results_df, assignments, threshold, selected_seq):
     if table.empty:
         st.caption("No candidate species.")
         return
-    table = _flag_low_identity(
+    table = flag_low_identity(
         table, threshold, assignments.set_index("seq_id")["best_identity"]
     )
     row_keys = exclusion_keys(table).tolist()
@@ -932,7 +887,7 @@ def show_results_per_species(results_df, assignments, threshold, same_species):
             shown = _species_breakdown_columns(step_df, is_hypo)
             st.dataframe(
                 styled_or_plain(
-                    _flag_low_identity(step_df, threshold, best_identity),
+                    flag_low_identity(step_df, threshold, best_identity),
                     highlight_check_hit,
                     highlight_low_identity,
                 ),
@@ -948,7 +903,7 @@ def show_curated_results(curated_df, assignments, threshold):
     """Every kept candidate of every sequence: the rows the CSV export writes."""
     with st.container(border=True):
         st.markdown("### ✅ Curated results")
-        table = _flag_low_identity(
+        table = flag_low_identity(
             curated_df, threshold, assignments.set_index("seq_id")["best_identity"]
         )
         legends = ["One row per sequence and kept candidate species."]

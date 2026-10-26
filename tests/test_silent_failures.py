@@ -1,10 +1,6 @@
-"""Alignment failures must not masquerade as legitimate identity scores.
-
-``compute_pairwise_identity`` used to swallow any alignment error and return
-0.0, which reads as "not redundant" and silently keeps both sequences. Errors
-now propagate to the per-species handler in ``run_bold_filter``, which is
-where the deliberate keep-everything fallback lives.
-"""
+"""An alignment error is raised, never scored 0.0 (which would read as not
+redundant and keep both sequences); run_bold_filter keeps a species whose
+alignment fails unfiltered."""
 
 import pandas as pd
 import pytest

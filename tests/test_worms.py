@@ -1,9 +1,5 @@
-"""Tests for WoRMS failure tracking (network-free via monkeypatch).
-
-run_worms_search relies on get_species_from_genus_list reporting only errored
-genera as failures (so the cache layer retries them), not genera that simply
-have no AphiaID or no children.
-"""
+"""Tests for the WoRMS client: failures, name resolution and genus
+expansion, without network (real answers as fixtures)."""
 
 import pytest
 
@@ -11,29 +7,29 @@ from trident.clients import worms
 from trident.clients.worms import get_species_from_genus_list
 
 
-def test_errored_genus_is_a_failure(monkeypatch):
-    def boom(*a, **k):
-        raise RuntimeError("network error")
+@pytest.mark.parametrize(
+    "aphia_ids, children, failed",
+    [
+        (RuntimeError("network error"), None, ["Gadus"]),
+        ([], None, []),
+        ([12345], [], []),
+    ],
+    ids=["errored", "not in worms", "no children"],
+)
+def test_only_an_errored_genus_is_a_failure(monkeypatch, aphia_ids, children, failed):
+    """A genus WoRMS does not know, or knows without species, is a valid empty
+    (not retried); the taxonomy columns are there either way."""
 
-    monkeypatch.setattr(worms, "get_genus_aphia_ids", boom)
-    df, failed = get_species_from_genus_list(["Gadus"], delay=0)
-    assert failed == ["Gadus"]
+    def genus_ids(*a, **k):
+        if isinstance(aphia_ids, Exception):
+            raise aphia_ids
+        return aphia_ids
+
+    monkeypatch.setattr(worms, "get_genus_aphia_ids", genus_ids)
+    monkeypatch.setattr(worms, "get_children_by_aphia_id", lambda *a, **k: children)
+    df, got = get_species_from_genus_list(["Gadus"], delay=0)
+    assert got == failed
     assert df.empty
-
-
-def test_no_aphia_id_is_not_a_failure(monkeypatch):
-    # Genus not in WoRMS -> valid empty, not a failure (won't be retried).
-    monkeypatch.setattr(worms, "get_genus_aphia_ids", lambda *a, **k: [])
-    df, failed = get_species_from_genus_list(["Gadus"], delay=0)
-    assert failed == []
-
-
-def test_no_children_is_not_a_failure(monkeypatch):
-    monkeypatch.setattr(worms, "get_genus_aphia_ids", lambda *a, **k: [12345])
-    monkeypatch.setattr(worms, "get_children_by_aphia_id", lambda *a, **k: [])
-    df, failed = get_species_from_genus_list(["Gadus"], delay=0)
-    assert failed == []
-    # The taxonomy columns are present even when no species is found.
     assert list(df.columns) == worms.WORMS_TAXON_COLUMNS
 
 
@@ -76,7 +72,7 @@ def test_marine_only_threaded_to_children(monkeypatch):
     assert captured["marine_only"] is False
 
 
-# --- name resolution (R3) ---
+# --- name resolution ---
 
 
 def test_get_aphia_record_returns_none_on_404():
@@ -112,48 +108,41 @@ def test_answer_that_is_not_json_is_an_error_not_a_not_found():
         worms.get_aphia_records("Gadus", session=_Session(MaintenancePage(200)))
 
 
-def test_resolve_accepted_passthrough(monkeypatch):
-    monkeypatch.setattr(
-        worms,
-        "get_aphia_records",
-        lambda name, session=None: [
-            {
-                "valid_name": "Gadus morhua",
-                "valid_AphiaID": 126436,
-                "status": "accepted",
-            }
-        ],
-    )
-    r = worms.resolve_accepted_name("Gadus morhua")
-    assert r["accepted_name"] == "Gadus morhua"
-    assert r["aphia_id"] == 126436
-    assert r["is_synonym"] is False
-
-
-def test_resolve_maps_synonym(monkeypatch):
-    monkeypatch.setattr(
-        worms,
-        "get_aphia_records",
-        lambda name, session=None: [
-            {
-                "valid_name": "Gadus macrocephalus",
-                "valid_AphiaID": 126437,
-                "status": "unaccepted",
-            }
-        ],
-    )
-    r = worms.resolve_accepted_name("Gadus ogac")
-    assert r["accepted_name"] == "Gadus macrocephalus"
-    assert r["aphia_id"] == 126437
-    assert r["is_synonym"] is True
-
-
-def test_resolve_not_found_keeps_input(monkeypatch):
-    monkeypatch.setattr(worms, "get_aphia_records", lambda name, session=None: [])
-    r = worms.resolve_accepted_name("Ammodytes sp.")
-    assert r["accepted_name"] == "Ammodytes sp."
-    assert r["aphia_id"] is None
-    assert r["is_synonym"] is False
+@pytest.mark.parametrize(
+    "name, records, expected",
+    [
+        (
+            "Gadus morhua",
+            [
+                {
+                    "valid_name": "Gadus morhua",
+                    "valid_AphiaID": 126436,
+                    "status": "accepted",
+                }
+            ],
+            ("Gadus morhua", 126436, False),
+        ),
+        (
+            "Gadus ogac",
+            [
+                {
+                    "valid_name": "Gadus macrocephalus",
+                    "valid_AphiaID": 126437,
+                    "status": "unaccepted",
+                }
+            ],
+            ("Gadus macrocephalus", 126437, True),
+        ),
+        ("Ammodytes sp.", [], ("Ammodytes sp.", None, False)),
+    ],
+    ids=["accepted", "synonym", "not found"],
+)
+def test_name_resolves_to_its_accepted_name_or_stays_as_written(
+    monkeypatch, name, records, expected
+):
+    monkeypatch.setattr(worms, "get_aphia_records", lambda name, session=None: records)
+    r = worms.resolve_accepted_name(name)
+    assert (r["accepted_name"], r["aphia_id"], r["is_synonym"]) == expected
 
 
 def test_resolve_follows_the_accepted_record_not_the_first(monkeypatch):
@@ -293,7 +282,7 @@ def test_failed_page_fails_the_genus_instead_of_a_partial_list(monkeypatch):
 def test_name_whose_records_lead_to_several_species_stays_as_ncbi_names_it(
     monkeypatch,
 ):
-    """WoRMS's records of Delphinus capensis (real answer, Oct 2026): none is
+    """WoRMS's records of Delphinus capensis (real answer): none is
     accepted, two synonyms of different species and a nomen dubium without an
     accepted name. The name is not resolved through the first record, and the
     reason is kept."""
@@ -362,7 +351,9 @@ def _lookups(monkeypatch, by_name, by_taxid):
     return calls
 
 
-def test_taxid_is_looked_up_only_when_the_name_is_not_found(monkeypatch):
+def test_taxid_is_looked_up_only_for_a_name_unknown_to_worms(monkeypatch):
+    """WoRMS knows Microcarbo niger only as Phalacrocorax niger; Gadus morhua
+    is found by its name, so its taxid is not asked."""
     found = {
         "valid_name": "Gadus morhua",
         "valid_AphiaID": 126436,
@@ -372,9 +363,6 @@ def test_taxid_is_looked_up_only_when_the_name_is_not_found(monkeypatch):
     r = worms.resolve_accepted_name("Gadus morhua", ncbi_taxid=8049)
     assert r["matched_by"] == "name" and calls == []
 
-
-def test_name_unknown_to_worms_is_found_through_its_taxid(monkeypatch):
-    """WoRMS knows Microcarbo niger only as Phalacrocorax niger."""
     record = {
         "valid_name": "Phalacrocorax niger",
         "valid_AphiaID": 1,

@@ -65,17 +65,23 @@ def display_fasta_sequence_table():
         )
 
 
+def _fasta_handle(file_name: str, data: bytes) -> io.StringIO:
+    r"""An uploaded FASTA as a named text handle, parsed from memory: a shared
+    temp file would race between sessions on Cloud. The cache keys the FASTA
+    by this name; newline=None translates \r and \r\n line endings, as
+    open() does."""
+    handle = io.StringIO(data.decode(), newline=None)
+    handle.name = file_name
+    return handle
+
+
 def _start_fasta_analysis(file_name: str, data: bytes, settings: dict | None = None):
     """Load a FASTA as the active analysis, named after the file.
 
     *settings* pre-fill widgets of the later steps (widget key -> value).
     """
     base_name = Path(file_name).stem
-    # Parsed from memory: a shared temp file would race between sessions on
-    # Cloud. The cache keys the FASTA by this name.
-    # newline=None translates \r and \r\n line endings, as open() does.
-    handle = io.StringIO(data.decode(), newline=None)
-    handle.name = file_name
+    handle = _fasta_handle(file_name, data)
 
     db_path = _db_path(base_name)
     logger.info(f"Analysis saved in {db_path}")

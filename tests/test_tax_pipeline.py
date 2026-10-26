@@ -1,18 +1,19 @@
-"""Tests for TAX pipeline name resolution (R3) and the joins on species.
+"""Tests for TAX pipeline name resolution and the joins on species.
 
 Covers the pure logic: the name table and species_of (a MOL name stands for
 its WoRMS species), prepare_worms_input (accepted-genus expansion),
 run_worms_merge (in_mol credited on the species), genus_homonyms (which genus
 homonym is kept), finalize_tax_results (species MOL rejected),
 summarize_name_resolution (what the TAX tab reports about the MOL names) and
-ncbi_names (the NCBI names of a species). The cached run_name_resolution step
-is exercised via its client contract in test_worms.py.
+ncbi_names (the NCBI names of a species), and the run_name_resolution step
+at the WoRMS client boundary.
 """
 
 import inspect
 
 import pandas as pd
 
+from trident.clients import worms
 from trident.core.database import fingerprint
 from trident.pipelines.names import (
     bold_name_rows,
@@ -26,6 +27,8 @@ from trident.pipelines.names import (
 from trident.pipelines.tax_pipeline import (
     prepare_worms_input,
     prepare_resolution_input,
+    prepare_resolution_taxids,
+    run_name_resolution,
     genus_homonyms,
     run_worms_merge,
     finalize_tax_results,
@@ -204,13 +207,13 @@ def test_merge_credits_synonym_in_mol():
         }
     )
     # WoRMS genus expansion of Gadus -> two accepted species.
-    worms = pd.DataFrame(
+    worms_df = pd.DataFrame(
         {
             "scientificName": ["Gadus macrocephalus", "Gadus morhua"],
             "genus": ["Gadus", "Gadus"],
         }
     )
-    out = _merge(worms, mol, _table({"Gadus ogac": "Gadus macrocephalus"}))
+    out = _merge(worms_df, mol, _table({"Gadus ogac": "Gadus macrocephalus"}))
 
     macro = out[out["scientificName"] == "Gadus macrocephalus"].iloc[0]
     morhua = out[out["scientificName"] == "Gadus morhua"].iloc[0]
@@ -302,8 +305,8 @@ def test_homonym_report_says_which_mol_species_and_sequences_keep_each():
     """The TAX tab report lists each homonym with the MOL species found in it
     and how many of the sequences with that genus name keep it: the fish and
     the plant are each kept by their own sequence and by the open one."""
-    worms = _liparis_worms()
-    report = genus_homonyms(worms, _merge(worms, _liparis_mol(), _LIPARIS_NAMES))
+    worms_df = _liparis_worms()
+    report = genus_homonyms(worms_df, _merge(worms_df, _liparis_mol(), _LIPARIS_NAMES))
     assert report["genusID"].tolist() == [126160, 425907]
     assert report["mol_species"].tolist() == ["Liparis fabricii", "Liparis loeselii"]
     assert report["sequences"].tolist() == ["2/3", "2/3"]
@@ -423,3 +426,101 @@ def test_species_rejected_by_mol_are_dropped_for_that_sequence_only():
         tax, ncbi_search_df=ncbi, name_table=table, drop_mol_rejected=False
     )
     assert len(kept) == len(tax)
+
+
+def test_name_resolution_step_uses_the_taxid_of_most_hits_and_retries_failures(
+    tmp_path, monkeypatch
+):
+    """A name WoRMS does not know is resolved through the NCBI taxid most of
+    its MOL hits carry (WoRMS knows Microcarbo niger only as Phalacrocorax
+    niger); a name whose request failed is not saved and is asked again."""
+    accepted = {
+        "Gadus morhua": {"valid_name": "Gadus morhua", "valid_AphiaID": 126436},
+    }
+    down = {"Gadus ogac"}
+
+    def records(name, session=None):
+        if name in down:
+            raise ConnectionError("WoRMS unreachable")
+        return [{**accepted[name], "status": "accepted"}] if name in accepted else []
+
+    def by_taxid(taxid, session=None):
+        assert taxid == 56300
+        return {
+            "valid_name": "Phalacrocorax niger",
+            "valid_AphiaID": 1,
+            "status": "accepted",
+            "rank": "Species",
+        }
+
+    asked = []
+    monkeypatch.setattr(
+        worms,
+        "get_aphia_records",
+        lambda n, session=None: asked.append(n) or records(n),
+    )
+    monkeypatch.setattr(worms, "get_aphia_record_by_ncbi_taxid", by_taxid)
+    mol_df = pd.DataFrame(
+        {
+            "seq_id": ["s1"] * 5,
+            "scientificName": ["Microcarbo niger"] * 3 + ["Gadus morhua", "Gadus ogac"],
+            "ncbi_taxid": [56300, 56300, 1035, 8049, 8051],
+        }
+    )
+    names = prepare_resolution_input(mol_df)
+    taxids = prepare_resolution_taxids(mol_df)
+    db_path = str(tmp_path / "analysis.db")
+
+    df, _ = run_name_resolution(names, ncbi_taxids=taxids, db_path=db_path)
+    assert df.attrs["failed_items"] == ["Gadus ogac"]
+    resolved = df.set_index("scientificName")
+    assert resolved.loc["Microcarbo niger", "acceptedName"] == "Phalacrocorax niger"
+    assert resolved.loc["Microcarbo niger", "matchedBy"] == "ncbi_taxid"
+    assert resolved.loc["Gadus morhua", "matchedBy"] == "name"
+
+    down.clear()
+    accepted["Gadus ogac"] = {"valid_name": "Gadus ogac", "valid_AphiaID": 254538}
+    asked.clear()
+    df, _ = run_name_resolution(names, ncbi_taxids=taxids, db_path=db_path)
+    assert asked == ["Gadus ogac"]
+    assert sorted(df["scientificName"]) == sorted(names)
+
+
+def test_tax_merge_read_back_equals_the_live_one(tmp_path):
+    """Names, values and types, true/false and number columns included."""
+    mol = pd.DataFrame(
+        {
+            "seq_id": ["s1"],
+            "dna_sequence": ["ACGT"],
+            "scientificName": ["Gadus ogac"],
+            "identity_percentage": [99.0],
+            "query_cover": [100.0],
+            "hit_url": ["url1"],
+        }
+    )
+    worms_df = pd.DataFrame(
+        {
+            "kingdom": "Animalia",
+            "phylum": "Chordata",
+            "class": "Teleostei",
+            "order": "Gadiformes",
+            "family": "Gadidae",
+            "genus": "Gadus",
+            "specificEpithet": ["macrocephalus", "morhua"],
+            "scientificName": ["Gadus macrocephalus", "Gadus morhua"],
+            "scientificNameAuthorship": ["Tilesius, 1810", "Linnaeus, 1758"],
+            "taxonRank": "Species",
+            "taxonID": ["254538", "126436"],
+            "taxonID_db": "WORMS",
+            "taxonURL": [
+                "https://www.marinespecies.org/aphia.php?p=taxdetails&id=254538",
+                "https://www.marinespecies.org/aphia.php?p=taxdetails&id=126436",
+            ],
+            "genusID": 125732,
+        }
+    )
+    table = _table({"Gadus ogac": "Gadus macrocephalus"})
+    db_path = str(tmp_path / "analysis.db")
+    live, _ = run_worms_merge(worms_df, mol, table, db_path=db_path)
+    cached, _ = run_worms_merge(worms_df, mol, table, db_path=db_path)
+    pd.testing.assert_frame_equal(live, cached, check_dtype=True)

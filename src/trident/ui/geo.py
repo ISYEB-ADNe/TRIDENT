@@ -550,7 +550,6 @@ def gbif_filter_job(*, force_rerun, retry_empty=False, min_occurrences, extent):
     st.session_state.geo_df = geo_df
     st.session_state.geo_params = geo_params
     st.session_state.geo_summary_df = geo_summary_df
-    st.session_state.geo_species = geo_df["scientificName"].unique().tolist()
     st.session_state.geo_and_mol_species = (
         geo_df.loc[geo_df["in_mol"], "scientificName"].unique().tolist()
     )

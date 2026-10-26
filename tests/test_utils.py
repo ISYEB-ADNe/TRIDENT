@@ -1,4 +1,6 @@
-"""Tests for trident.core.utils — decorators and helper functions."""
+"""Tests for trident.core.utils, one per helper."""
+
+import math
 
 import pandas as pd
 
@@ -13,44 +15,24 @@ from trident.core.utils import (
 )
 
 
-# --- normalize_name ---
-
-
-def test_normalize_name_casefold_and_whitespace():
-    assert normalize_name("Gadus morhua") == "gadus morhua"
-    assert normalize_name("  Gadus   morhua  ") == "gadus morhua"
-    assert normalize_name("GADUS MORHUA") == "gadus morhua"
-
-
-def test_normalize_name_passes_through_non_strings():
-    import math
-
+def test_names_match_ignoring_case_and_spacing_and_missing_names_match_nothing():
+    assert normalize_name("  GADUS   morhua  ") == "gadus morhua"
     assert normalize_name(None) is None
-    nan = float("nan")
-    assert math.isnan(normalize_name(nan))  # NaN stays NaN -> won't spuriously match
+    assert math.isnan(normalize_name(float("nan")))
 
 
-# --- ensure_columns ---
-
-
-def test_ensure_columns_adds_missing_and_keeps_existing():
-    df = pd.DataFrame({"a": [1, 2]})
-    out = ensure_columns(df, ["a", "b", "c"])
+def test_ensure_columns_adds_missing_columns_filled_and_keeps_existing():
+    out = ensure_columns(pd.DataFrame({"a": [1, 2]}), ["a", "b", "c"])
     assert list(out.columns) == ["a", "b", "c"]
-    assert out["a"].tolist() == [1, 2]  # existing untouched
-    assert out["b"].isna().all()
+    assert out["a"].tolist() == [1, 2]
+    assert out[["b", "c"]].isna().all().all()
+    assert ensure_columns(pd.DataFrame({"a": [1]}), ["b"], fill=0)["b"].tolist() == [0]
 
 
-def test_ensure_columns_custom_fill():
-    df = ensure_columns(pd.DataFrame({"a": [1]}), ["b"], fill=0)
-    assert df["b"].tolist() == [0]
-
-
-# --- top_hit_per_group ---
-
-
-def _hits():
-    return pd.DataFrame(
+def test_top_hit_per_group_keeps_the_best_rows_of_each_group():
+    """Same result as sorting then dropping duplicates; with n, the n best
+    rows of each group, restricted to the columns asked."""
+    df = pd.DataFrame(
         {
             "seq_id": ["s1", "s1", "s1", "s2"],
             "scientificName": ["A", "A", "B", "C"],
@@ -58,133 +40,62 @@ def _hits():
             "query_cover": [100, 50, 100, 100],
         }
     )
-
-
-def test_top_hit_per_group_keeps_best_per_group():
-    out = top_hit_per_group(
-        _hits(),
-        keys=["seq_id", "scientificName"],
-        sort=["identity_percentage", "query_cover"],
+    sort = ["identity_percentage", "query_cover"]
+    expected = df.sort_values(sort, ascending=False).drop_duplicates(
+        subset=["seq_id", "scientificName"]
     )
-    # (s1, A) -> the 99.0 row; one row per (seq_id, scientificName)
-    assert len(out) == 3
-    a = out[(out.seq_id == "s1") & (out.scientificName == "A")]
-    assert a["identity_percentage"].iloc[0] == 99.0
-
-
-def test_top_hit_per_group_matches_sort_drop_duplicates():
-    df = _hits()
-    expected = df.sort_values(
-        ["identity_percentage", "query_cover"], ascending=False
-    ).drop_duplicates(subset=["seq_id", "scientificName"])
-    out = top_hit_per_group(
-        df,
-        keys=["seq_id", "scientificName"],
-        sort=["identity_percentage", "query_cover"],
-    )
+    out = top_hit_per_group(df, keys=["seq_id", "scientificName"], sort=sort)
     pd.testing.assert_frame_equal(out, expected)
 
-
-def test_top_hit_per_group_top_n_and_columns():
     out = top_hit_per_group(
-        _hits(),
-        keys=["seq_id"],
-        sort=["identity_percentage", "query_cover"],
-        n=2,
-        columns=["seq_id", "identity_percentage"],
+        df, keys=["seq_id"], sort=sort, n=2, columns=["seq_id", "identity_percentage"]
     )
     assert list(out.columns) == ["seq_id", "identity_percentage"]
-    # s1 has 3 rows -> top 2 by identity (99, 95); s2 has 1
-    s1 = out[out.seq_id == "s1"]["identity_percentage"].tolist()
-    assert s1 == [99.0, 95.0]
+    assert out["identity_percentage"].tolist() == [99.0, 95.0, 80.0]
 
 
-# --- notify_progress ---
-
-
-def test_notify_progress_dict():
+def test_progress_reaches_a_dict_or_tqdm_handler_and_none_is_ignored():
     handler = {"current": 0, "total": 10}
     notify_progress(handler, n=3)
     assert handler["current"] == 3
 
-
-def test_notify_progress_none():
-    notify_progress(None)  # should not raise
-
-
-def test_notify_progress_tqdm_like():
     class FakeTqdm:
-        def __init__(self):
-            self.n = 0
+        n = 0
 
         def update(self, n):
             self.n += n
 
-    t = FakeTqdm()
-    notify_progress(t, n=5)
-    assert t.n == 5
+    bar = FakeTqdm()
+    notify_progress(bar, n=5)
+    assert bar.n == 5
+    notify_progress(None)
 
 
-# --- extract_specific_epithet ---
-
-
-def test_extract_epithet_normal():
+def test_epithet_only_when_the_name_starts_with_the_genus():
     assert extract_specific_epithet("Gadus morhua", "Gadus") == "morhua"
-
-
-def test_extract_epithet_genus_mismatch():
     assert extract_specific_epithet("Gadus morhua", "Zeus") is None
-
-
-def test_extract_epithet_empty():
     assert extract_specific_epithet(None, "Gadus") is None
     assert extract_specific_epithet("Gadus morhua", None) is None
     assert extract_specific_epithet("", "") is None
 
 
-# --- preserve_sequence_order ---
+def test_step_output_follows_the_input_sequence_order():
+    """Rows are grouped by sequence in the order of the input, duplicates
+    included; an empty result or one without the column passes through."""
 
-
-def test_preserve_order_basic():
     @preserve_sequence_order("seq_id", "input_df")
     def scramble(input_df):
         return input_df.sort_values("val").reset_index(drop=True)
 
-    df = pd.DataFrame({"seq_id": ["b", "a", "c"], "val": [2, 1, 3]})
-    result = scramble(df)
-    assert list(result["seq_id"]) == ["b", "a", "c"]
+    df = pd.DataFrame({"seq_id": ["b", "a", "b", "a"], "val": [4, 1, 3, 2]})
+    assert scramble(df)["seq_id"].tolist() == ["b", "b", "a", "a"]
 
-
-def test_preserve_order_with_duplicates():
-    @preserve_sequence_order("seq_id", "input_df")
-    def identity(input_df):
-        return input_df.copy()
-
-    df = pd.DataFrame({"seq_id": ["b", "a", "b", "a"], "val": [1, 2, 3, 4]})
-    result = identity(df)
-    assert list(result["seq_id"]) == ["b", "b", "a", "a"]
-
-
-def test_preserve_order_empty_result():
     @preserve_sequence_order("seq_id", "input_df")
     def empty(input_df):
         return pd.DataFrame(columns=input_df.columns)
 
-    df = pd.DataFrame({"seq_id": ["a"], "val": [1]})
-    result = empty(df)
-    assert result.empty
-
-
-def test_preserve_order_missing_column():
-    """Gracefully passes through when column is absent."""
-
-    @preserve_sequence_order("seq_id", "input_df")
-    def identity(input_df):
-        return input_df.copy()
-
-    df = pd.DataFrame({"other": [1, 2]})
-    result = identity(df)
-    assert list(result["other"]) == [1, 2]
+    assert empty(df).empty
+    assert scramble(pd.DataFrame({"val": [2, 1]}))["val"].tolist() == [1, 2]
 
 
 def test_to_binomial_keeps_the_species_a_qualifier_refers_to():

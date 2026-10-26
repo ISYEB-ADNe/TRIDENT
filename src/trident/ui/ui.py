@@ -353,6 +353,8 @@ class AppState:
     sequences_id: list[str] | None = None
     sequences_df: "pd.DataFrame | None" = None
 
+    # The *_logs fields hold each step's log lines, written and read by
+    # prefix (StreamlitLogSink, display_run_button).
     ncbi_logs: list[str] = field(default_factory=list)
     ncbi_search_flag: bool = False
     ncbi_search_params: dict[str, Any] = field(default_factory=dict)
@@ -383,7 +385,6 @@ class AppState:
     gbif_filter_flag: bool = False
     gbif_filter_df: "pd.DataFrame | None" = None
     geo_params: dict[str, Any] = field(default_factory=dict)
-    geo_species: list[str] = field(default_factory=list)
     geo_and_mol_species: list[str] = field(default_factory=list)
     geo_summary_df: "pd.DataFrame | None" = None
     geo_df: "pd.DataFrame | None" = None

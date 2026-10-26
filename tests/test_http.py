@@ -32,27 +32,24 @@ def _flaky(failures: int, exc: type[Exception] = ConnectionError):
     return func, calls
 
 
-def test_retry_call_returns_once_an_attempt_succeeds(sleeps):
+def test_retry_call_retries_listed_errors_after_each_delay(sleeps):
+    """It returns once an attempt succeeds, raises the last error when all
+    fail, and does not retry an error it was not given."""
     func, calls = _flaky(failures=2)
     assert retry_call(delays=(30, 60))(func)() == "ok"
-    assert len(calls) == 3
-    assert sleeps == [30, 60]
+    assert len(calls) == 3 and sleeps == [30, 60]
 
-
-def test_retry_call_raises_the_last_error_when_all_attempts_fail(sleeps):
+    sleeps.clear()
     func, calls = _flaky(failures=5)
     with pytest.raises(ConnectionError, match="failure 3"):
         retry_call(delays=(30, 60))(func)()
-    assert len(calls) == 3
-    assert sleeps == [30, 60]
+    assert len(calls) == 3 and sleeps == [30, 60]
 
-
-def test_retry_call_does_not_retry_unlisted_exceptions(sleeps):
+    sleeps.clear()
     func, calls = _flaky(failures=1, exc=KeyError)
     with pytest.raises(KeyError):
         retry_call(delays=(30,), exceptions=(ConnectionError,))(func)()
-    assert len(calls) == 1
-    assert sleeps == []
+    assert len(calls) == 1 and sleeps == []
 
 
 def test_stopped_step_sends_nothing_and_is_not_retried(sleeps):

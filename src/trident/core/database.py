@@ -164,15 +164,11 @@ def _write_provenance(
     )
 
 
-def _delete_provenance(
-    conn: sqlite3.Connection, step: str, run_ids: list[int] | None = None
-) -> None:
-    """Drop provenance rows for *step* (optionally only specific run_ids)."""
+def _delete_provenance(conn: sqlite3.Connection, step: str, run_ids: list[int]) -> None:
+    """Drop the provenance rows of *run_ids* for *step*."""
     if not _table_exists(conn, _PROVENANCE_TABLE):
         return
-    if run_ids is None:
-        conn.execute(f"DELETE FROM {_PROVENANCE_TABLE} WHERE step = ?", (step,))
-    elif run_ids:
+    if run_ids:
         placeholders = ",".join("?" * len(run_ids))
         conn.execute(
             f"DELETE FROM {_PROVENANCE_TABLE} "
@@ -1088,61 +1084,6 @@ def save_to_db(
         return wrapper
 
     return decorator
-
-
-def view_cached_runs(db_path: str | Path, table_name: str) -> pd.DataFrame:
-    """Return a summary of cached runs (params + row counts per run_id)."""
-    inputs_table = f"{table_name}_inputs"
-    with get_connection(db_path) as conn:
-        if not _table_exists(conn, inputs_table):
-            logger.warning(f"No cache found for '{table_name}'")
-            return pd.DataFrame()
-
-        inputs_df = pd.read_sql_query(
-            f"SELECT * FROM {inputs_table} ORDER BY run_id", conn
-        )
-
-        # A missing results table means every run was empty (row_count 0).
-        if _table_exists(conn, table_name):
-            counts = pd.read_sql_query(
-                f"SELECT run_id, COUNT(*) as row_count FROM {table_name} GROUP BY run_id",
-                conn,
-            )
-        else:
-            counts = pd.DataFrame(columns=["run_id", "row_count"])
-
-        result = inputs_df.merge(counts, on="run_id", how="left")
-        result["row_count"] = result["row_count"].fillna(0).astype(int)
-
-        # Attach the queried-on date when provenance is available.
-        if _table_exists(conn, _PROVENANCE_TABLE):
-            prov = pd.read_sql_query(
-                f"SELECT run_id, queried_on FROM {_PROVENANCE_TABLE} WHERE step = ?",
-                conn,
-                params=(table_name,),
-            )
-            result = result.merge(prov, on="run_id", how="left")
-        return result
-
-
-def clear_cache(
-    db_path: str | Path, table_name: str, run_id: int | None = None
-) -> None:
-    """Drop a specific run or the entire table (+ its inputs table)."""
-    inputs_table = f"{table_name}_inputs"
-    with get_connection(db_path) as conn:
-        if run_id is not None:
-            _delete_run(conn, table_name, run_id)
-            conn.execute(f"DELETE FROM {inputs_table} WHERE run_id = ?", (run_id,))
-            _delete_provenance(conn, table_name, [run_id])
-            conn.commit()
-            logger.info(f"Cleared run_id={run_id} from '{table_name}'")
-        else:
-            conn.execute(f"DROP TABLE IF EXISTS {table_name}")
-            conn.execute(f"DROP TABLE IF EXISTS {inputs_table}")
-            _delete_provenance(conn, table_name)
-            conn.commit()
-            logger.info(f"Cleared all cache for '{table_name}'")
 
 
 def _empty_run_ids(

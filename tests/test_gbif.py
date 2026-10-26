@@ -20,63 +20,40 @@ from trident.clients.gbif import (
     _match_single_taxon_name,
     match_taxon_names,
 )
+from trident.core.database import get_connection
 from trident.core.utils import ensure_columns
 from trident.pipelines import geo_pipeline
 
 
-# --- parse_coordinate ---
+# --- parse_coordinate, get_extent_column_name ---
 
 
-def test_parse_numeric():
-    assert parse_coordinate(45.5, "lat") == 45.5
-    assert parse_coordinate(-120, "lon") == -120.0
+@pytest.mark.parametrize(
+    "value, kind, degrees",
+    [
+        (45.5, "lat", 45.5),
+        (-120, "lon", -120.0),
+        ("45.5", "lat", 45.5),
+        ("45°30'15\"N", "lat", 45 + 30 / 60 + 15 / 3600),
+        ("45°30'0\"S", "lat", -45.5),
+    ],
+)
+def test_coordinate_read_as_decimal_degrees(value, kind, degrees):
+    assert parse_coordinate(value, kind) == pytest.approx(degrees, abs=1e-6)
 
 
-def test_parse_decimal_string():
-    assert parse_coordinate("45.5", "lat") == 45.5
-
-
-def test_parse_dms_north():
-    # 45°30'15"N = 45 + 30/60 + 15/3600
-    assert parse_coordinate("45°30'15\"N", "lat") == pytest.approx(45.504166, abs=1e-5)
-
-
-def test_parse_dms_south_is_negative():
-    assert parse_coordinate("45°30'0\"S", "lat") == pytest.approx(-45.5, abs=1e-6)
-
-
-def test_parse_out_of_range_raises():
+@pytest.mark.parametrize(
+    "value, kind",
+    [(200, "lon"), (95, "lat"), ("45°30'15\"E", "lat"), ("", "lat"), ("abc", "lat")],
+)
+def test_coordinate_out_of_range_or_unreadable_is_refused(value, kind):
     with pytest.raises(ValueError):
-        parse_coordinate(200, "lon")
-    with pytest.raises(ValueError):
-        parse_coordinate(95, "lat")
+        parse_coordinate(value, kind)
 
 
-def test_parse_wrong_direction_for_type_raises():
-    # An east/west direction is invalid for a latitude.
-    with pytest.raises(ValueError):
-        parse_coordinate("45°30'15\"E", "lat")
-
-
-def test_parse_empty_and_garbage_raise():
-    with pytest.raises(ValueError):
-        parse_coordinate("", "lat")
-    with pytest.raises(ValueError):
-        parse_coordinate("not a coordinate", "lat")
-
-
-# --- get_extent_column_name ---
-
-
-def test_extent_numeric():
-    assert get_extent_column_name(100) == "100 km"
-    assert get_extent_column_name(100.0) == "100 km"
-    assert get_extent_column_name("250") == "250 km"
-
-
-def test_extent_string():
-    assert get_extent_column_name("global") == "global"
-    assert get_extent_column_name("GLOBAL") == "global"
+def test_extent_column_is_named_in_km_or_global():
+    names = [get_extent_column_name(v) for v in (100, 100.0, "250", "global", "GLOBAL")]
+    assert names == ["100 km", "100 km", "250 km", "global", "global"]
 
 
 # --- match failure contract (matchType == "ERROR" -> routed to failure_sink) ---
@@ -236,6 +213,56 @@ def test_run_gbif_search_routes_occurrence_errors_to_failure_sink(monkeypatch):
     assert df.empty  # both taxa errored -> dropped from the result
 
 
+def test_resumed_gbif_search_counts_each_species_once_per_extent(monkeypatch, tmp_path):
+    """A search adding a species and an extent to a saved one asks GBIF only
+    for the species not saved in each extent, and gives each species one
+    count per extent; the same search again asks nothing."""
+    names = ["Gadus morhua", "Thunnus thynnus", "Salmo salar"]
+
+    def fake_match(queried, **k):
+        return pd.DataFrame(
+            [
+                {
+                    "query": n,
+                    "canonicalName": n,
+                    "confidence": 99,
+                    "matchType": "EXACT",
+                    "needs_review": False,
+                    "taxonID": str(1000 + names.index(n)),
+                    "rank": "SPECIES",
+                    "genus": n.split()[0],
+                    "kingdom": "Animalia",
+                    "status": "ACCEPTED",
+                    "matched_by": "WoRMS ID",
+                }
+                for n in queried
+            ]
+        )
+
+    asked = []
+
+    def answer(params):
+        asked.append(sorted(params["taxonKey"]))
+        counts = [{"name": key, "count": 5} for key in params["taxonKey"]]
+        return {"facets": [{"counts": counts}]}
+
+    monkeypatch.setattr(geo_pipeline, "match_taxon_names", fake_match)
+    monkeypatch.setattr(gbif, "create_session", lambda *a, **k: _JsonSession(answer))
+    area = {"latitude": 43.0, "longitude": 7.0, "db_path": str(tmp_path / "a.db")}
+
+    geo_pipeline.run_gbif_search(names[:2], extents=[500], **area)
+    asked.clear()
+    df, _ = geo_pipeline.run_gbif_search(names, extents=[500, 1000], **area)
+    assert asked == [["1002"], ["1000", "1001", "1002"]]
+    pairs = sorted(zip(df["scientificName"], df["gbif_extent"].astype(int)))
+    assert pairs == sorted((n, e) for n in names for e in (500, 1000))
+    assert set(df["occurrences"]) == {5}
+
+    asked.clear()
+    geo_pipeline.run_gbif_search(names, extents=[500, 1000], **area)
+    assert asked == []
+
+
 # --- no usable matches: filter must not crash, returns empty columned frame ---
 
 
@@ -331,9 +358,10 @@ def test_merge_drops_species_without_gbif_data(monkeypatch):
     assert {"seq_id", "scientificName", "in_mol", "geo_extent"} <= set(merged.columns)
 
 
-def test_merge_keeps_whole_counts_when_a_species_lacks_gbif_data():
+def test_merge_keeps_whole_counts_when_a_species_lacks_gbif_data(tmp_path):
     """A TAX species GBIF does not hold leaves the merge, and the counts of
-    the others stay whole numbers (a decimal column would be saved as such)."""
+    the others stay whole numbers (a decimal column would be saved as such):
+    read back from the analysis, the merge equals the live one."""
     gbif_search_df = pd.DataFrame(
         {
             "scientificName": ["Gadus morhua"],
@@ -346,10 +374,20 @@ def test_merge_keeps_whole_counts_when_a_species_lacks_gbif_data():
         {"seq_id": ["s1", "s1"], "scientificName": ["Gadus morhua", "Gadus ogac"]}
     )
 
-    merged = inspect.unwrap(geo_pipeline.run_gbif_merge)(gbif_search_df, tax_df)
+    db_path = str(tmp_path / "analysis.db")
+    params = {"gbif_search_params": {"gbif_extents": ["500"]}, "tax_params": {"t": 1}}
+    merged, _ = geo_pipeline.run_gbif_merge(
+        gbif_search_df, tax_df, **params, db_path=db_path
+    )
+    cached, _ = geo_pipeline.run_gbif_merge(
+        gbif_search_df, tax_df, **params, db_path=db_path
+    )
+    with get_connection(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM gbif_merge").fetchone()[0] == 1
 
     assert merged["scientificName"].tolist() == ["Gadus morhua"]
     assert pd.api.types.is_integer_dtype(merged["geo_occurrences"])
+    pd.testing.assert_frame_equal(merged, cached, check_dtype=True)
 
 
 def test_filter_finds_the_extent_however_it_is_written():

@@ -14,11 +14,12 @@ import inspect
 import threading
 
 import pandas as pd
+import pytest
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
 import trident.pipelines.hypo_pipeline as hypo_pipeline
-from trident.core.database import view_cached_runs
+from trident.core.database import get_connection
 from trident.pipelines.names import build_name_table, gbif_name_rows
 from trident.pipelines.hypo_pipeline import (
     count_hypo_searches,
@@ -315,7 +316,8 @@ def test_hypo_search_failed_proxy_blast_is_not_cached(tmp_path, monkeypatch):
     df, _ = run_hypo_search(sequences, db_path=db_path)
 
     assert df.attrs["failed_items"] == [("P1", query_a)]
-    cached = view_cached_runs(db_path, "hypo_search")
+    with get_connection(db_path) as conn:
+        cached = pd.read_sql_query("SELECT * FROM hypo_search_inputs", conn)
     assert sorted(zip(cached["seq_id"], cached["entrez_query"])) == sorted(
         [("P1", query_b), ("P2", query_a)]
     )
@@ -438,7 +440,8 @@ def test_hypo_check_failed_species_does_not_evict_its_siblings(tmp_path, monkeyp
     df, _ = run_hypo_check(filter_df, db_path=db_path)
 
     assert df.attrs["failed_items"] == [("t1", "Gadus ogac")]
-    cached = view_cached_runs(db_path, "hypo_check")
+    with get_connection(db_path) as conn:
+        cached = pd.read_sql_query("SELECT * FROM hypo_check_inputs", conn)
     assert list(zip(cached["seq_id"], cached["scientificName"])) == [
         ("t1", "Gadus morhua")
     ]
@@ -468,3 +471,36 @@ def test_hypo_check_runs_checks_in_parallel(tmp_path, monkeypatch):
     run_hypo_check(filter_df, num_threads=2, db_path=str(tmp_path / "hypo.db"))
 
     assert other_done.is_set()
+
+
+def test_hypo_check_keeps_each_finished_species_when_the_step_crashes(
+    tmp_path, monkeypatch
+):
+    """A species checked is saved under its (sequence, species) key as soon as
+    it finishes: after a crash, the next run checks only the others."""
+    checked = []
+
+    def blast(batch, entrez_query=None, **kwargs):
+        checked.append(entrez_query)
+        if "Gadus ogac" in entrez_query and crash:
+            raise RuntimeError("process killed")
+        return pd.DataFrame()
+
+    monkeypatch.setattr(hypo_pipeline, "submit_blast_batch", blast)
+    filter_df = pd.DataFrame(
+        {
+            "seq_id": ["t1", "t1"],
+            "scientificName": ["Gadus morhua", "Gadus ogac"],
+            "dna_sequence": ["ACGT", "ACGT"],
+        }
+    )
+    db_path = str(tmp_path / "hypo.db")
+
+    crash = True
+    with pytest.raises(RuntimeError):
+        run_hypo_check(filter_df, db_path=db_path, num_threads=1)
+    crash = False
+    checked.clear()
+    df, _ = run_hypo_check(filter_df, db_path=db_path)
+    assert len(checked) == 1 and "Gadus ogac" in checked[0]
+    assert sorted(df["scientificName"]) == ["Gadus morhua", "Gadus ogac"]

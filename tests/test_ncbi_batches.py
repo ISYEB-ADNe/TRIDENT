@@ -20,6 +20,7 @@ from Bio.SeqRecord import SeqRecord
 
 import trident.clients.ncbi as ncbi
 import trident.core.stop as stop
+from trident.pipelines.mol_pipeline import run_ncbi_search
 
 
 def _batch(start: int, n: int) -> list[SeqRecord]:
@@ -352,3 +353,24 @@ def test_batches_are_submitted_in_queue_order(ncbi_fake, monkeypatch):
     ncbi.run_blast_batches([_batch(i, 1) for i in range(12)], n_threads=1)
 
     assert submitted == [f"s{i}" for i in range(12)]
+
+
+def test_mol_search_step_saves_each_sequence_hits_and_retries_failed_ones(
+    ncbi_fake, tmp_path
+):
+    """Every sequence BLAST answered gets its named hits; one NCBI rejected is
+    not saved, and the next run sends only it."""
+    sequences = _batch(0, 3)
+    ncbi_fake.bad = {"s1"}
+    db_path = str(tmp_path / "analysis.db")
+
+    df, _ = run_ncbi_search(sequences, batch_size=2, num_threads=1, db_path=db_path)
+    assert df.attrs["failed_items"] == ["s1"]
+    assert sorted(df["seq_id"].unique()) == ["s0", "s2"]
+    assert df["scientificName"].notna().all()
+
+    ncbi_fake.bad = set()
+    ncbi_fake.queries.clear()
+    df, _ = run_ncbi_search(sequences, batch_size=2, num_threads=1, db_path=db_path)
+    assert list(ncbi_fake.queries.values()) == [["s1"]]
+    assert sorted(df["seq_id"].unique()) == ["s0", "s1", "s2"]

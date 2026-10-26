@@ -9,10 +9,12 @@ the BOLD proxies to the other pairs only.
 
 import pandas as pd
 
+from trident.pipelines import extra_pipeline
 from trident.pipelines.names import build_name_table
 from trident.pipelines.extra_pipeline import (
     build_extra_summary,
     prepare_bold_input,
+    run_bold_filter,
     run_bold_merge,
 )
 
@@ -123,3 +125,31 @@ def test_proxy_only_where_ncbi_did_not_find_the_species():
     assert merged["proxy_id"].tolist() == ["BOLD1"]
     summary = build_extra_summary(merged, geo_df, ncbi_search_df, None)
     assert summary["seq_id"].tolist() == ["t2"]
+
+
+def test_resumed_bold_filter_filters_only_the_new_species(tmp_path, monkeypatch):
+    """Species filtered before are read back; only a new one is filtered, and
+    each keeps one of its identical sequences."""
+    filtered = []
+    real = extra_pipeline.select_longest_sequences
+
+    def select(seqs, **kwargs):
+        filtered.append(len(seqs))
+        return real(seqs, **kwargs)
+
+    monkeypatch.setattr(extra_pipeline, "select_longest_sequences", select)
+
+    def search_df(species):
+        return pd.DataFrame(
+            {
+                "scientificName": [s for s in species for _ in range(2)],
+                "dna_sequence": ["ACGTACGTAC"] * 2 * len(species),
+            }
+        )
+
+    db_path = str(tmp_path / "analysis.db")
+    run_bold_filter(search_df(["A", "B"]), similarity=98, db_path=db_path)
+    filtered.clear()
+    df, _ = run_bold_filter(search_df(["A", "B", "C"]), similarity=98, db_path=db_path)
+    assert filtered == [2]
+    assert sorted(df["scientificName"]) == ["A", "B", "C"]

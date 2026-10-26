@@ -40,26 +40,16 @@ def _curated_df():
     )
 
 
-def test_filter_excluded_noop_when_empty():
-    expected = _curated_df()
-    assert filter_excluded_results(_curated_df(), set()).equals(expected)
-    assert filter_excluded_results(_curated_df(), None).equals(expected)
-
-
-def test_filter_excluded_drops_selected_species():
-    out = filter_excluded_results(_curated_df(), {"s1||Gadus ogac"})
-    assert "Gadus ogac" not in out["scientificName"].tolist()
-    assert "Gadus morhua" in out["scientificName"].tolist()
-    assert len(out) == 2
-
-
-def test_filter_excluded_keeps_emptied_seq_as_blank_row():
-    # Excluding the only species of s2 leaves an empty placeholder row.
-    out = filter_excluded_results(_curated_df(), {"s2||Salmo salar"})
-    s2 = out[out["seq_id"] == "s2"]
-    assert len(s2) == 1
-    assert pd.isna(s2["scientificName"].iloc[0])
-    assert s2["dna_sequence"].iloc[0] == "CCC"
+def test_excluded_species_leave_the_results_and_an_emptied_sequence_stays_blank():
+    """No exclusion changes nothing; excluding the only species of s2 leaves
+    a row with its sequence and no species."""
+    assert filter_excluded_results(_curated_df(), set()).equals(_curated_df())
+    assert filter_excluded_results(_curated_df(), None).equals(_curated_df())
+    out = filter_excluded_results(_curated_df(), {"s1||Gadus ogac", "s2||Salmo salar"})
+    assert out["seq_id"].tolist() == ["s1", "s2"]
+    assert out["scientificName"].iloc[0] == "Gadus morhua"
+    assert pd.isna(out["scientificName"].iloc[1])
+    assert out["dna_sequence"].iloc[1] == "CCC"
 
 
 @pytest.fixture
@@ -122,68 +112,46 @@ def hypo_df():
 
 
 class TestBuildResultsDf:
-    def test_mol_geo_only(self, sequences_df, geo_df, mol_df):
-        result = build_results_df(sequences_df, geo_df, mol_df, name_table=None)
-        assert "validation_step" in result.columns
-        mol_geo = result[result["validation_step"] == "MOL+GEO"]
-        assert len(mol_geo) == 3
-
-    def test_with_hypo(self, sequences_df, geo_df, mol_df, hypo_df):
-        result = build_results_df(
-            sequences_df, geo_df, mol_df, hypo_df=hypo_df, name_table=None
-        )
-        hypo = result[result["validation_step"] == "HYPO"]
-        assert len(hypo) == 1
-        assert hypo.iloc[0]["scientificName"] == "SpecD"
-
-    def test_empty_sequences_get_row(self, sequences_df, geo_df, mol_df):
-        """s3 has no species → gets an empty row with seq_id and dna_sequence."""
-        result = build_results_df(sequences_df, geo_df, mol_df, name_table=None)
-        s3_rows = result[result["seq_id"] == "s3"]
-        assert len(s3_rows) == 1
-        assert pd.isna(s3_rows.iloc[0]["scientificName"])
-        assert s3_rows.iloc[0]["dna_sequence"] == "TTTT"
-
-    def test_preserves_sequence_order(self, geo_df, mol_df):
-        """Output follows the order of sequences_df."""
+    def test_one_row_per_species_and_per_empty_sequence_in_input_order(
+        self, geo_df, mol_df, hypo_df
+    ):
+        """Every EXPORT_COL is present; a sequence without species gets a row
+        with its sequence."""
         sequences_df = pd.DataFrame(
-            {"seq_id": ["s2", "s1"], "dna_sequence": ["G", "A"]}
+            {"seq_id": ["s3", "s2", "s1"], "dna_sequence": ["TTTT", "GCTA", "ATCG"]}
         )
-        result = build_results_df(sequences_df, geo_df, mol_df, name_table=None)
-        seq_order = result["seq_id"].unique().tolist()
-        assert seq_order == ["s2", "s1"]
-
-    def test_all_export_cols_present(self, sequences_df, geo_df, mol_df, hypo_df):
-        """All EXPORT_COLS should be present (possibly as NA)."""
         result = build_results_df(
             sequences_df, geo_df, mol_df, hypo_df=hypo_df, name_table=None
         )
-        for col in EXPORT_COLS:
-            assert col in result.columns, f"Missing column: {col}"
+        assert set(EXPORT_COLS) <= set(result.columns)
+        assert result["seq_id"].tolist() == ["s3", "s2", "s2", "s1", "s1"]
+        s3 = result.iloc[0]
+        assert pd.isna(s3["scientificName"]) and s3["dna_sequence"] == "TTTT"
 
-    def test_hypo_keeps_its_proxy_hit(self, sequences_df, geo_df, mol_df, hypo_df):
-        """HYPO rows keep their best proxy hit as proxy_identity."""
+    def test_mol_geo_rows_keep_their_best_mol_hit(self, sequences_df, geo_df, mol_df):
+        result = build_results_df(sequences_df, geo_df, mol_df, name_table=None)
+        mol_geo = result[result["validation_step"] == "MOL+GEO"]
+        assert mol_geo["scientificName"].tolist() == ["SpecA", "SpecB", "SpecC"]
+        assert mol_geo["mol_identity"].tolist() == [99.0, 97.0, 95.0]
+
+    @pytest.mark.parametrize("hypo", [None, pd.DataFrame()])
+    def test_no_hypo_list_gives_only_mol_geo_rows(
+        self, sequences_df, geo_df, mol_df, hypo
+    ):
+        result = build_results_df(
+            sequences_df, geo_df, mol_df, hypo_df=hypo, name_table=None
+        )
+        assert set(result["validation_step"].dropna()) == {"MOL+GEO"}
+
+    def test_hypo_rows_keep_their_proxy_hit(
+        self, sequences_df, geo_df, mol_df, hypo_df
+    ):
         result = build_results_df(
             sequences_df, geo_df, mol_df, hypo_df=hypo_df, name_table=None
         )
         hypo = result[result["validation_step"] == "HYPO"]
-        assert "proxy_identity" in result.columns
-        assert hypo.iloc[0]["proxy_identity"] == 88.0
-
-    def test_empty_hypo_df(self, sequences_df, geo_df, mol_df):
-        """Empty hypo_df is treated like None."""
-        result = build_results_df(
-            sequences_df, geo_df, mol_df, hypo_df=pd.DataFrame(), name_table=None
-        )
-        assert (result["validation_step"].dropna() == "MOL+GEO").all()
-
-    def test_ncbi_identity_from_the_geo_list(self, sequences_df, geo_df, mol_df):
-        """MOL+GEO rows keep the best MOL hit the GEO list carries from TAX."""
-        result = build_results_df(sequences_df, geo_df, mol_df, name_table=None)
-        s1_specA = result[
-            (result["seq_id"] == "s1") & (result["scientificName"] == "SpecA")
-        ]
-        assert s1_specA.iloc[0]["mol_identity"] == 99.0
+        assert hypo["scientificName"].tolist() == ["SpecD"]
+        assert hypo["proxy_identity"].tolist() == [88.0]
 
     def test_hypo_species_carries_its_mol_link(self, sequences_df, geo_df, mol_df):
         """A HYPO species gets the MOL species its proxy matched and the
@@ -334,28 +302,39 @@ def _liparis(seq_id, taxonomy, name):
     }
 
 
-def _worms_genus(aphia_id, kingdom, class_, status="accepted"):
+def _worms_genus(aphia_id, kingdom, class_, status="accepted", accepted=None):
+    """A WoRMS genus record; *accepted* is (AphiaID, authority) of the
+    accepted record an unaccepted one points to."""
+    valid_id, valid_authority = accepted or (aphia_id, "Author, 1800")
     return {
         "AphiaID": aphia_id,
-        "valid_AphiaID": aphia_id,
+        "valid_AphiaID": valid_id,
         "rank": "Genus",
         "status": status,
         "kingdom": kingdom,
         "class": class_,
         "authority": "Author, 1800",
+        "valid_authority": valid_authority,
     }
 
 
 def test_gbif_export_takes_the_worms_record_of_the_rows_group(monkeypatch):
     """A sequence resolved to a genus that is also a genus in another group
     gets the WoRMS record of its own class, even when the other is listed
-    first and accepted while its own is not."""
+    first and accepted while its own is not; an unaccepted record gives the
+    ID and authority of the accepted record it points to."""
     monkeypatch.setattr(
         results_pipeline,
         "get_aphia_records",
         lambda name, session=None: [
             _worms_genus(425907, "Plantae", "Magnoliopsida"),
-            _worms_genus(126160, "Animalia", "Teleostei", status="unaccepted"),
+            _worms_genus(
+                126160,
+                "Animalia",
+                "Teleostei",
+                status="unaccepted",
+                accepted=(126161, "Scopoli, 1777"),
+            ),
         ],
     )
     results = pd.DataFrame(
@@ -363,7 +342,8 @@ def test_gbif_export_takes_the_worms_record_of_the_rows_group(monkeypatch):
     )
     row = build_gbif_export_df(results).iloc[0]
     assert row["scientificName"] == "Liparis"
-    assert row["taxonID"] == "126160"
+    assert row["taxonID"] == "126161"
+    assert row["scientificNameAuthorship"] == "Scopoli, 1777"
 
 
 def test_gbif_export_saves_its_worms_lookups(monkeypatch, tmp_path):
