@@ -156,6 +156,45 @@ def test_search_returns_counts_and_zero_fills_absent(monkeypatch):
     assert dict(zip(df["taxonID"], df["count"])) == {"111": 42, "222": 0}
 
 
+def test_search_counts_rare_species_cut_from_a_full_facet_list(monkeypatch):
+    # Like GBIF, the facet lists each species' ancestors too, most records
+    # first, cut at facetLimit: in a batch of 4 the species fall off the end.
+    def answer(params):
+        counts = []
+        for key in params["taxonKey"]:
+            counts += [{"name": f"{key}-a{i}", "count": 1000} for i in range(15)]
+            counts.append({"name": key, "count": int(key)})
+        counts.sort(key=lambda c: -c["count"])
+        return {"facets": [{"counts": counts[: params["facetLimit"]]}]}
+
+    monkeypatch.setattr(gbif, "create_session", lambda *a, **k: _JsonSession(answer))
+    keys = ["1", "2", "3", "4"]
+    df, failed = search_taxon_occurrences(keys, batch_size=4)
+
+    assert failed == []
+    assert dict(zip(df["taxonID"], df["count"])) == {k: int(k) for k in keys}
+
+
+def test_search_counts_a_species_only_from_its_own_batch(monkeypatch):
+    # Like GBIF: asking for Larus glaucoides thayeri also lists L. glaucoides,
+    # with only the subspecies' records (counts seen live, worldwide).
+    thayeri, glaucoides = "B765P", "3SBQC"
+
+    def answer(params):
+        if params["taxonKey"] == [thayeri]:
+            counts = {thayeri: 4760, glaucoides: 4760}
+        else:
+            counts = {thayeri: 4760, glaucoides: 520609}
+        return {
+            "facets": [{"counts": [{"name": n, "count": c} for n, c in counts.items()]}]
+        }
+
+    monkeypatch.setattr(gbif, "create_session", lambda *a, **k: _JsonSession(answer))
+    df, _ = search_taxon_occurrences([thayeri, glaucoides], batch_size=1)
+
+    assert dict(zip(df["taxonID"], df["count"])) == {thayeri: 4760, glaucoides: 520609}
+
+
 def test_run_gbif_search_routes_occurrence_errors_to_failure_sink(monkeypatch):
     # Matches succeed (two good taxon keys), but the occurrence fetch errors.
     def fake_match(names, **k):

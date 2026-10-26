@@ -689,10 +689,14 @@ def search_taxon_occurrences(
 ) -> tuple[pd.DataFrame, list[str]]:
     """Get GBIF occurrence counts for taxon keys, optionally within an area.
 
-    Queries the GBIF occurrence facet API in batches. Keys not found in any
-    response are filled with count=0. Keys whose batch request errored are
-    returned separately as failed keys (not counted) so the caller can retry
-    them rather than treat them as absent.
+    Queries the GBIF occurrence facet API in batches. The facet lists every
+    key the records fall under (each species, its ancestors and the taxa
+    below it), most records first, so a full list may have cut off the rarest
+    species: such a batch is split in two and asked again. A single species
+    comes right after its ancestors, so its own list never cuts it off. Keys
+    not found in any response are filled with count=0. Keys whose batch
+    request errored are returned separately as failed keys (not counted) so
+    the caller can retry them rather than treat them as absent.
 
     Args:
         taxon_keys: List of GBIF taxon key strings.
@@ -705,16 +709,17 @@ def search_taxon_occurrences(
         Tuple of (DataFrame with columns taxonID and count, list of taxon keys
         whose batch request failed).
     """
-    taxon_keys = list(set(taxon_keys))  # Remove duplicates
+    taxon_keys = list(dict.fromkeys(taxon_keys))  # Remove duplicates, keep order
 
     if len(taxon_keys) == 0:
         return pd.DataFrame(columns=["taxonID", "count"]), []
 
+    facet_limit = 10 * batch_size  # Room for the ancestors and taxa below
     params_base = {
         "hasCoordinate": "true",
         **(area_filter or {}),
         "facet": "taxonKey",
-        "facetLimit": 10 * batch_size,  # Get more facets to avoid missing keys
+        "facetLimit": facet_limit,
         "limit": 0,
         "checklistKey": COL_XR_CHECKLIST,
     }
@@ -729,7 +734,8 @@ def search_taxon_occurrences(
     session = create_session(user_agent=user_agent)
     expected_keys = set(taxon_keys)
 
-    for batch in batches:
+    while batches:
+        batch = batches.pop(0)
         params = params_base.copy()
         params["taxonKey"] = batch
 
@@ -745,10 +751,18 @@ def search_taxon_occurrences(
 
             facets = data.get("facets", [])
             counts = facets[0].get("counts", []) if facets else []
+            if len(counts) >= facet_limit and len(batch) > 1:
+                half = len(batch) // 2
+                batches[:0] = [batch[:half], batch[half:]]
+                continue
+            # Only the batch's own keys: a key outside it counts just the
+            # records it shares with the batch (a species asked for through
+            # one of its subspecies).
+            asked = set(batch)
             for facet in counts:
                 taxon_key = facet["name"]
 
-                if taxon_key in expected_keys:
+                if taxon_key in asked and taxon_key in expected_keys:
                     all_results.append(
                         {
                             "taxonID": taxon_key,
