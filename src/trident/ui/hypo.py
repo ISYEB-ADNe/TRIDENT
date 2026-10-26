@@ -1,9 +1,4 @@
-"""
-HYPO Analysis UI Module
-
-Handles UI rendering and user interaction for the hypothetical species
-validation pipeline (BOLD sequences validated via NCBI BLAST).
-"""
+"""HYPO tab: the proxy search, its filter, the HYPO check and the HYPO list."""
 
 import pandas as pd
 import streamlit as st
@@ -16,6 +11,7 @@ import trident.pipelines as pipe
 from trident.pipelines.results_pipeline import add_check_hit
 
 from trident.ui.ui import (
+    SETTING_LABELS,
     coerce_stored_value,
     record_empty_step,
     failed_items,
@@ -79,7 +75,7 @@ def display_hypo_parameters():
         presets,
         format_fn=lambda p: (
             f"E-value: 1e-{p['hypo_ev_exponent']}, Max hits: {p['hypo_max_hits']}, "
-            f"Top: {p['hypo_ntop']}, identity cutoff: {p['hypo_identity_cutoff']}%"
+            f"Top: {p['hypo_ntop']}, min hit identity: {p['hypo_identity_cutoff']}%"
         ),
         key="hypo_search_preset",
     )
@@ -97,7 +93,7 @@ def display_hypo_parameters():
     with col1:
         persist_value("hypo_max_hits", def_hits)
         max_hits = st.number_input(
-            "Max hits per query",
+            SETTING_LABELS["hypo_max_hits"],
             1,
             1000,
             help=BLAST_HELP["max_hits"],
@@ -110,7 +106,7 @@ def display_hypo_parameters():
     with col2:
         persist_value("hypo_ev_exponent", default_ev_exp)
         ev_exponent = st.number_input(
-            "E-value exponent ($10^{-x}$)",
+            f"{SETTING_LABELS['hypo_ev_exponent']} ($10^{{-x}}$)",
             0,
             50,
             help=BLAST_HELP["ev_exponent"],
@@ -126,10 +122,11 @@ def display_hypo_parameters():
     with col3:
         persist_value("hypo_identity_cutoff", def_id_cutoff)
         identity_cutoff = st.number_input(
-            "Identity Cutoff (%)",
+            SETTING_LABELS["hypo_identity_cutoff"],
             0,
             100,
-            help="Minimum identity percentage to consider a valid NCBI hit",
+            help="Proxy hits below this identity are dropped, before the top hits "
+            "are kept.",
             key="hypo_identity_cutoff",
         )
         save_widget("hypo_identity_cutoff")
@@ -139,10 +136,10 @@ def display_hypo_parameters():
     with col4:
         persist_value("hypo_ntop", def_ntop)
         ntop = st.number_input(
-            "Top N hits to retain",
+            SETTING_LABELS["hypo_ntop"],
             1,
             100,
-            help="Number of top NCBI hits to retain per species after applying identity cutoff",
+            help="Best hits kept per BOLD sequence and hit species.",
             key="hypo_ntop",
         )
         save_widget("hypo_ntop")
@@ -176,7 +173,7 @@ def display_hypo_parameters():
                 st.session_state.hypo_num_threads, BLAST_MAX_THREADS
             )
             threads = st.number_input(
-                "Parallel Threads",
+                "Parallel threads",
                 1,
                 BLAST_MAX_THREADS,
                 help=BLAST_HELP["n_threads"],
@@ -241,7 +238,7 @@ def hypo_search_job(
         on_poll=_poll,
     )
 
-    # 4. Merge (fast — no progress bar needed)
+    # 4. Merge (fast: no progress bar needed)
     hypo_merge_df, hypo_merge_params = pipe.run_hypo_merge(
         hypo_search_df,
         extra_df,
@@ -372,7 +369,7 @@ def hypo_filter_controls():
     param_preset_selector(
         presets,
         format_fn=lambda p: (
-            f"QC: {p['hypo_query_cover']}%, identity: {p['hypo_identity']}%"
+            f"query cover: {p['hypo_query_cover']}%, proxy identity: {p['hypo_identity']}%"
         ),
         key="hypo_filter_preset",
     )
@@ -385,7 +382,7 @@ def hypo_filter_controls():
     with col1:
         persist_value("hypo_query_cover", def_qc)
         query_cover = st.slider(
-            "Query Cover (%)",
+            SETTING_LABELS["hypo_query_cover"],
             min_value=0,
             max_value=100,
             help="Minimum query cover percentage to filter NCBI hits",
@@ -397,11 +394,12 @@ def hypo_filter_controls():
     with col2:
         persist_value("hypo_identity", def_identity)
         identity = st.slider(
-            "Identity (%)",
+            SETTING_LABELS["hypo_identity"],
             min_value=90,
             max_value=100,
             step=1,
-            help="Minimum identity percentage to filter NCBI hits",
+            help="A candidate is a hypothetical species when its proxy hits a MOL "
+            "species of the sequence at or above this identity.",
             key="hypo_identity",
         )
         save_widget("hypo_identity")
@@ -527,7 +525,7 @@ def display_hypo_check_controls():
     ):
         persist_value("hypo_check_ev_exponent", default_ev_exp)
         ev_exponent = st.number_input(
-            "E-value exponent ($10^{-x}$)",
+            f"{SETTING_LABELS['hypo_check_ev_exponent']} ($10^{{-x}}$)",
             0,
             10,
             help=BLAST_HELP["ev_exponent"],
@@ -596,7 +594,7 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
         hypo_check_df, mol_query_cover()
     )
 
-    # Finalize — build final HYPO species list
+    # Finalize: build the HYPO list
     hypo_df, hypo_params = pipe.finalize_hypo_results(
         hypo_filter_df=hypo_filter_df,
         hypo_check_df=hypo_check_df,
@@ -627,15 +625,15 @@ def hypo_check_display():
 
     tab_summary, tab_no_hits, tab_full = st.tabs(
         [
-            f"Species Found ({n_found})",
-            f"Species Not Found ({n_not_found})",
+            f"Marker found in GenBank ({n_found})",
+            f"Marker not found ({n_not_found})",
             "Raw BLAST Data",
         ]
     )
     with tab_summary:
         found_df = summary_df[summary_df["n_hits"] > 0]
 
-        st.caption("Best hit matching in the NCBI database.")
+        st.caption("Best check hit of each species.")
         shown = [
             "seq_id",
             "scientificName",
@@ -653,7 +651,10 @@ def hypo_check_display():
         )
 
     with tab_no_hits:
-        st.caption("No NCBI matches were found for these species.")
+        st.caption(
+            "The check found no hit in GenBank for these species, as expected for "
+            "a hypothetical species."
+        )
         shown = ["seq_id", "scientificName"]
         st.dataframe(
             summary_df[summary_df["n_hits"] == 0],
@@ -683,13 +684,14 @@ def hypo_check_display():
 
 
 def hypo_final_check_workflow():
-    """Handle NCBI final check execution."""
+    """Handle the HYPO check."""
 
     with st.container(border=True):
-        st.markdown("### 🔬 NCBI Marker Verification")
+        st.markdown("### 🔬 HYPO Check")
         st.caption(
-            "Verify whether each candidate species actually has the target marker "
-            "in GenBank by BLASTing the original sequences against NCBI."
+            "BLAST each sequence against GenBank under the names of its hypothetical "
+            "species: a hit means GenBank holds the target marker for that species, "
+            "and Results flags it."
         )
 
         # Parameter Inputs
@@ -731,7 +733,7 @@ def hypo_final_check_workflow():
             current_params=current_params,
             job_fn=hypo_check_job,
             job_kwargs={"params": current_params},
-            new_string=f"Ready to check **{unique_species:,}** species against NCBI.",
+            new_string=f"Ready to check **{unique_species:,}** species in GenBank.",
             btn_key="hypo_check_apply",
             logs_prefix="hypo_check_",
             threaded=True,
@@ -749,7 +751,7 @@ def hypo_final_check_workflow():
             )
         if mode != "NEW" and st.session_state.hypo_check_df is not None:
             st.divider()
-            st.markdown("#### Verification Results")
+            st.markdown("#### HYPO Check Results")
             hypo_check_display()
 
 
@@ -765,25 +767,25 @@ def render_hypo_metrics():
     c1.metric(
         "Candidates",
         len(df),
-        help="Species confirmed by HYPO, counted once per sequence.",
+        help="Hypothetical species, counted once per sequence.",
     )
     c2.metric(
-        "Confirmed Species",
+        "Hypothetical Species",
         df["scientificName"].nunique(),
-        help="Unique species validated via the HYPO pipeline",
+        help="Distinct hypothetical species.",
     )
     c3.metric(
-        "Sequences with Confirmed Species",
+        "Sequences",
         df["seq_id"].nunique(),
-        help="Number of initial sequences that have at least one confirmed species via HYPO",
+        help="Sequences with at least one hypothetical species.",
     )
 
 
 def display_hypo_sequence_metrics(seq_df):
     st.metric(
-        "Confirmed Species",
+        "Hypothetical Species",
         seq_df["scientificName"].nunique(),
-        help="Unique species validated via the HYPO pipeline for this sequence ID",
+        help="Hypothetical species of this sequence.",
     )
 
 
@@ -819,7 +821,7 @@ def display_hypo_sequence():
     df = st.session_state.hypo_df
     seq_df = df[(df["seq_id"] == selected_seq)]
     if seq_df.empty:
-        st.info("No species confirmed by HYPO for this sequence.")
+        st.info("No species validated by HYPO for this sequence.")
         return
 
     display_hypo_sequence_metrics(seq_df)
@@ -917,14 +919,15 @@ def display_hypo_results():
 
 
 def hypo_analysis():
-    """Main HYPO analysis workflow — hypothetical species validation."""
+    """Main HYPO analysis workflow: hypothetical species validation."""
 
-    st.header("🔗 HYPO: BOLD/NCBI BLAST Search")
+    st.header("🔗 HYPO: Hypothetical Species")
     st.caption(
-        "Step 5: BOLD sequences from the EXTRA list are BLASTed against the NCBI database "
-        "to check whether each species can be confirmed for its associated input sequence. "
-        "A species is validated only if the BLAST hit matches a species of that sequence ID's "
-        "MOL list (the species that passed the MOL filter, in the area or not)."
+        "Step 5: The BOLD sequences of the EXTRA list (CO1 proxies) are BLASTed "
+        "against GenBank. A candidate is a hypothetical species when its proxy hits "
+        "a MOL species of the same sequence (one that passed the MOL filter, in the "
+        "area or not) at the proxy identity or above. The HYPO check then looks for "
+        "the candidate's own target marker in GenBank."
     )
     st.divider()
 

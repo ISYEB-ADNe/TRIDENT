@@ -1,8 +1,5 @@
-"""
-BOLD Analysis UI Module
-
-This module handles only UI rendering and user interaction.
-"""
+"""EXTRA tab: the BOLD search for proxies, the redundancy filter and the EXTRA
+list."""
 
 import pandas as pd
 import streamlit as st
@@ -21,6 +18,8 @@ import trident.pipelines as pipe
 
 from trident.core.utils import count_phrase, species_for_sequences
 from trident.ui.ui import (
+    SETTING_LABELS,
+    RETRY_EMPTY,
     record_empty_step,
     failed_items,
     show_failed_items_banner,
@@ -52,7 +51,7 @@ from trident.ui.defaults import BOLD_SIMILARITY_DEFAULT
 
 
 def bold_search_job(*, force_rerun, retry_empty=False, status, progress_bar, params):
-    """Run BOLD search for species missing from NCBI."""
+    """Run the BOLD search for the GEO species BLAST did not find."""
     # Setup Logging
     logsink = StreamlitLogSink(status, prefix="bold_")
 
@@ -138,17 +137,19 @@ def bold_search_workflow():
             with c1:
                 persist_value("bold_keep_only_COI5P", True)
                 keep_only_COI5P = st.checkbox(
-                    "COI-5P records only",
+                    SETTING_LABELS["bold_keep_only_COI5P"],
                     key="bold_keep_only_COI5P",
-                    help="Only retain records with the COI-5P barcode marker.",
+                    help="COI-5P is BOLD's code for the CO1 barcode region; other "
+                    "markers are left out.",
                 )
                 save_widget("bold_keep_only_COI5P")
             with c2:
                 persist_value("bold_keep_ncbi", False)
                 keep_ncbi = st.checkbox(
-                    "Include NCBI-mined records",
+                    SETTING_LABELS["bold_keep_ncbi"],
                     key="bold_keep_ncbi",
-                    help="Retain records that BOLD mined from GenBank/NCBI.",
+                    help="Also keep the BOLD records copied from GenBank (left out "
+                    "by default: as proxies they would find themselves in HYPO).",
                 )
                 save_widget("bold_keep_ncbi")
 
@@ -271,7 +272,7 @@ def show_why_no_sequence(names: list[str]) -> None:
             "are searched too; Name in BOLD is the one BOLD gave this result "
             "for. Only GenBank copies: "
             "the COI-5P records BOLD has for the species are copies of "
-            "GenBank sequences, already in NCBI; as proxies they would only "
+            "GenBank sequences, already in GenBank; as proxies they would only "
             "confirm themselves in HYPO, so they are left out."
         )
         shown = ["scientificName", "bold_scientificName", "bold_outcome", "bold_url"]
@@ -295,8 +296,8 @@ def show_species_without_sequences_banner() -> None:
     n_queried = len(st.session_state.bold_input_species)
     st.info(
         f"{len(outcomes)}/{n_queried} species without a usable BOLD sequence "
-        f"({reasons}). To query them again, set Cache to **Retry empty "
-        "results** and re-run."
+        f"({reasons}). To query them again, choose **{RETRY_EMPTY}** and run "
+        "the step again."
     )
 
 
@@ -313,7 +314,7 @@ def bold_filter_controls() -> tuple[int, int | None]:
     )
     param_preset_selector(
         presets,
-        format_fn=lambda p: f"similarity: {p['bold_similarity']}%",
+        format_fn=lambda p: f"redundancy identity: {p['bold_similarity']}%",
         key="bold_filter_preset",
     )
     stored = st.session_state.extra_params
@@ -324,12 +325,13 @@ def bold_filter_controls() -> tuple[int, int | None]:
     with col1:
         persist_value("bold_similarity", def_similarity)
         similarity = st.slider(
-            "Identity threshold (%)",
+            SETTING_LABELS["bold_similarity"],
             min_value=90,
             max_value=100,
             step=1,
             key="bold_similarity",
-            help="Maximum sequence similarity (%) between the longest sequences kept per species.",
+            help="Two BOLD sequences of a species at or above this identity are "
+            "redundant: only the longer is kept.",
         )
         save_widget("bold_similarity")
         active_similarity = stored.get("bold_similarity", "None")
@@ -337,7 +339,7 @@ def bold_filter_controls() -> tuple[int, int | None]:
     with col2:
         persist_value("bold_longest_n", None)
         longest_n = st.number_input(
-            "Max sequences per species",
+            SETTING_LABELS["bold_longest_n"],
             min_value=1,
             value=None,
             step=1,
@@ -497,7 +499,8 @@ def bold_filter_workflow():
 
 
 def display_bold_input_summary():
-    """Show non-MOL species from the GEO list that will be queried in BOLD."""
+    """Show the GEO species that need a proxy (see needs_proxy), queried in
+    BOLD."""
 
     geo_df = st.session_state.geo_df
     bold_input = st.session_state.bold_input_species
@@ -515,7 +518,8 @@ def display_bold_input_summary():
     with st.container(border=True):
         st.markdown(f"### 📋 Input: {n_to_query} species to query in BOLD")
         st.caption(
-            "Species from the GEO list without a direct NCBI hit — to be searched in BOLD."
+            "GEO species that BLAST did not return for the sequence: BOLD is "
+            "searched for a proxy."
         )
 
         shown = ["seq_id", "scientificName", "taxonURL", *RANK_COLUMNS, "genusID"]
@@ -543,7 +547,7 @@ def render_bold_metrics():
     c2.metric(
         "Species Found",
         len(st.session_state.bold_species),
-        help="Unique species identified in BOLD results",
+        help="Species with at least one BOLD sequence kept.",
     )
     c3.metric(
         "Species Without Sequences",
@@ -608,7 +612,7 @@ def display_bold_sequence_metrics(seq_df, selected_seq):
     c2.metric(
         "Species Found",
         seq_df["scientificName"].nunique(),
-        help="Unique species identified in BOLD results",
+        help="Species with at least one BOLD sequence kept.",
     )
     c3.metric(
         "Species Without Sequences",
@@ -668,11 +672,6 @@ def display_bold_results():
 
     extra_df = st.session_state.extra_df
 
-    # Case where search was performed but 0 records found or skipped
-    if extra_df.empty:
-        st.success("✅ **All species previously validated — no BOLD search needed.**")
-        return
-
     with st.container(border=True):
         st.markdown("### 📊 EXTRA List Overview")
 
@@ -681,7 +680,7 @@ def display_bold_results():
         display_same_species(extra_df)
 
         with lazy_expander(
-            f"View full EXTRA list ({len(extra_df):,} BOLD records: {species_for_sequences(extra_df)})",
+            f"View full EXTRA list ({len(extra_df):,} BOLD sequences: {species_for_sequences(extra_df)})",
             key="extra_full_list",
         ) as is_open:
             if is_open:
@@ -717,8 +716,8 @@ def extra_analysis():
 
     st.header("🧬 EXTRA: BOLD Sequences Search")
     st.caption(
-        "Step 4: Search the Barcode of Life Data Systems (BOLD) for species identified in GBIF."
-        " This step specifically targets species missing from NCBI/BLAST."
+        "Step 4: Search the Barcode of Life Data Systems (BOLD) for CO1 sequences "
+        "of the GEO species BLAST did not find. They serve as proxies in HYPO."
     )
     st.divider()
 
@@ -750,9 +749,18 @@ def extra_analysis():
         bold_filter_workflow()
 
     # Results Display
-    if st.session_state.extra_df is not None and not st.session_state.extra_df.empty:
+    extra_df = st.session_state.extra_df
+    if extra_df is not None:
         st.divider()
-        display_bold_results()
+        if not extra_df.empty:
+            display_bold_results()
+        elif st.session_state.bold_filter_df is not None and not (
+            st.session_state.bold_filter_df.empty
+        ):
+            # The other empty cases say why where they stop.
+            st.info(
+                "No BOLD sequence matched a GEO candidate: the EXTRA list is empty."
+            )
         next_step_button("Next: HYPO ➔", "hypo")
 
     st.divider()

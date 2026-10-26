@@ -1,4 +1,4 @@
-"""FASTA I/O — load, build, and serialize FASTA sequences via BioPython."""
+"""FASTA I/O: load, build and serialize FASTA sequences via Biopython."""
 
 import io
 from typing import Any

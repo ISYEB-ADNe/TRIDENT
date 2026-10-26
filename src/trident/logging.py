@@ -20,8 +20,7 @@ LOG_LEVELS = ("INFO", "DEBUG")
 # Tracks whether the default (no-arg) setup has already run. Lives in this
 # imported module, so it survives Streamlit script reruns: setup_logging() can
 # be called from the entry point on every rerun and stays a no-op after the
-# first, matching the old once-per-process behavior. An explicit level/log_file
-# (e.g. set_log_level) always reconfigures.
+# first. An explicit level/log_file (e.g. set_log_level) always reconfigures.
 _configured = False
 
 
@@ -40,8 +39,8 @@ def setup_logging(level: str | None = None, log_file: str | Path | None = None) 
     """Configure logging for the trident package.
 
     Sets up a console handler and an optional rotating file handler.
-    The log level is resolved in order: function argument →
-    TRIDENT_LOG_LEVEL environment variable → default "INFO".
+    The level is the argument, else the TRIDENT_LOG_LEVEL setting (see
+    config.get), else INFO.
 
     Importing `trident` does NOT call this (the package keeps loguru silent via
     `logger.disable("trident")`); the entry points (the Streamlit app, the

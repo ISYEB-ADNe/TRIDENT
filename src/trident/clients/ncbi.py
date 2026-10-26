@@ -1,4 +1,5 @@
-"""NCBI BLAST client — submit queries, parse results, filter by barcoding gap."""
+"""NCBI BLAST client: submit jobs, parse hits, apply the MOL filter (barcoding
+gap or similarity range), plot the hits."""
 
 import contextvars
 import io
@@ -55,7 +56,7 @@ def setup_ncbi_credentials() -> None:
     email = config.contact_email()
 
     if not email:
-        logger.debug("CONTACT_EMAIL not set — NCBI requests will be anonymous")
+        logger.debug("CONTACT_EMAIL not set: NCBI requests will be anonymous")
     else:
         set_ncbi_email(email)
         logger.info(f"NCBI contact email set: {email}")
@@ -212,7 +213,7 @@ def parse_blast_records(records: list) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=BLAST_RAW_COLUMNS)
 
 
-# Label of the batch the current thread is running ("Batch 3/40 (MOTU ids)"),
+# Label of the batch the current thread is running ("Batch 3/40", "Check 2/5"),
 # set by submit_blast_batch, so the client's log lines (submission, slow job,
 # retry) say which batch they are about.
 _job_label: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -953,7 +954,7 @@ def run_blast_batches(
         progress_handler: Optional progress tracker. Accepts:
             - dict with a 'current' key (incremented by batch size) for
               Streamlit or notebook use.
-            - Any object with an .update(n) method (e.g. tqdm) for CLI use.
+            - Any object with an .update(n) method (e.g. tqdm) for notebooks.
             - None for silent execution.
         circuit: Optional ``BlastCircuit`` shared by the whole run. A new one
             is created for this call when none is given.
@@ -1193,7 +1194,7 @@ def filter_by_similarity(
         gap_size: Maximum allowed drop from the best hit's identity percentage.
 
     Returns:
-        Filtered DataFrame containing only hits within the similarity window.
+        Filtered DataFrame containing only hits within the similarity range.
     """
     max_per_query = df.groupby("seq_id")["identity_percentage"].transform("max")
     filtered_df = df[df["identity_percentage"] >= (max_per_query - gap_size)]
@@ -1207,15 +1208,16 @@ def filter_blast_results(
     method: str = NCBI_METHOD,
     gap_min_top: float = NCBI_GAP_MIN_TOP,
 ) -> pd.DataFrame:
-    """Filter BLAST results by query coverage and identity gap method.
+    """Filter BLAST results by query cover, then by barcoding gap or
+    similarity range.
 
     First applies a query_cover threshold, then filters by either the barcoding
-    gap method or the similarity window method. When method='barcoding_gap',
-    sequences without a detectable gap fall back to similarity filtering.
+    gap method or the similarity range method. When method='barcoding_gap',
+    sequences without a detectable gap fall back to the similarity range.
 
     Args:
         df: Processed BLAST DataFrame from process_blast_results().
-        query_cover: Minimum query coverage percentage to retain a hit.
+        query_cover: Minimum query cover (%) of a kept hit.
         gap_size: Gap size threshold (percentage points) used by both methods.
         method: Either 'barcoding_gap' or 'similarity'.
         gap_min_top: Minimum identity for barcoding gap search. Only used when
@@ -1261,7 +1263,7 @@ def filter_blast_results(
     elif method == "similarity":
         df = filter_by_similarity(df, gap_size=gap_size)
         df["filter_method"] = "similarity"
-        logger.debug(f"Similarity filtering: {len(df)} rows retained")
+        logger.debug(f"Similarity range: {len(df)} rows kept")
 
     else:
         raise ValueError(
@@ -1374,7 +1376,7 @@ def format_species_gap_details(species_details: dict[str, dict]) -> str:
         before_str = ", ".join([f"{x:.2f}%" for x in identities["before_gap"]])
         after_str = ", ".join([f"{x:.2f}%" for x in identities["after_gap"]])
         lines.append(
-            f"**{species}**\n  - Before gap: {before_str}\n  - After gap: {after_str}"
+            f"**{species}**\n  - Above the gap: {before_str}\n  - Below the gap: {after_str}"
         )
     return "\n".join(lines)
 

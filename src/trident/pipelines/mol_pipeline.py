@@ -1,4 +1,4 @@
-"""NCBI BLAST pipeline — produces the MOL (Molecular) results list.
+"""NCBI BLAST pipeline: the MOL (molecular) list.
 
 Step order:
     1. prepare_ncbi_input(sequences_df)         → list[SeqRecord]
@@ -7,7 +7,8 @@ Step order:
     4. finalize_mol_results(ncbi_filter_df, ...)  → (mol_df, params)
 
 Exploration:
-    build_mol_summary(mol_df)
+    build_ncbi_search_overview(ncbi_search_df, sequences_df, max_hits)
+    build_mol_summary(mol_df, sequences_df, ncbi_filter_df)
     build_mol_sequence_report(mol_df, seq_id, ncbi_search_df, ...)
 """
 
@@ -105,7 +106,8 @@ def run_ncbi_search(
         max_hits: Maximum BLAST hits returned per query sequence.
         give_up_minutes: Minutes a BLAST job may wait at NCBI before it is
             resubmitted once, then counted as failed (see ``BlastGaveUp``).
-        progress_handler: Optional progress tracker (dict, tqdm, or None).
+        progress_handler: Optional progress tracker (a dict with "current", or
+            tqdm-like).
         failure_sink: If provided, seq_ids whose BLAST batch errored are
             appended here so the cache layer retries them instead of caching
             them as empty.
@@ -184,17 +186,18 @@ def run_ncbi_filter(
     gap_min_top: float = NCBI_GAP_MIN_TOP,
     search_params: dict | None = None,
 ) -> pd.DataFrame:
-    """Filter NCBI search results by query coverage and identity gap method.
+    """Filter NCBI hits by query cover, then by barcoding gap or similarity
+    range.
 
     Args:
         ncbi_search_df: DataFrame from run_ncbi_search().
-        query_cover: Minimum query coverage percentage to retain a hit.
+        query_cover: Minimum query cover (%) of a kept hit.
         gap_size: Minimum identity drop defining a barcoding gap, or maximum
-            drop from the best hit when using similarity filtering.
+            drop from the best hit with the similarity range.
         method: Either 'barcoding_gap' or 'similarity'.
         gap_min_top: Minimum identity for barcoding gap search (the top of the
             gap must be ≥ this value). Only used when method='barcoding_gap'.
-        search_params: Parameter dict from run_ncbi_search, used for caching only.
+        search_params: Params of run_ncbi_search, for the cache key only.
 
     Returns:
         Filtered DataFrame.
@@ -262,7 +265,7 @@ def finalize_mol_results(
         ncbi_filter_df: Filtered DataFrame from run_ncbi_filter().
         threshold: Identity percentage below which low_identity_warning is set.
         enforce_threshold: If True, remove hits below threshold instead of just warning.
-        filter_params: Parameter dict from run_ncbi_filter, used for caching only.
+        filter_params: Params of run_ncbi_filter, for the cache key only.
 
     Returns:
         Finalized MOL DataFrame with a low_identity_warning column (low hits
@@ -302,8 +305,8 @@ def build_ncbi_search_overview(
 ) -> pd.DataFrame:
     """Build a per-sequence overview of raw BLAST search results (before filtering).
 
-    Flags sequences where max_hits was reached and the identity range is narrow,
-    suggesting the search may need more hits to capture lower-identity matches.
+    Flags the sequences whose hits reached max_hits: BLAST may have cut off
+    lower-identity hits.
 
     Args:
         ncbi_search_df: Raw BLAST DataFrame from run_ncbi_search().
@@ -311,8 +314,8 @@ def build_ncbi_search_overview(
         max_hits: The max_hits parameter used in the search.
 
     Returns:
-        DataFrame with one row per seq_id: hit count, identity range, and a
-        saturation warning flag.
+        DataFrame with one row per seq_id: hit count, identity range, and
+        max_hits_reached.
     """
     all_seq_ids = sequences_df["seq_id"].unique()
     identities = ncbi_search_df.groupby("seq_id")["identity_percentage"]

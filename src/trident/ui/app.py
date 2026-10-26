@@ -1,5 +1,4 @@
-"""
-TRIDENT Streamlit application entry point.
+"""TRIDENT Streamlit application entry point.
 
 Run with: uv run trident  (or: streamlit run src/trident/ui/app.py)
 """
@@ -24,7 +23,7 @@ TAB_CONFIG = {
 
 
 def _app_config():
-    """Settings panel — expander (open if email missing)."""
+    """Settings panel: an expander, open when the email is missing."""
     email_from_config = config.get(config.CONTACT_EMAIL)
     email_is_preset = bool(email_from_config)
 
@@ -36,15 +35,15 @@ def _app_config():
 
     email_missing = not email_is_preset and not st.session_state.get("_settings_email")
 
-    label = "Settings" if not email_missing else "⚠️ Settings — contact email required"
+    label = "Settings" if not email_missing else "⚠️ Settings: contact email required"
     with st.expander(label, expanded=email_missing):
         email = st.text_input(
             "Contact email",
             key="_settings_email",
             disabled=email_is_preset,
             help=(
-                "Sent with every request to NCBI, GBIF, WoRMS and BOLD. "
-                "Required by these services to identify your application. "
+                "Sent with every request to NCBI, GBIF, WoRMS and BOLD, so they "
+                "can reach you about heavy use (NCBI asks for it). "
                 "Pre-fill via CONTACT_EMAIL in .streamlit/secrets.toml."
             ),
         )
@@ -57,13 +56,13 @@ def _app_config():
             "Execution detail",
             LOG_LEVELS,
             index=LOG_LEVELS.index(current_level) if current_level in LOG_LEVELS else 0,
-            format_func=lambda level: "Standard" if level == "INFO" else "Verbose",
+            format_func=lambda level: ui.LOG_LEVEL_LABELS.get(level, level),
             help=(
                 "Controls how much detail appears in the status boxes "
                 "while a step is running. "
                 "**Standard** shows progress and key results. "
-                "**Verbose** adds internal details like cache hits, API calls, "
-                "and parameter values — useful for troubleshooting."
+                "**Verbose** adds every item and the details useful to report a "
+                "problem."
             ),
         )
         if level != current_level:

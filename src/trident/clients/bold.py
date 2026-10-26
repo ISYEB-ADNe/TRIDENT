@@ -92,7 +92,7 @@ def _download_results(
     """Download BOLD query results as JSONL text.
 
     Args:
-        query_id: BOLD query identifier from ``get_query_id``.
+        query_id: BOLD query identifier from ``_get_query_id``.
         session: Optional requests session for connection reuse.
 
     Returns:
@@ -190,7 +190,7 @@ def _filter_records(
     Args:
         records: Raw record dicts from the BOLD API.
         keep_only_COI5P: If True, only retain records with marker_code ``"COI-5P"``.
-        keep_ncbi: If True, retain records also found in NCBI.
+        keep_ncbi: If True, keep the records BOLD mined from GenBank.
     """
     if not records:
         return [], NO_RECORD
@@ -467,8 +467,9 @@ def get_records_from_species_list(
         rate_limit_delay: Seconds to wait between queries (rate limiting).
         session: Optional requests session for connection reuse.
         keep_only_COI5P: If True, only retain COI-5P marker records.
-        keep_ncbi: If True, retain records also found in NCBI.
-        progress_handler: Optional progress tracker (dict or tqdm-like).
+        keep_ncbi: If True, keep the records BOLD mined from GenBank.
+        progress_handler: Optional progress tracker (a dict with "current", or
+            tqdm-like).
         user_agent: User-Agent header for HTTP requests.
         result_sink: Called with the rows of each species and the species once
             its query is done (see save_to_db), unless it errored.

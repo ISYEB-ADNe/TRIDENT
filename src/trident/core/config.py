@@ -34,9 +34,9 @@ def _in_streamlit_run() -> bool:
 
     Touching `st.session_state` / `st.secrets` without a ScriptRunContext makes
     Streamlit log "missing ScriptRunContext" / "Session state does not function"
-    warnings. Config is also read at package import (setup_logging) and from
-    notebooks/tests, where no session exists, so we skip the Streamlit lookups
-    there and fall back to env / secrets.toml.
+    warnings. Config is also read from notebooks, scripts and tests, where no
+    session exists, so we skip the Streamlit lookups there and fall back to
+    env / secrets.toml.
     """
     try:
         from streamlit.runtime import exists

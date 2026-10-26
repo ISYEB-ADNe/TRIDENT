@@ -1,7 +1,4 @@
-"""
-Streamlit UI components and helpers.
-Contains all Streamlit-specific UI functions that are reusable across the app.
-"""
+"""Streamlit UI components and helpers shared by the tabs."""
 
 import concurrent.futures
 import contextlib
@@ -102,9 +99,8 @@ COL = {
     ),
     "ncbi_synonyms": _Text(
         "NCBI synonym",
-        help="NCBI/BLAST name(s) for this species that differ from the "
-        "WoRMS-accepted name (synonyms/misspellings). Blank when NCBI already "
-        "used the accepted name.",
+        help="Names NCBI uses for this species that differ from its WoRMS name "
+        "(synonyms or spelling variants).",
     ),
     "same_species_as": _Text(
         "Possibly same species as",
@@ -163,7 +159,7 @@ COL = {
     ),
     "n_tax_species": _count("TAX Species", "Species of the sequence's TAX list."),
     "n_both": _count("In Both", "Species in both the MOL and the TAX lists."),
-    "n_added": _count("Added", "Species the WoRMS genus expansion added."),
+    "n_added": _count("Added", "Species added by TAX."),
     "accepted_name": _Text(
         "WoRMS Accepted Name",
         help="WoRMS lists the MOL name as a synonym of this name, or links them "
@@ -192,7 +188,8 @@ COL = {
     "geo_url": _link("GBIF Link"),
     "geo_occurrences": _count(
         "GBIF Occurrences",
-        "Number of GBIF occurrence records of this species in the search area "
+        "Number of GBIF occurrence records with coordinates of this species in "
+        "the search area "
         "(the filtering area in the GEO list).",
     ),
     "geo_extent": _Text("Extent", help="Search area of the occurrence count."),
@@ -228,12 +225,12 @@ COL = {
     ),
     # HYPO
     "proxy_hit_species": _Text(
-        "Matched MOL Species",
-        help="The MOL species of this sequence that the candidate's BOLD CO1 "
-        "sequence matched in GenBank.",
+        "MOL Species Hit",
+        help="The MOL species of this sequence that the BLAST of the candidate's "
+        "BOLD CO1 sequence hit.",
     ),
     "proxy_identity": _percent(
-        "Proxy Identity (%)", "Identity of the CO1 proxy to the matched MOL species."
+        "Proxy Identity (%)", "Identity of the CO1 proxy to that MOL species."
     ),
     "proxy_query_cover": _percent("Proxy Query Cover (%)", "Query cover of that hit."),
     "proxy_hit_def": _Text("Hit Definition", help="Title of the GenBank record."),
@@ -261,12 +258,12 @@ COL = {
     # Results
     "validation_step": _Text(
         "Validation",
-        help="MOL+GEO = confirmed via NCBI + geography. HYPO = confirmed via "
-        "BOLD/NCBI proxy.",
+        help="MOL+GEO: a MOL species of the sequence that GEO kept. HYPO: a "
+        "hypothetical species, validated through its BOLD CO1 proxy.",
     ),
     "via_mol_identity": _percent(
         "Via Identity (%)",
-        "HYPO: this sequence's best MOL identity to the matched MOL species.",
+        "HYPO: this sequence's best MOL identity to the MOL species its proxy hit.",
     ),
     "keep": _Check("Keep", help="Uncheck to exclude the candidate from this sequence."),
     "best_identity": _percent(
@@ -274,7 +271,7 @@ COL = {
         "Best NCBI identity among the sequence's candidates: the MOL hit, or "
         "the HYPO check hit of a HYPO species (hits covering at least the MOL "
         "query cover). A HYPO species without check hit counts with the MOL "
-        "hit of the species its CO1 proxy matched.",
+        "hit of the species its CO1 proxy hit.",
     ),
     "paths": _Text(
         "Validation",
@@ -282,7 +279,7 @@ COL = {
     ),
     # Species flow table
     "species": _Text("Species"),
-    "origin": _Text("Origin", help="NCBI hit, or added by TAX (a congener)."),
+    "origin": _Text("Origin", help="NCBI hit, or added by TAX."),
     "outcome": _Text("Ended At", help="The step where the name ended."),
     "identity": _percent(
         "Best NCBI Identity (%)",
@@ -310,10 +307,52 @@ def column_config(columns, **overrides) -> dict:
     return {col: overrides[col] if col in overrides else COL[col] for col in columns}
 
 
+# The label of each setting: its widget shows it, and so does the Parameters
+# tab (ordered there by section).
+SETTING_LABELS: dict[str, str] = {
+    # MOL (NCBI BLAST)
+    "ncbi_max_hits": "Max hits per query",
+    "ncbi_ev_exponent": "E-value exponent",
+    "ncbi_query_cover": "Query cover (%)",
+    "ncbi_method": "Filtering method",
+    "ncbi_gap_size": "Gap size (%)",
+    "ncbi_gap_min_top": "Gap min top (%)",
+    "ncbi_low_identity_threshold": "Low identity warning (%)",
+    "ncbi_enforce_low_identity": "Enforce as hard filter",
+    # TAX (WoRMS)
+    "worms_marine_only": "Marine species only",
+    "worms_resolve_names": "Use WoRMS accepted names",
+    "tax_drop_mol_rejected": "Exclude species already rejected by MOL",
+    # GEO (GBIF)
+    "gbif_latitude": "Latitude",
+    "gbif_longitude": "Longitude",
+    "gbif_extents": "Search extents (km)",
+    "gbif_area": "Search area",
+    "gbif_filter_extent": "Filtering area",
+    "gbif_min_occurrences": "Minimum occurrences",
+    # EXTRA (BOLD)
+    "bold_keep_only_COI5P": "COI-5P records only",
+    "bold_keep_ncbi": "Include records mined from GenBank",
+    "bold_longest_n": "Max sequences per species",
+    "bold_similarity": "Redundancy identity (%)",
+    # HYPO (BOLD + NCBI)
+    "hypo_max_hits": "Max hits per query",
+    "hypo_ev_exponent": "E-value exponent",
+    "hypo_identity_cutoff": "Min hit identity (%)",
+    "hypo_ntop": "Top hits kept",
+    "hypo_query_cover": "Query cover (%)",
+    "hypo_identity": "Proxy identity (%)",
+    "hypo_check_ev_exponent": "HYPO check E-value exponent",
+}
+
+# The names the Settings panel gives the log levels.
+LOG_LEVEL_LABELS = {"INFO": "Standard", "DEBUG": "Verbose"}
+
+
 # Help text for the NCBI BLAST settings shared by the MOL and HYPO tabs.
 BLAST_HELP = {
     "max_hits": (
-        "Maximum number of NCBI database sequences returned per query sequence; "
+        "Maximum number of GenBank records returned per query sequence; "
         "lower-scoring hits beyond this limit are not retrieved."
     ),
     "ev_exponent": (
@@ -347,6 +386,9 @@ BLAST_HELP = {
 
 @dataclass
 class AppState:
+    """Session state of an analysis, in pipeline order: reset_state_after
+    resets the fields after a given one, so the order matters."""
+
     fasta_uploader_key: int = 0
     analysis_name: str = ""
     db_path: str = ""
@@ -533,6 +575,8 @@ def reset_state_after(key_name: str):
 def get_analysis_status(
     df_name: str, params_name: str, current_params: dict, keys: list[str] = None
 ) -> str:
+    """NEW when the step has no result, IDENTICAL when *current_params* equal
+    the ones of its result (only *keys*, if given), CHANGED otherwise."""
     stored_df = st.session_state.get(df_name)
     stored_params = st.session_state.get(params_name)
 
@@ -552,6 +596,15 @@ def get_analysis_status(
     return "IDENTICAL" if is_identical else "CHANGED"
 
 
+# The choices next to a step's run button: reuse what is saved for the
+# settings, also ask again for the items saved without a result, or ask for
+# everything again.
+REUSE_SAVED = "Reuse saved results"
+RETRY_EMPTY = "Ask again for empty results"
+ERASE_SAVED = "Erase saved results"
+CACHE_MODES = [REUSE_SAVED, RETRY_EMPTY, ERASE_SAVED]
+
+
 def display_run_button(
     mode: str, new_string: str, btn_key: str, logs_prefix: str = "", starts: int = 0
 ) -> tuple[bool, str]:
@@ -563,9 +616,7 @@ def display_run_button(
     instead of starting the step again.
 
     Returns:
-        Tuple of (clicked, cache_mode) where cache_mode is the selected cache
-        option string ("Use cached results" / "Retry empty results" /
-        "Erase cached results").
+        Tuple of (clicked, cache_mode), cache_mode one of CACHE_MODES.
     """
 
     # Initialize variables with defaults for the button
@@ -581,9 +632,7 @@ def display_run_button(
 
     elif mode == "IDENTICAL":
         if logs_prefix:
-            with st.expander(
-                "✅ Analysis Run Complete, View Execution Logs", expanded=False
-            ):
+            with st.expander("✅ Step done: view its log", expanded=False):
                 if st.session_state.get(f"{logs_prefix}logs"):
                     st.text("\n".join(st.session_state[f"{logs_prefix}logs"]))
                 else:
@@ -591,7 +640,9 @@ def display_run_button(
         # Define button for re-running even if identical
         btn_label = "🔄 Re-run with Same Settings"
         btn_type = "secondary"
-        btn_help = "Re-run using cache — only retries failed or missing items"
+        btn_help = (
+            "Reuses the saved results and asks only for the failed or missing ones"
+        )
 
     else:  # This handles "CHANGED"
         st.warning("⚠️ Settings have changed since the last run.")
@@ -610,12 +661,8 @@ def display_run_button(
         )
     with c2:
         cache_mode = st.selectbox(
-            "Cache",
-            options=[
-                "Use cached results",
-                "Retry empty results",
-                "Erase cached results",
-            ],
+            "Saved results",
+            options=CACHE_MODES,
             index=0,
             key=f"{btn_key}_cache_mode",
             label_visibility="collapsed",
@@ -701,13 +748,13 @@ def run_step_workflow(
         mode, new_string, btn_key=btn_key, logs_prefix=logs_prefix, starts=starts
     )
     if clicked:
-        # Only "Erase cached results" forces a fresh run. Otherwise the step
+        # Only ERASE_SAVED forces a fresh run. Otherwise the step
         # reuses the items saved for its current settings and runs the others,
         # whether the settings changed or a stopped run continues: every
         # setting in *compare_keys* is part of the step's cache key.
         runs[flag_key] = {
-            "force": "Erase" in cache_mode,
-            "retry": "Retry" in cache_mode,
+            "force": cache_mode == ERASE_SAVED,
+            "retry": cache_mode == RETRY_EMPTY,
             "job_kwargs": job_kwargs or {},
             "starts": starts + 1,
         }
@@ -736,7 +783,7 @@ def reset_for_new_analysis(key_name: str):
 
 def show_filter_success(kept: int, total: int, noun: str, tail: str = "") -> None:
     """Say how many of the search's *total* rows (*noun*) a filter kept."""
-    st.success(f"✅ Filtering complete: {kept:,}/{total:,} {noun} retained{tail}")
+    st.success(f"✅ Filtering complete: {kept:,}/{total:,} {noun} kept{tail}")
 
 
 def next_step_button(label: str, tab_id: str):
@@ -818,7 +865,7 @@ def show_failed_items_banner(
     """Warn about items whose query failed in the last run.
 
     Failed items are not cached (see ``failure_sink`` in ``save_to_db``), so a
-    plain re-run queries them again while everything else comes from the cache.
+    plain re-run queries them again while everything else is reused.
     *gives_up* says the source also fails a query it gave up waiting for (NCBI
     BLAST jobs stuck in NCBI's queue).
     """
@@ -835,8 +882,8 @@ def show_failed_items_banner(
     )
     st.warning(
         f"⚠️ {len(failed)} {label} could not be queried: {request} {outcome}, "
-        "so they were not saved. Click **Re-run with Same Settings** to retry "
-        "only these; everything else comes from the cache.\n\n"
+        "so they were not saved. Run the step again to retry only these; the "
+        "rest is reused.\n\n"
         f"{shown}"
     )
 
@@ -998,12 +1045,9 @@ class StreamlitLogSink:
         return sum(self._show(line) for line in lines)
 
 
-# Streamlit's default Styler cap is 262144 cells; above it st.dataframe raises.
-# We raise it (apply_styler_limit) so the colored full-list views render for
-# realistic large runs, and use the SAME ceiling as the graceful-degrade point
-# in styled_or_plain. One constant drives both, so the config and the fallback
-# never drift: <= ceiling -> colored Styler renders; > ceiling -> plain frame
-# (no crash) even on a pathologically huge run.
+# Pandas' Styler cap (262144 cells by default, above which st.dataframe
+# raises), raised by apply_styler_limit, and the size above which
+# styled_or_plain shows a plain table: one value, so they cannot drift.
 STYLER_MAX_CELLS = 2_000_000
 
 
@@ -1245,7 +1289,7 @@ def highlight_low_identity(row):
 
 # What the hypo_check_hit flag means (see add_check_hit), and the legend of the
 # rows highlight_check_hit colours.
-CHECK_HIT_NOTE = "HYPO species whose marker the HYPO check found in NCBI"
+CHECK_HIT_NOTE = "HYPO species whose marker the HYPO check found in GenBank"
 CHECK_HIT_LEGEND = f":orange[■] {CHECK_HIT_NOTE}"
 
 
@@ -1326,7 +1370,7 @@ def display_same_species(df: pd.DataFrame) -> None:
 
 
 def highlight_in_mol(row):
-    """Apply highlight style for species found in NCBI."""
+    """Apply highlight style for MOL species."""
     style = "background-color: #c6efce; color: black;" if row["in_mol"] else ""
     return [style] * len(row)
 

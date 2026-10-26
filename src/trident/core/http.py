@@ -120,7 +120,7 @@ def create_session(
     """Create a requests.Session with retry logic and optional User-Agent.
 
     Args:
-        retries: Max retry attempts per error type.
+        retries: Max retries of one request, in total and per error type.
         backoff_factor: Multiplier for exponential backoff between retries.
         status_forcelist: HTTP status codes that trigger a retry.
         allowed_methods: HTTP methods eligible for retry. Defaults to GET only.

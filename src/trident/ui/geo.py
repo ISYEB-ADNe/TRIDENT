@@ -1,9 +1,5 @@
-"""
-GEO Analysis UI Module
-
-This module handles only UI rendering and user interaction.
-All logic is delegated to the trident.pipelines.geo_pipeline module.
-"""
+"""GEO tab: the GBIF search around the site, the occurrence filter and the GEO
+list."""
 
 import pandas as pd
 import streamlit as st
@@ -20,6 +16,7 @@ from trident.clients.gbif import (
 )
 
 from trident.ui.ui import (
+    SETTING_LABELS,
     record_empty_step,
     failed_items,
     show_failed_items_banner,
@@ -61,8 +58,8 @@ AREA_LABELS = {"circle": "Circle", "box": "Bounding box"}
 def display_gbif_parameters():
     st.markdown("#### 📍 Sampling Site and Extent")
     st.info(
-        "📊 **Area of Interest:** GBIF occurrences are counted around your sampling "
-        "site, within each **Search Extent** (km). The **circle** counts the "
+        "📊 **Search areas:** GBIF occurrences are counted around your sampling "
+        "site, within each search extent (km). The **circle** counts the "
         "occurrences within that distance of the site. The **bounding box** is the "
         "rectangle (latitude and longitude ranges) around that circle."
     )
@@ -87,8 +84,9 @@ def display_gbif_parameters():
     with col1:
         persist_value("gbif_latitude", def_lat)
         latitude_input = st.text_input(
-            "Latitude",
-            help="DD or DMS format, e.g., -7.543 or 7°32'37\"S",
+            SETTING_LABELS["gbif_latitude"],
+            help="Decimal degrees or degrees-minutes-seconds, e.g. -7.543 or "
+            "7°32'37\"S",
             key="gbif_latitude",
         )
         save_widget("gbif_latitude")
@@ -102,8 +100,9 @@ def display_gbif_parameters():
     with col2:
         persist_value("gbif_longitude", def_lon)
         longitude_input = st.text_input(
-            "Longitude",
-            help="DD or DMS format, e.g., -35.423 or 35°25'24\"W",
+            SETTING_LABELS["gbif_longitude"],
+            help="Decimal degrees or degrees-minutes-seconds, e.g. -35.423 or "
+            "35°25'24\"W",
             key="gbif_longitude",
         )
         save_widget("gbif_longitude")
@@ -117,7 +116,7 @@ def display_gbif_parameters():
     with col3:
         persist_value("gbif_extent", def_extent)
         extent_input = st.text_input(
-            "Search extents (km)",
+            SETTING_LABELS["gbif_extents"],
             help="Enter one or more search extents in km, separated by commas (e.g. 100, 250).",
             key="gbif_extent",
         )
@@ -147,7 +146,7 @@ def display_gbif_parameters():
 
     persist_value("gbif_area", stored.get("gbif_area") or "circle")
     area = st.radio(
-        "Search area",
+        SETTING_LABELS["gbif_area"],
         SEARCH_AREAS,
         format_func=AREA_LABELS.get,
         key="gbif_area",
@@ -161,7 +160,7 @@ def display_gbif_parameters():
 
 
 def _recent_gbif_search_presets(db_path: str, limit: int = 5) -> list[dict]:
-    """Previous GEO search windows, one per site and area with all its extents
+    """Previous GEO search areas, one per site and area with all its extents
     ("250, 500").
 
     The cache stores one row per extent, so a run with several extents would
@@ -196,7 +195,7 @@ def display_gbif_map(
 ) -> None:
     """Render a Plotly map showing the search areas."""
     show_map = st.checkbox(
-        "📍 Visualize Search Area",
+        "📍 Show the search areas on a map",
         value=False,
         key="gbif_show_map",
         help="Display the center point and the search areas sent to GBIF on a map.",
@@ -418,7 +417,7 @@ def gbif_search_workflow():
             current_params=current_params,
             job_fn=gbif_search_job,
             job_kwargs={"params": current_params},
-            new_string=f"Ready to analyze GBIF distribution for **{unique_sp}** species.",
+            new_string=f"Ready to count the GBIF occurrences of **{unique_sp}** species.",
             btn_key="gbif_search_apply",
             logs_prefix="gbif_",
             threaded=True,
@@ -474,7 +473,8 @@ def gbif_filter_controls() -> tuple[int, int]:
     param_preset_selector(
         presets,
         format_fn=lambda p: (
-            f"Min. occurrences: {p['gbif_min_occurrences']}, extent: {p['gbif_filter_extent']}"
+            f"Min. occurrences: {p['gbif_min_occurrences']}, "
+            f"filtering area: {p['gbif_filter_extent']}"
         ),
         key="gbif_filter_preset",
     )
@@ -490,10 +490,11 @@ def gbif_filter_controls() -> tuple[int, int]:
     with col1:
         persist_value("gbif_min_occurrences", def_min_occ)
         min_occurrences = st.number_input(
-            "Minimum occurrences:",
+            SETTING_LABELS["gbif_min_occurrences"],
             min_value=0,
             key="gbif_min_occurrences",
-            help="Set the minimum number of occurrences a species must have within the area of interest to be retained.",
+            help="Minimum number of occurrences a species must have in the "
+            "filtering area to be kept.",
         )
         save_widget("gbif_min_occurrences")
         active_min_occ = stored.get("gbif_min_occurrences", "None")
@@ -506,7 +507,7 @@ def gbif_filter_controls() -> tuple[int, int]:
             default_extent = options[0]
         persist_value("gbif_filter_extent", default_extent)
         extent = st.selectbox(
-            "Select filtering area:",
+            SETTING_LABELS["gbif_filter_extent"],
             options,
             key="gbif_filter_extent",
             help="Choose which search area to use for the occurrence threshold.",
@@ -617,7 +618,7 @@ def render_gbif_metrics():
         loc_str = "🌍 Global"
     else:
         loc_str = (
-            f"📍 {lat:.2f}°, {lon:.2f}° — {ext_label}"
+            f"📍 {lat:.2f}°, {lon:.2f}°, {ext_label}"
             if lat is not None
             else f"📍 {ext_label}"
         )
@@ -627,9 +628,9 @@ def render_gbif_metrics():
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Species", total_species, help="Unique species in the GEO list.")
     c2.metric(
-        "Confirmed Species",
+        "MOL+GEO Species",
         confirmed,
-        help="Species with both a direct NCBI hit (MOL) and geographic validation (GEO).",
+        help="MOL species that GEO kept.",
     )
     c3.metric(
         "Sequences with Species",
@@ -672,7 +673,7 @@ def display_missing_species():
     if not missing:
         return
 
-    # A missing species that was a direct MOL hit takes a sequence's best match
+    # A missing species that was a direct MOL hit takes a sequence's best hit
     # out of GEO, so list it first with the sequences it was a hit for.
     tax_df = st.session_state.tax_df
     mol_rows = tax_df[tax_df["scientificName"].isin(missing) & tax_df["in_mol"]]
@@ -692,7 +693,7 @@ def display_missing_species():
         st.caption(
             "No confident GBIF match for these names, so they are absent from GEO."
         )
-        st.caption(":green[■] Direct MOL hit: the listed sequences lost this match.")
+        st.caption(":green[■] Direct MOL hit: the listed sequences lost this hit.")
         st.dataframe(
             styled_or_plain(df, highlight_in_mol),
             hide_index=True,
@@ -714,7 +715,7 @@ def display_gbif_sequence_table(
 ):
     """The sequence's candidates and their GBIF counts, grouped by the
     extents they pass; note_empty_area=False leaves out the note that none
-    passes in the priority extent (for a sequence known to have none)."""
+    passes in the filtering area (for a sequence known to have none)."""
     df_wide, classification = pipe.classify_gbif_extents(
         seq_df, min_occurrences, extents, priority_extent
     )
@@ -754,23 +755,22 @@ def display_gbif_sequence_table(
                 render_styled_table(df)
             elif note_empty_area:
                 st.info(
-                    f"No species found matching the threshold in the "
-                    f"{priority_col} extent."
+                    f"No species reaches the minimum occurrences in the {priority_col} area."
                 )
         elif kind == "smaller":
             with st.expander(
-                f"📍 {len(df)} / {bucket['total']} species also validated "
-                f"in **{ext_col}**"
+                f"📍 {len(df)} / {bucket['total']} species also kept "
+                f"in the **{ext_col}** area"
             ):
                 render_styled_table(df)
         elif kind == "larger":
             with st.expander(
-                f"🌍 {len(df)} species validated in **{ext_col}** "
-                f"(not in {priority_col})"
+                f"🌍 {len(df)} species kept in the **{ext_col}** area "
+                f"(not in the {priority_col} one)"
             ):
                 render_styled_table(df)
         elif kind == "never":
-            with st.expander(f"❌ {len(df)} species below threshold at all extents"):
+            with st.expander(f"❌ {len(df)} species below the minimum in every area"):
                 render_styled_table(df)
 
 
@@ -784,7 +784,7 @@ def _geo_sequence_labels():
     df = st.session_state.gbif_search_df
     total = df.groupby("seq_id")["scientificName"].nunique()
 
-    # Count species in GEO list meeting threshold in priority extent
+    # Count species in GEO list meeting threshold in the filtering area
     pair = ["seq_id", "scientificName"]
     in_geo = pd.MultiIndex.from_frame(df[pair]).isin(
         pd.MultiIndex.from_frame(st.session_state.geo_df[pair])
@@ -898,16 +898,18 @@ def display_gbif_results():
 def geo_analysis():
     """Main GBIF analysis workflow"""
 
-    st.header("🌍 GEO: GBIF Species Validation")
+    st.header("🌍 GEO: GBIF Occurrences")
     st.caption(
-        "Define a geographic search window by latitude, longitude, and radius. Species present within this area, meeting the optional minimum occurrence threshold (default: n = 3), are retained to create the GEO list."
+        "Choose a site and one or more extents (km). The TAX species with at least "
+        "the minimum number of GBIF occurrences in the filtering area (default "
+        f"{GBIF_MIN_OCCURRENCES_DEFAULT}) are kept: they form the GEO list."
     )
     st.divider()
 
     if not require_prerequisite(
         "tax_df",
         "👈 **TAX list not found.** Please complete **Step 2 · TAX** "
-        "to provide a species list for GBIF validation.",
+        "to provide a species list for the GBIF search.",
     ):
         return
 

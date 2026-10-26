@@ -2,9 +2,9 @@
 
 Single source of truth for the cutoffs applied at each step. The Streamlit UI
 re-exports these (``trident/ui/defaults.py``) and the pipeline/client functions
-use them as default arguments, so a notebook run matches the app. See the
-README "Methods and default parameters" section for each value. Performance-only knobs
-(thread counts, batch sizes) live in the UI layer, not here.
+use them as default arguments, so a notebook run matches the app.
+Performance-only knobs (thread counts, batch sizes) live in the UI layer, not
+here.
 """
 
 # --- MOL (NCBI BLAST + barcoding-gap filter) ---

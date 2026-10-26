@@ -1,6 +1,4 @@
-"""
-Input handling UI: FASTA upload, DB restore, and sequence preview.
-"""
+"""Start tab: FASTA upload, opening a saved analysis, and the sequences."""
 
 import io
 import sqlite3
@@ -23,7 +21,7 @@ DB_EXTENSIONS = {"db", "sqlite", "sqlite3"}
 # The example ships at the repository root (example/), next to src/, in every
 # documented install (git clone or downloaded archive).
 EXAMPLE_FASTA = Path(__file__).resolve().parents[3] / "example" / "example.fasta"
-# The example's sequences come from Svalbard: pre-fill the GEO window of the
+# The example's sequences come from Svalbard: pre-fill the GEO area of the
 # paper's worked example (kept on the counts within 250 km), or GBIF would be
 # searched around 0°, 0°.
 EXAMPLE_SETTINGS = {
@@ -264,7 +262,7 @@ def _auto_restore_from_db():
     if not db_path.exists():
         return
 
-    with st.spinner("Restoring sequences from database...", show_time=True):
+    with st.spinner("Opening the analysis...", show_time=True):
         try:
             with get_connection(db_path) as conn:
                 seqs_df = pd.read_sql(
@@ -405,7 +403,7 @@ def load_example_button():
         disabled=active,
         help=(
             "The four Svalbard 16S sequences of the paper's worked example. "
-            "The GEO window is set to the paper's (78.5° N, 14.5° E, 250 km; 500 km is "
+            "The GEO area is set to the paper's (78.5° N, 14.5° E, 250 km; 500 km is "
             "also searched for comparison)."
         ),
     ):

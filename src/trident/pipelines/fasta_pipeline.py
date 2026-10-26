@@ -1,4 +1,4 @@
-"""FASTA input pipeline — loads and caches input sequences.
+"""FASTA input pipeline: loads and caches the input sequences.
 
 Step order:
     1. run_fasta_workflow(fasta_file) → (sequences_df, params)
@@ -46,7 +46,7 @@ def _fasta_workflow_params(fasta_file: Any, **kwargs) -> tuple[list[dict], dict]
 def run_fasta_workflow(fasta_file: Any) -> pd.DataFrame:
     """Load a FASTA file and return a sequences DataFrame.
 
-    Accepts local file paths (CLI) and file-like objects (Streamlit).
+    Accepts file paths (notebooks, scripts) and file-like objects (Streamlit).
 
     Args:
         fasta_file: File path (str or Path) or file-like object.

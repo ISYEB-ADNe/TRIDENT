@@ -1,8 +1,4 @@
-"""
-NCBI Analysis UI Module
-
-This module handles only UI rendering and user interaction.
-"""
+"""MOL tab: the NCBI BLAST search, the MOL filter and the MOL list."""
 
 import math
 
@@ -17,6 +13,7 @@ import trident.pipelines as pipe
 
 
 from trident.ui.ui import (
+    SETTING_LABELS,
     failed_items,
     show_failed_items_banner,
     show_filter_success,
@@ -56,7 +53,10 @@ from trident.ui.defaults import (
     NCBI_ENFORCE_LOW_IDENTITY_DEFAULT,
 )
 
-FILTER_METHOD_LABELS = {"barcoding_gap": "Barcoding Gap", "similarity": "Similarity"}
+FILTER_METHOD_LABELS = {
+    "barcoding_gap": "Barcoding gap",
+    "similarity": "Similarity range",
+}
 
 # The columns of a BLAST hit the MOL tables show, after the sequence.
 HIT_COLUMNS = [
@@ -106,7 +106,7 @@ def display_ncbi_parameters():
     with col1:
         persist_value("ncbi_max_hits", int(default_hits))
         max_hits = st.number_input(
-            "Max hits per query",
+            SETTING_LABELS["ncbi_max_hits"],
             1,
             1000,
             help=BLAST_HELP["max_hits"],
@@ -119,7 +119,7 @@ def display_ncbi_parameters():
     with col2:
         persist_value("ncbi_ev_exponent", int(default_ev_exponent))
         ev_exponent = st.number_input(
-            "E-value exponent ($10^{-x}$)",
+            f"{SETTING_LABELS['ncbi_ev_exponent']} ($10^{{-x}}$)",
             0,
             50,
             help=BLAST_HELP["ev_exponent"],
@@ -159,7 +159,7 @@ def display_ncbi_parameters():
                 st.session_state.ncbi_num_threads, BLAST_MAX_THREADS
             )
             threads = st.number_input(
-                "Parallel Threads",
+                "Parallel threads",
                 1,
                 BLAST_MAX_THREADS,
                 help=BLAST_HELP["n_threads"],
@@ -181,7 +181,7 @@ def display_ncbi_parameters():
 
 
 def ncbi_search_job(*, force_rerun, retry_empty=False, status, progress_bar, params):
-    """Run NCBI BLAST with a functioning progress bar and multi-mode support."""
+    """Run the NCBI BLAST search (a step job, see run_step_workflow)."""
 
     # 1. Setup Logging
     logsink = StreamlitLogSink(container=status, prefix="ncbi_")
@@ -319,7 +319,8 @@ def ncbi_filter_controls():
     param_preset_selector(
         presets,
         format_fn=lambda p: (
-            f"{p['ncbi_method']}, QC: {p['ncbi_query_cover']}%, gap: {p['ncbi_gap_size']}"
+            f"{FILTER_METHOD_LABELS.get(p['ncbi_method'], p['ncbi_method'])}, "
+            f"query cover: {p['ncbi_query_cover']}%, gap: {p['ncbi_gap_size']}"
             + (
                 f", top: {p['ncbi_gap_min_top']}%"
                 if p["ncbi_method"] == "barcoding_gap"
@@ -341,10 +342,12 @@ def ncbi_filter_controls():
         default_method = stored.get("ncbi_method") or NCBI_METHOD_DEFAULT
         persist_value("ncbi_method", default_method)
         method = st.selectbox(
-            "Filtering Method",
+            SETTING_LABELS["ncbi_method"],
             methods,
             format_func=lambda m: FILTER_METHOD_LABELS[m],
-            help="Method used to filter NCBI hits per sequence, either by detecting a barcoding gap or using a similarity threshold",
+            help="Barcoding gap: keep the hits above a barcoding gap, or within "
+            "the similarity range of the best hit when there is none. Similarity "
+            "range: always the latter.",
             key="ncbi_method",
         )
         save_widget("ncbi_method")
@@ -355,7 +358,7 @@ def ncbi_filter_controls():
         default_qc = int(stored.get("ncbi_query_cover") or NCBI_QUERY_COVER_DEFAULT)
         persist_value("ncbi_query_cover", default_qc)
         qc = st.slider(
-            "Query Cover (%)",
+            SETTING_LABELS["ncbi_query_cover"],
             1,
             100,
             help="Minimum percentage of the query sequence that must be covered by the hit",
@@ -368,10 +371,10 @@ def ncbi_filter_controls():
         default_gap_size = int(stored.get("ncbi_gap_size") or NCBI_GAP_SIZE_DEFAULT)
         persist_value("ncbi_gap_size", default_gap_size)
         gap_size = st.slider(
-            "Gap Size (%)",
+            SETTING_LABELS["ncbi_gap_size"],
             0,
             20,
-            help="Minimum drop in identity percentage that defines the barcoding gap, or the maximum difference from the best hit when using similarity filtering",
+            help="Minimum drop in identity percentage that defines the barcoding gap, or the maximum difference from the best hit with the similarity range",
             key="ncbi_gap_size",
         )
         save_widget("ncbi_gap_size")
@@ -387,7 +390,7 @@ def ncbi_filter_controls():
                 )
                 persist_value("ncbi_gap_min_top", default_gap_min_top)
                 gap_min_top = st.slider(
-                    "Gap Min Top (%)",
+                    SETTING_LABELS["ncbi_gap_min_top"],
                     50,
                     100,
                     help="The top of the barcoding gap must begin at or above this identity percentage",
@@ -405,7 +408,7 @@ def ncbi_filter_controls():
             )
             persist_value("ncbi_low_identity_threshold", default_lit)
             low_identity_threshold = st.slider(
-                "Low Identity Warning (%)",
+                SETTING_LABELS["ncbi_low_identity_threshold"],
                 50,
                 100,
                 help="Hits below this identity are highlighted (red), and in the summary, the sequences with a species whose best hit is below it.",
@@ -422,7 +425,7 @@ def ncbi_filter_controls():
             )
             persist_value("ncbi_enforce_low_identity", default_enforce)
             enforce_low_identity = st.checkbox(
-                "Enforce as hard filter",
+                SETTING_LABELS["ncbi_enforce_low_identity"],
                 help="Remove hits below the threshold instead of just highlighting them",
                 key="ncbi_enforce_low_identity",
             )
@@ -563,8 +566,8 @@ def display_ncbi_search_overview():
                 seq_list = ", ".join(f"**{s}**" for s in narrow["seq_id"])
                 st.warning(
                     f"The maximum number of hits ({max_hits}) was reached for {seq_list} "
-                    f"within a narrow identity range ({NARROW_RANGE_THRESHOLD}%). Consider increasing **Max Hits** "
-                    f"to capture more diverse matches."
+                    f"within a narrow identity range ({NARROW_RANGE_THRESHOLD}%). Raise "
+                    "**Max hits per query** to get lower-identity hits."
                 )
 
         shown = [
@@ -612,19 +615,14 @@ def display_ncbi_summary():
 
 def display_ncbi_sequence_summary(sequence_data):
     """Display detailed results summary table"""
-    # 1. Sort by:
-    #   - scientificName: Alphabetical (A-Z)
-    #   - identity_percentage: Highest first (99% > 98%)
-    #   - query_cover: Highest first (to break ties in identity)
     df_sorted = sequence_data.sort_values(
         ["scientificName", "identity_percentage", "query_cover"],
         ascending=[True, False, False],
     )
 
-    # 2. Keep the first of each species (the one with highest identity)
+    # The best hit of each species
     df_display = df_sorted.drop_duplicates(subset="scientificName")
 
-    # 3. Display selected columns
     display_cols = [
         "scientificName",
         "hit_url",
@@ -635,10 +633,8 @@ def display_ncbi_sequence_summary(sequence_data):
     ]
     df_display = df_display[display_cols]
 
-    # 4. # Apply highlight_low_identity style to the dataframe
     styled_df = styled_or_plain(df_display, highlight_low_identity)
 
-    # 5. Display with Streamlit
     threshold = st.session_state.mol_params.get(
         "ncbi_low_identity_threshold", NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
     )
@@ -818,8 +814,9 @@ def display_ncbi_sequence_table(sequence_data):
     )
 
 
-def display_ncbi_filter_warnings(cut, species_details):
-    """Display the gap or range the MOL filter used, and species across the gap."""
+def display_ncbi_filter_warnings(cut, species_details, settings):
+    """Display the gap or range the MOL filter used (*settings*: its
+    settings, see mol_filter_settings), and species across the gap."""
     if cut is None:
         return
     if cut.is_gap:
@@ -829,13 +826,17 @@ def display_ncbi_filter_warnings(cut, species_details):
         )
         if species_details:
             st.warning(
-                "⚠️ **Warning**, the following species appear both BEFORE and "
-                "AFTER the barcoding gap:\n\n"
+                "⚠️ These species have hits on both sides of the barcoding gap, "
+                "so the gap does not separate them:\n\n"
                 + ncbi.format_species_gap_details(species_details)
             )
     else:
+        # Only the gap method looked for a gap before taking the range.
+        gap_method = settings["method"] == "barcoding_gap"
+        no_gap = " (no barcoding gap found)" if gap_method else ""
         st.info(
-            "ℹ️ **Similarity Filtering**: No barcoding gap > threshold found, top hits within similarity range retained"
+            f"ℹ️ **Similarity range**: hits within {settings['gap_size']:g}% of "
+            f"the best hit kept{no_gap}."
         )
 
 
@@ -870,14 +871,15 @@ def display_ncbi_per_sequence():
     if st.session_state.mol_df[
         st.session_state.mol_df["seq_id"] == selected_sequence
     ].empty:
-        st.info("No validated records for this sequence.")
+        st.info("The MOL filter kept no hit for this sequence.")
         return
 
+    settings = mol_filter_settings()
     seq_analysis = pipe.build_mol_sequence_report(
         st.session_state.mol_df,
         selected_sequence,
         st.session_state.ncbi_search_df,
-        **mol_filter_settings(),
+        **settings,
     )
 
     tab_overview, tab_table, tab_plots = st.tabs(
@@ -887,7 +889,9 @@ def display_ncbi_per_sequence():
     with tab_overview:
         # Metrics + gap info + species list
         display_ncbi_filter_warnings(
-            seq_analysis["cut"], seq_analysis["species_across_gap"]
+            seq_analysis["cut"],
+            seq_analysis["species_across_gap"],
+            settings,
         )
         display_ncbi_sequence_summary(seq_analysis["sequence_data"])
 
@@ -965,7 +969,7 @@ def mol_analysis():
 
     st.header("🧬 MOL: NCBI BLAST Search")
     st.caption(
-        "Step 1: Use BLAST to compare your (M)OTU/ASV sequences against the NCBI database and create the MOL list."
+        "Step 1: Use BLAST to compare your (M)OTU/ASV sequences against GenBank and create the MOL list."
     )
     st.divider()
 

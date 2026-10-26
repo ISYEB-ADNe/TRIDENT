@@ -1,18 +1,20 @@
 """
-HYPO pipeline — hypothetical species validation via proxy sequences.
+HYPO pipeline: the hypothetical species.
 
-Produces species that have no target marker in GenBank but are validated
-via CO1 proxy (BOLD sequences BLASTed against NCBI) and confirmed as
-geographically plausible.
+GEO species BLAST did not find whose CO1 proxy (a BOLD sequence) hits a MOL
+species of the sequence at the proxy identity or above. The HYPO check then
+looks for their target marker in GenBank and flags those it finds
+(results_pipeline.add_check_hit).
 
 Steps:
+    0. hypo_queries             Entrez query of each seq_id (steps 1 and 3)
     1. prepare_hypo_input       build per-seq_id BLAST inputs from EXTRA + MOL/TAX
     2. run_hypo_search          NCBI BLAST on proxy sequences            [CustomCache]
     3. run_hypo_merge           map proxy IDs back to targets (EXTRA)     [FullCache]
     4. run_hypo_filter          threshold on identity / query cover       [FullCache]
     5. hypo_check_queries       Entrez query of each hypothetical species
        run_hypo_check           per-species NCBI BLAST verification       [CustomCache]
-    6. finalize_hypo_results    label, merge check results, final df      [FullCache]
+    6. finalize_hypo_results    best proxy and check hit per species      [FullCache]
 """
 
 from collections.abc import Callable
@@ -159,7 +161,7 @@ def prepare_hypo_input(extra_df, queries_df):
         }
 
     n_seq = sum(len(v["sequences"]) for v in input_data.values())
-    logger.debug(f"Prepared HYPO input: {n_seq} BOLD records")
+    logger.debug(f"Prepared HYPO input: {n_seq} BOLD sequences")
     return input_data
 
 
@@ -263,12 +265,14 @@ def run_hypo_search(
             BLAST_SLOW_THREADS while jobs are slow; shared by every seq_id.
         ev_exponent: Negative exponent for E-value threshold (e.g. 10 → 1e-10).
         max_hits: Maximum hits per query.
-        identity_cutoff: Minimum identity percentage to retain.
+        identity_cutoff: Minimum identity of a proxy hit kept from the
+            search, before the top N.
         ntop: If > 0, keep only top N hits per (proxy record, hit species,
             Entrez query) by identity.
         give_up_minutes: Minutes a BLAST job may wait at NCBI before it is
             resubmitted once, then counted as failed (see ``BlastGaveUp``).
-        progress_handler: Optional progress tracker.
+        progress_handler: Optional progress tracker (a dict with "current", or
+            tqdm-like).
         failure_sink: If provided, the (proxy record id, entrez_query) of each
             proxy record (BOLD sequence) whose BLAST errored is appended here,
             so the cache layer retries it instead of caching it as empty.
@@ -276,15 +280,16 @@ def run_hypo_search(
             batch as soon as its BLAST is done.
 
     Returns:
-        DataFrame with NCBI BLAST results for proxy sequences.
+        The kept proxy hits (HYPO_SEARCH_COLUMNS), with the Entrez query they
+        were found under.
     """
     log = StepLog("HYPO search")
 
-    # Batches are made per Entrez query, across MOTUs: MOTUs with the same MOL
+    # Batches are made per Entrez query, across sequences: sequences with the same MOL
     # species fill one batch instead of sending one small job each. All batches
     # run in one pool, so a slow NCBI job holds back only its own batch.
     by_query: dict[str, list[SeqRecord]] = {}
-    owner = {}  # (proxy record id, entrez_query) -> MOTU that queued it
+    owner = {}  # (proxy record id, entrez_query) -> sequence that queued it
     for seq_id, seq_dict in sequences_dict.items():
         query = seq_dict["entrez_query"]
         for rec in seq_dict["sequences"]:
@@ -425,11 +430,12 @@ def run_hypo_merge(
         extra_df: EXTRA DataFrame with proxy-to-target mapping.
         queries_df: The Entrez query of each seq_id the search input was
             prepared with (see hypo_queries).
-        hypo_search_params: Params from run_hypo_search (for caching).
-        extra_params: Params from finalize_extra_results (for caching).
+        hypo_search_params: Params of run_hypo_search, for the cache key only.
+        extra_params: Params of finalize_extra_results, for the cache key only.
 
     Returns:
-        Merged DataFrame with BLAST stats and EXTRA metadata.
+        HYPO_HIT_COLUMNS: each EXTRA row with the hits of its proxy on a MOL
+        species of its sequence.
     """
     if hypo_search_params is None:
         hypo_search_params = {}
@@ -492,13 +498,13 @@ def run_hypo_filter(
     identity: float = HYPO_IDENTITY,
     hypo_merge_params: dict | None = None,
 ) -> pd.DataFrame:
-    """Filter HYPO merge results by query coverage and identity thresholds.
+    """Filter HYPO merge results by query cover and identity thresholds.
 
     Args:
         hypo_merge_df: Merged results from run_hypo_merge.
-        query_cover: Minimum query coverage percentage.
+        query_cover: Minimum query cover (%).
         identity: Minimum identity percentage.
-        hypo_merge_params: Params from run_hypo_merge (for caching).
+        hypo_merge_params: Params of run_hypo_merge, for the cache key only.
 
     Returns:
         Filtered DataFrame keeping rows meeting both the query_cover and
@@ -666,10 +672,9 @@ def run_hypo_check(
     failure_sink: list | None = None,
     result_sink: Callable | None = None,
 ) -> pd.DataFrame:
-    """Per-species NCBI BLAST verification of HYPO candidates.
-
-    BLASTs each target sequence against NCBI filtered to that species, under
-    all its names, to confirm the species has the target marker in GenBank.
+    """HYPO check: BLAST each sequence against GenBank restricted to its
+    hypothetical species, under all their names; any hit (hit_found) means
+    GenBank holds the target marker for that species.
     The checks are independent jobs, run as one parallel BLAST run
     (``run_blast_pool``).
 
@@ -683,7 +688,8 @@ def run_hypo_check(
             makes more than about 6 useless).
         give_up_minutes: Minutes a BLAST job may wait at NCBI before it is
             resubmitted once, then counted as failed (see ``BlastGaveUp``).
-        progress_handler: Optional progress tracker.
+        progress_handler: Optional progress tracker (a dict with "current", or
+            tqdm-like).
         failure_sink: If provided, the (seq_id, scientificName) of each check
             whose BLAST errored is appended here, so the cache layer retries it
             instead of caching it as a (false) no-hit.
@@ -790,7 +796,7 @@ def run_hypo_check(
     return check_df
 
 
-### FINALIZE HYPO RESULTS (final) ###
+### FINALIZE HYPO RESULTS ###
 
 # The check's columns the HYPO list takes, and their names there: the
 # sequence's best hit on the species when the check found the marker.
@@ -839,7 +845,7 @@ def finalize_hypo_results(
     """Build final HYPO species list by merging check results into filtered data.
 
     Produces one row per (seq_id, scientificName) with the best NCBI check
-    hit stats. Only species not already in MOL — the final output can be
+    hit stats. Only species not already in MOL, so the final output can be
     concatenated with geo_df to form the complete species list.
 
     Args:
@@ -847,8 +853,8 @@ def finalize_hypo_results(
         hypo_check_df: Check results from run_hypo_check.
         query_cover: The MOL filter's minimum query cover, for the best check
             hit (see best_check_hits).
-        hypo_filter_params: Params from run_hypo_filter (for caching).
-        hypo_check_params: Params from run_hypo_check (for caching).
+        hypo_filter_params: Params of run_hypo_filter, for the cache key only.
+        hypo_check_params: Params of run_hypo_check, for the cache key only.
 
     Returns:
         HYPO species DataFrame with check stats (one row per seq_id × species).

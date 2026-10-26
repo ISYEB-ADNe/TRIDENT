@@ -1,8 +1,5 @@
-"""
-WoRMS Analysis UI Module
-
-This module handles only UI rendering and user interaction.
-"""
+"""TAX tab: the WoRMS name check of the MOL names and the expansion of their
+genera."""
 
 import pandas as pd
 import streamlit as st
@@ -13,6 +10,7 @@ from trident.core import config
 import trident.pipelines as pipe
 
 from trident.ui.ui import (
+    SETTING_LABELS,
     record_empty_step,
     failed_items,
     show_failed_items_banner,
@@ -65,12 +63,12 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
     # 1. Setup Logging
     logsink = StreamlitLogSink(status, prefix="worms_")
 
-    # 2a. Name resolution (R3): canonicalise MOL names to WoRMS accepted names.
+    # 2a. Name resolution: canonicalise MOL names to WoRMS accepted names.
     # Cached per name (marine-independent), so re-runs reuse it. When the toggle
     # is off, the name table is empty and names match as they are.
     resolve = params["worms_resolve_names"]
     if resolve:
-        status.update(label="🔤 Resolving names to WoRMS accepted...", state="running")
+        status.update(label="🔤 Checking the MOL names in WoRMS...", state="running")
         res_names = pipe.prepare_resolution_input(mol_df)
         ncbi_taxids = pipe.prepare_resolution_taxids(mol_df)
         res_info = {"current": 0, "total": len(res_names)}
@@ -80,7 +78,7 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
             if total > 0:
                 progress_bar.progress(
                     min(curr / total, 1.0),
-                    text=f"Resolving {curr}/{total} names against WoRMS",
+                    text=f"Name check: {curr}/{total} names",
                 )
 
         resolution_df, _ = run_with_progress(
@@ -185,7 +183,7 @@ def worms_search_workflow():
         with st.expander("🛠️ Advanced Search Settings", expanded=False):
             persist_value("worms_marine_only", True)
             marine_only = st.checkbox(
-                "Marine species only",
+                SETTING_LABELS["worms_marine_only"],
                 key="worms_marine_only",
                 help=(
                     "Restrict WoRMS expansion to marine-flagged species "
@@ -196,7 +194,7 @@ def worms_search_workflow():
 
             persist_value("worms_resolve_names", True)
             resolve_names = st.checkbox(
-                "Resolve names to WoRMS accepted",
+                SETTING_LABELS["worms_resolve_names"],
                 key="worms_resolve_names",
                 help=(
                     "Map MOL names to their WoRMS-accepted name before matching "
@@ -210,10 +208,10 @@ def worms_search_workflow():
 
             persist_value("tax_drop_mol_rejected", True)
             drop_mol_rejected = st.checkbox(
-                "Exclude species already rejected by MOL",
+                SETTING_LABELS["tax_drop_mol_rejected"],
                 key="tax_drop_mol_rejected",
                 help=(
-                    "For each sequence, leave out the expanded species that BLAST "
+                    "For each sequence, leave out the species added by TAX that BLAST "
                     "returned for it but that failed the MOL filter (default). "
                     "This applies per sequence: a species rejected for one "
                     "sequence is kept for the others. Uncheck to keep them."
@@ -281,9 +279,9 @@ def render_worms_metrics():
         help="Total unique species found after WoRMS expansion",
     )
     col2.metric(
-        "Expanded Species",
+        "Added by TAX",
         f"+{new_count:,}",
-        help="Species added by WoRMS expansion that weren't in the MOL list",
+        help="Species TAX added that are not MOL species.",
     )
 
     if not resolved:
@@ -522,7 +520,7 @@ def _tax_sequence_labels():
         n_in_mol = in_mol.get(seq_id, 0)
         new = n_species[seq_id] - n_in_mol
         label = (
-            f"{seq_id}: {n_species[seq_id]} species ({n_in_mol} from MOL, +{new} new"
+            f"{seq_id}: {n_species[seq_id]} species ({n_in_mol} from MOL, +{new} added"
         )
         if missing.get(seq_id, 0):
             label += f", {missing[seq_id]} missing"
@@ -595,7 +593,7 @@ def tax_analysis():
 
     st.header("🐚 TAX: WoRMS Genus Expansion")
     st.caption(
-        "Step 2: For all genera represented in the MOL list, retrieve all valid species using the World Register of Marine Species (WoRMS), forming the TAX list."
+        "Step 2: For all genera represented in the MOL list, retrieve all accepted species using the World Register of Marine Species (WoRMS), forming the TAX list."
     )
     st.divider()
 

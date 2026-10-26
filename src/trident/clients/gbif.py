@@ -1,5 +1,6 @@
-"""Client for the GBIF (Global Biodiversity Information Facility) API
-and geographic bounding box calculations."""
+"""Client for the GBIF (Global Biodiversity Information Facility) API: name
+match to its current taxonomy (COL XR) and occurrence counts per search area
+(circle or box), with the map of the areas."""
 
 import re
 import threading
@@ -67,7 +68,7 @@ def parse_coordinate(
 
     Args:
         coord: Coordinate as a number, decimal-degree string, or DMS string.
-        coord_type: ``"lat"`` or ``"lon"`` — used for range and direction validation.
+        coord_type: ``"lat"`` or ``"lon"``, for range and direction validation.
 
     Returns:
         Decimal-degree float.
@@ -708,10 +709,11 @@ def search_taxon_occurrences(
 ) -> tuple[pd.DataFrame, list[str]]:
     """Get GBIF occurrence counts for taxon keys, optionally within an area.
 
-    Queries the GBIF occurrence facet API in batches. The facet lists every
-    key the records fall under (each species, its ancestors and the taxa
-    below it), most records first, so a full list may have cut off the rarest
-    species: such a batch is split in two and asked again. A single species
+    Counts only records with coordinates (hasCoordinate), the worldwide
+    count too. Queries the GBIF occurrence facet API in batches. The facet
+    lists every key the records fall under (each species, its ancestors and
+    the taxa below it), most records first, so a full list may have cut off
+    the rarest species: such a batch is split in two and asked again. A single species
     comes right after its ancestors, so its own list never cuts it off. Keys
     not found in any response are filled with count=0. Keys whose batch
     request errored are returned separately as failed keys (not counted) so
@@ -743,7 +745,7 @@ def search_taxon_occurrences(
         "checklistKey": COL_XR_CHECKLIST,
     }
 
-    # Split into 100-species batches
+    # Split into batches of batch_size keys
     batches = [
         taxon_keys[i : i + batch_size] for i in range(0, len(taxon_keys), batch_size)
     ]
@@ -838,7 +840,7 @@ def get_extent_column_name(extent: int | float | str) -> str:
     Converts numeric extents to ``"<int> km"`` and string extents to lowercase.
 
     Args:
-        extent: Extent value — numeric (km) or string (e.g. ``"global"``).
+        extent: Extent value: numeric (km) or string (e.g. ``"global"``).
 
     Returns:
         Standardized column name string (e.g. ``"100 km"``, ``"global"``).

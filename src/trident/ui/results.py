@@ -1,10 +1,7 @@
-"""
-Results UI Module
-
-The combined MOL+GEO and HYPO results, laid out per sequence: a summary first,
-one row per (M)OTU/ASV with its assignment, the selected sequence's candidate
-species (curated there) and their path through the steps, and every download
-at the end.
+"""Results tab: the combined MOL+GEO and HYPO results, laid out per sequence:
+a summary first, one row per (M)OTU/ASV with its assignment, the selected
+sequence's candidate species (curated there) and their path through the
+steps, and every download at the end.
 """
 
 from functools import partial
@@ -63,7 +60,7 @@ from trident.ui.ui import (
 THRESHOLD_KEY = "flag_identity"
 
 # The columns of a candidate the Results tables show, after the sequence:
-# for a HYPO species, also the MOL species its CO1 proxy matched and the
+# for a HYPO species, also the MOL species its CO1 proxy hit and the
 # sequence's MOL identity to it.
 CANDIDATE_COLS = [
     "validation_step",
@@ -129,11 +126,11 @@ LOSS_REASONS = {
     "TAX": "no species found in WoRMS (TAX)",
     "GEO": "no candidate recorded in the area (GEO)",
     "GEO not run": "GEO not run",
-    "EXTRA": "only expanded candidates, none with a BOLD proxy (EXTRA)",
-    "EXTRA not run": "only expanded candidates, EXTRA not run",
-    "HYPO": "only expanded candidates, none confirmed by HYPO",
-    "HYPO not run": "only expanded candidates, HYPO not run",
-    "Curation": "all its validated species excluded by hand",
+    "EXTRA": "only candidates added by TAX, none with a BOLD proxy (EXTRA)",
+    "EXTRA not run": "only candidates added by TAX, EXTRA not run",
+    "HYPO": "only candidates added by TAX, none validated by HYPO",
+    "HYPO not run": "only candidates added by TAX, HYPO not run",
+    "Curation": "all its candidates excluded by hand",
 }
 
 
@@ -265,7 +262,7 @@ def _threshold_slider():
             "Starts at the MOL filter's low identity warning. A sequence whose "
             "best NCBI identity is below it is flagged; nothing is removed. A "
             "HYPO species without check hit counts with the MOL hit of the "
-            "species its CO1 proxy matched."
+            "species its CO1 proxy hit."
         ),
     )
     save_widget(THRESHOLD_KEY)
@@ -357,14 +354,14 @@ def show_summary(assignments, curated_df, results_df, threshold):
     c4.metric(
         "Unassigned",
         len(unassigned),
-        help="Sequences without a validated species.",
+        help="Sequences without a candidate species.",
     )
     c5.metric(
         "HYPO check",
         int(assignments["hypo_check_hit"].sum()),
         help=(
             "Sequences with a HYPO species whose marker the HYPO check found in "
-            "NCBI, although a hypothetical species has no marker in GenBank: "
+            "GenBank, although a hypothetical species has no marker in GenBank: "
             "check them and keep or exclude the species."
         ),
     )
@@ -408,14 +405,14 @@ def show_summary(assignments, curated_df, results_df, threshold):
     c2.metric(
         "MOL+GEO",
         steps.get("MOL+GEO", 0),
-        help="Candidates confirmed by a direct NCBI hit and by geography.",
+        help="MOL species of the sequence that GEO kept.",
     )
     c3.metric(
         "HYPO",
         steps.get("HYPO", 0),
         help=(
-            "Hypothetical candidates: no target marker in GenBank, supported by "
-            "a CO1 proxy (BOLD/NCBI) with the thresholds of the HYPO step. A "
+            "Hypothetical species: validated through their BOLD CO1 proxy (HYPO "
+            "settings); the HYPO check flags those whose marker GenBank holds. A "
             "species can be MOL+GEO for one sequence and HYPO for another."
         ),
     )
@@ -493,7 +490,7 @@ def show_bulk_buttons(assignments, curated_df, threshold):
         what="flagged HYPO species",
         criterion=(
             "Excludes each HYPO species whose marker the HYPO check found in "
-            "NCBI, whatever the identity or cover of the hit."
+            "GenBank, whatever the identity or cover of the hit."
         ),
     )
     _bulk_button(
@@ -574,10 +571,10 @@ def show_assignments(assignments, curated_df, threshold):
 LOST_AT_TABLES = {
     "MOL Filter": ("ncbi_search_df", "This sequence's NCBI hits:"),
     "TAX": ("mol_df", "This sequence's MOL hits:"),
-    "EXTRA": ("geo_df", "This sequence's expanded candidates:"),
-    "EXTRA not run": ("geo_df", "This sequence's expanded candidates:"),
-    "HYPO": ("geo_df", "The expanded candidates HYPO tested:"),
-    "HYPO not run": ("geo_df", "This sequence's expanded candidates:"),
+    "EXTRA": ("geo_df", "This sequence's candidates added by TAX:"),
+    "EXTRA not run": ("geo_df", "This sequence's candidates added by TAX:"),
+    "HYPO": ("geo_df", "The candidates added by TAX that HYPO tested:"),
+    "HYPO not run": ("geo_df", "This sequence's candidates added by TAX:"),
 }
 LOST_AT_COLS = [
     "scientificName",
@@ -836,7 +833,7 @@ def show_results_per_species(results_df, assignments, threshold, same_species):
         valid_df = results_df.dropna(subset=["scientificName"])
         species_list = sorted(valid_df["scientificName"].unique().tolist())
         if not species_list:
-            st.info("No validated species yet.")
+            st.info("No candidate species yet.")
             return
 
         selected_species = st.selectbox(
@@ -965,7 +962,7 @@ def show_provenance_section():
 
     with st.expander("🔎 Data sources & provenance", expanded=False):
         st.caption(
-            f"Produced with trident {version}. Dates are when each live database "
+            f"Produced with TRIDENT {version}. Dates are when each live database "
             "was queried (UTC); they reflect the database state used for this analysis."
         )
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
@@ -1024,9 +1021,8 @@ def show_exports(curated_df):
                         st.warning(
                             f"WoRMS could not be reached for {n} higher-level "
                             f"{pluralize(n, 'taxon')} ({name_list(built[2])}): "
-                            "their ID and author are left empty. Build the "
-                            "one-row-per-sequence table again later to "
-                            "complete them."
+                            "their ID and author are left empty. Click **One "
+                            "row per sequence** again later to complete them."
                         )
                     st.download_button(
                         label="⬇️ Download the table",
@@ -1056,8 +1052,7 @@ def show_exports(curated_df):
             data=Path(db_path).read_bytes,
             file_name=f"{analysis_name}.db",
             mime="application/x-sqlite3",
-            help="One SQLite file: it can be uploaded again on the Start tab, or "
-            "read with any SQLite tool.",
+            help="It can be opened again in Start Analysis.",
             width="stretch",
             key="db_download",
         )

@@ -8,7 +8,7 @@ from Bio.Align import PairwiseAligner
 
 
 # --------------------------------------------------------------------
-# Sequence Similarity Functions
+# Pairwise identity
 # --------------------------------------------------------------------
 
 # Module-level aligner instance (reused across all comparisons)
@@ -33,12 +33,11 @@ def compute_pairwise_identity(
 ) -> float:
     """Percent identity (0-100) via global pairwise alignment.
 
-    If *identity_threshold* is given, skips pairs whose length ratio rules them out.
-
     Args:
         seq1: First DNA sequence.
         seq2: Second DNA sequence.
-        identity_threshold: Skip pair if length ratio rules it out.
+        identity_threshold: If given, a pair whose length ratio (shorter /
+            longer, %) is below it scores 0 without aligning.
 
     Returns:
         Percent identity (0-100).
@@ -74,12 +73,12 @@ def select_longest_sequences(
 ) -> tuple[list[int], list[str]]:
     """Select non-redundant sequences, longest first.
 
-    Skips sequences above *identity_threshold* to an already-selected one.
+    Skips sequences at or above *identity_threshold* to an already-selected one.
 
     Args:
         sequences: DNA sequence strings.
         n_longest: Max selections (None = keep all non-redundant).
-        identity_threshold: % identity above which sequences are redundant.
+        identity_threshold: % identity at or above which sequences are redundant.
 
     Returns:
         (selected_indices, selected_sequences).

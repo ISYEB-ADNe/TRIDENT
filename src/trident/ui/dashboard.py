@@ -9,48 +9,14 @@ import streamlit as st
 
 from trident.core import config
 from trident.logging import get_log_level
+from trident.ui.mol import FILTER_METHOD_LABELS
+from trident.ui.ui import LOG_LEVEL_LABELS, SETTING_LABELS
 
 
 # --------------------------------------------------------------------
 # PARAMETER DEFINITIONS
 # -------------------------------------------------------------------
 
-# (session_state_key, label) — ordered within each section
-PARAM_LABELS: dict[str, str] = {
-    # MOL (NCBI BLAST)
-    "ncbi_max_hits": "Max hits per query",
-    "ncbi_ev_exponent": "E-value exponent",
-    "ncbi_query_cover": "Query Cover (%)",
-    "ncbi_method": "Filtering Method",
-    "ncbi_gap_size": "Gap Size (%)",
-    "ncbi_gap_min_top": "Gap Min Top (%)",
-    "ncbi_low_identity_threshold": "Low Identity Warning (%)",
-    "ncbi_enforce_low_identity": "Enforce as hard filter",
-    # TAX (WoRMS)
-    "worms_marine_only": "Marine species only",
-    "worms_resolve_names": "Resolve names to WoRMS accepted",
-    "tax_drop_mol_rejected": "Exclude species already rejected by MOL",
-    # GEO (GBIF)
-    "gbif_latitude": "Latitude",
-    "gbif_longitude": "Longitude",
-    "gbif_extents": "Search extents (km)",
-    "gbif_area": "Search area",
-    "gbif_filter_extent": "Filtering area",
-    "gbif_min_occurrences": "Minimum occurrences",
-    # EXTRA (BOLD)
-    "bold_keep_only_COI5P": "COI-5P records only",
-    "bold_keep_ncbi": "Include NCBI-mined records",
-    "bold_longest_n": "Max sequences per species",
-    "bold_similarity": "Identity threshold (%)",
-    # HYPO (BOLD + NCBI)
-    "hypo_max_hits": "Max hits per query",
-    "hypo_ev_exponent": "E-value exponent",
-    "hypo_identity_cutoff": "Identity Cutoff (%)",
-    "hypo_ntop": "Top N hits to retain",
-    "hypo_query_cover": "Query Cover (%)",
-    "hypo_identity": "Identity (%)",
-    "hypo_check_ev_exponent": "Check E-value exponent",
-}
 
 # Sections: (title, params_key, param_keys)
 SECTIONS = [
@@ -100,7 +66,7 @@ SECTIONS = [
         ],
     ),
     (
-        "HYPO: BOLD/NCBI Validation",
+        "HYPO: Hypothetical Species",
         "hypo_params",
         [
             "hypo_max_hits",
@@ -120,8 +86,14 @@ SECTIONS = [
 # -------------------------------------------------------------------
 
 
-def _format_value(value) -> str:
-    """Format a parameter value for display."""
+# Settings whose values the tabs show under another name.
+VALUE_LABELS = {"ncbi_method": FILTER_METHOD_LABELS}
+
+
+def _format_value(value, key: str = "") -> str:
+    """Format a parameter value for display, as its tab names it."""
+    if key in VALUE_LABELS:
+        return VALUE_LABELS[key].get(value, str(value))
     if isinstance(value, bool):
         return "Yes" if value else "No"
     if isinstance(value, float) and value == int(value):
@@ -134,7 +106,7 @@ def _format_value(value) -> str:
 def _build_params_text() -> str:
     """Build a plain-text parameter report."""
     analysis_name = st.session_state.get("analysis_name", "analysis")
-    lines = [f"TRIDENT Parameters — {analysis_name}", "=" * 50, ""]
+    lines = [f"TRIDENT Parameters: {analysis_name}", "=" * 50, ""]
 
     for title, params_key, param_keys in SECTIONS:
         params = st.session_state.get(params_key, {})
@@ -145,8 +117,8 @@ def _build_params_text() -> str:
         lines.append("-" * len(title))
         for key in param_keys:
             if key in params:
-                label = PARAM_LABELS.get(key, key)
-                lines.append(f"  {label}: {_format_value(params[key])}")
+                label = SETTING_LABELS.get(key, key)
+                lines.append(f"  {label}: {_format_value(params[key], key)}")
         lines.append("")
 
     return "\n".join(lines)
@@ -156,10 +128,10 @@ def _show_params_section(title: str, params_key: str, param_keys: list[str]):
     """Display one parameter section."""
     params = st.session_state.get(params_key, {})
     if params is None:
-        st.caption(f"*{title} — skipped (not needed)*")
+        st.caption(f"*{title}: skipped (not needed)*")
         return
     if not params:
-        st.caption(f"*{title} — not yet completed*")
+        st.caption(f"*{title}: not yet completed*")
         return
 
     st.markdown(f"**{title}**")
@@ -168,8 +140,8 @@ def _show_params_section(title: str, params_key: str, param_keys: list[str]):
         if key in params:
             rows.append(
                 {
-                    "Parameter": PARAM_LABELS.get(key, key),
-                    "Value": _format_value(params[key]),
+                    "Parameter": SETTING_LABELS.get(key, key),
+                    "Value": _format_value(params[key], key),
                 }
             )
 
@@ -193,7 +165,10 @@ def _show_setup_section():
             [
                 {"Parameter": "Contact Email", "Value": email},
                 {"Parameter": "User-Agent", "Value": ua},
-                {"Parameter": "Log Level", "Value": level},
+                {
+                    "Parameter": "Execution detail",
+                    "Value": LOG_LEVEL_LABELS.get(level, level),
+                },
             ]
         ),
         hide_index=True,

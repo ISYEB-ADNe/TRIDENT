@@ -1,6 +1,9 @@
-"""WoRMS pipeline — produces the TAX (Taxonomic scope) results list.
+"""WoRMS pipeline: the TAX (taxonomic scope) list.
 
 Step order:
+    0. prepare_resolution_input(mol_df), prepare_resolution_taxids(mol_df)
+       run_name_resolution(names, ...)          → (resolution_df, params)
+       build_name_table(resolution_df, taxids)  → name_table
     1. prepare_worms_input(mol_df, name_table)   → list[str]
     2. run_worms_search(genera_list, ...)         → (worms_search_df, params)
     3. run_worms_merge(worms_search_df, ...)      → (worms_merge_df, params)
@@ -79,7 +82,7 @@ def prepare_worms_input(df: pd.DataFrame, name_table: pd.DataFrame | None) -> li
     return genera
 
 
-### NAME RESOLUTION (R3) ###
+### NAME RESOLUTION ###
 
 
 def prepare_resolution_input(mol_df: pd.DataFrame) -> list[str]:
@@ -116,20 +119,21 @@ def run_name_resolution(
     failure_sink: list | None = None,
     result_sink: Callable | None = None,
 ) -> pd.DataFrame:
-    """Resolve MOL (NCBI) names to their WoRMS accepted name + AphiaID (R3).
+    """Resolve MOL (NCBI) names to their WoRMS accepted name + AphiaID.
 
     One AphiaRecordsByName lookup per unique name (cached per item, so only new
     names cost a call). A name WoRMS does not know, or whose records give no
     single accepted species, is looked up a second time through its NCBI
     taxid, when given. Names found neither way are returned
     unchanged (acceptedName == input, no AphiaID). Only genuine network/HTTP
-    errors reach failure_sink; a 404 is a valid not-found, not a failure.
+    errors reach failure_sink; a 204 or 404 is a valid not-found, not a failure.
 
     Args:
         names: Unique MOL scientific names to resolve.
         ncbi_taxids: Optional NCBI taxid per name (prepare_resolution_taxids).
         user_agent: User-Agent header for the WoRMS requests.
-        progress_handler: Optional progress tracker (dict 'current' / .update()).
+        progress_handler: Optional progress tracker (a dict with "current", or
+            tqdm-like).
         failure_sink: If provided, names whose query errored are appended so the
             cache layer skips them and retries next run.
         result_sink: Given by save_to_db, which saves each name as soon as
@@ -300,11 +304,11 @@ def run_worms_search(
 
     Args:
         genera_list: List of genera to query in WoRMS.
-        progress_handler: Optional progress tracker (dict with 'current' key,
-            or object with .update() method).
+        progress_handler: Optional progress tracker (a dict with "current", or
+            tqdm-like).
         user_agent: User-Agent header for HTTP requests.
         marine_only: If True (default), WoRMS returns only marine-flagged
-            species; uncheck to include non-marine WoRMS records.
+            species; False also returns non-marine records.
         failure_sink: If provided, genera whose query errored are appended here
             so the cache layer skips them and retries on the next run.
         result_sink: Given by save_to_db, which saves each genus as soon as
@@ -435,21 +439,22 @@ def run_worms_merge(
     worms_search_params: dict | None = None,
     resolve_names: bool = True,
 ) -> pd.DataFrame:
-    """Merge WoRMS species with MOL hits by genus, preserving scores for exact matches.
+    """Pair each sequence's MOL species with the WoRMS species of their genera.
 
-    Cross-joins WoRMS species with MOL hits on genus, then marks which WoRMS
-    species were also found directly by BLAST (in_mol). Identity and query_cover
-    scores are kept only for exact name matches; all other rows get NaN.
+    A WoRMS species that is one of the sequence's MOL species (in_mol,
+    synonyms included through the name table) keeps the sequence's best MOL
+    hit on it (MOL_HIT_COLUMNS); the others have none. Of a genus name
+    expanded as several homonyms, a sequence keeps those its MOL species
+    belong to, all of them when none does.
 
     Args:
         worms_search_df: WoRMS species DataFrame from run_worms_search().
         mol_df: MOL DataFrame from finalize_mol_results().
         name_table: See build_name_table: the MOL names match on their species,
             so synonyms (e.g. Gadus ogac) credit the accepted species.
-        mol_params: Parameter dict from finalize_mol_results, used for caching only.
-        worms_search_params: Parameter dict from run_worms_search, propagated into
-            this step's cache key (caching only).
-        resolve_names: Whether name resolution (R3) ran; recorded in the cache key
+        mol_params: Params of finalize_mol_results, for the cache key only.
+        worms_search_params: Params of run_worms_search, for the cache key only.
+        resolve_names: Whether name resolution ran; recorded in the cache key
             so toggling it re-runs the merge.
 
     Returns:
@@ -577,8 +582,7 @@ def finalize_tax_results(
 
     Args:
         worms_merge_df: Merged DataFrame from run_worms_merge().
-        worms_merge_params: Parameter dict from run_worms_merge, used for
-            caching only.
+        worms_merge_params: Params of run_worms_merge, for the cache key only.
         ncbi_search_df: Raw BLAST hits, to find the species MOL rejected.
         name_table: See build_name_table.
         drop_mol_rejected: Remove the species that BLAST returned for a

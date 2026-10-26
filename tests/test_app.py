@@ -1,5 +1,5 @@
 """The app opens an analysis and shows each of its tabs without an error, and
-a step's run button forces a fresh run only on "Erase cached results" (AppTest,
+a step's run button forces a fresh run only on "Erase saved results" (AppTest,
 offline). The click flows of the tabs are checked by the AppTest scenarios run
 by hand."""
 
@@ -11,6 +11,7 @@ from streamlit.testing.v1 import AppTest
 from trident.core import config
 from trident.pipelines.fasta_pipeline import run_fasta_workflow
 from trident.ui.app import TAB_CONFIG
+from trident.ui.ui import ERASE_SAVED
 
 APP = Path(__file__).parents[1] / "src" / "trident" / "ui" / "app.py"
 
@@ -51,7 +52,7 @@ def test_every_tab_of_a_new_analysis_opens_without_error(tmp_path, monkeypatch):
 
 def test_changed_settings_rerun_a_step_from_its_cache_unless_erased():
     """A step run after its settings changed keeps the results saved for its
-    settings: only "Erase cached results" forces it to compute everything
+    settings: only "Erase saved results" forces it to compute everything
     again."""
 
     def step_page():
@@ -82,7 +83,7 @@ def test_changed_settings_rerun_a_step_from_its_cache_unless_erased():
     at.run()
     assert "Settings have changed" in at.warning[0].value
     at.button[0].click().run()
-    at.selectbox[0].select("Erase cached results").run()
+    at.selectbox[0].select(ERASE_SAVED).run()
     at.button[0].click().run()
     assert at.session_state["forced"] == [False, True]
     assert not at.exception

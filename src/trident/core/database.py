@@ -77,10 +77,10 @@ def _params_to_sql_values(params: dict) -> dict:
 # Schema version
 #
 # Stored in SQLite's built-in PRAGMA user_version (a header int, no table).
-# Bump SCHEMA_VERSION when a change breaks reading an older database. So far
-# all changes have been additive (new columns added lazily, new tables such as
-# provenance and step_columns optional when reading), so older databases stay
-# readable.
+# Bump SCHEMA_VERSION when a change breaks reading an older database. A
+# change that only adds columns or tables needs no bump: columns are added
+# when first written, and the provenance and step_columns tables are optional
+# when reading.
 # ---------------------------------------------------------------------------
 
 SCHEMA_VERSION = 1
@@ -117,8 +117,8 @@ def check_schema_version(db_path: str | Path) -> tuple[bool, str]:
 #
 # Each cached run_id records the UTC date it was queried from the external
 # database and the trident version that produced it. The date is the
-# de-facto version of the live source (NCBI nt, GBIF, BOLD, WoRMS), which is
-# what makes a result reproducible-describable.
+# de-facto version of the live source (NCBI nt, GBIF, BOLD, WoRMS): the
+# version a methods section can cite.
 # ---------------------------------------------------------------------------
 
 _PROVENANCE_TABLE = "provenance"
@@ -294,7 +294,7 @@ def _item_filter(
     for gbif: name matches fail per species but are cached per (species,
     extent), so a failed species drops all its extents. A step whose first key
     recurs across items that fail independently (the HYPO proxy records,
-    shared by several MOTUs) reports tuples instead, so a failure drops only
+    shared by several sequences) reports tuples instead, so a failure drops only
     its own item.
     """
     if not values or not match_map:
@@ -398,14 +398,12 @@ def _load_cached_items(
     """The rows of the items *run_ids*, in that order (each item's rows in
     table order), without the run_id column; empty without rows.
 
-    They come typed as reading each item on its own and joining the reads
-    would type them, with a few reads instead of one per item (seconds on
-    thousands of items). pandas types a column from the kinds of values it
+    The column types are those reading each item alone and joining the
+    reads would give, in a few reads instead of one per item (seconds on
+    thousands of items): pandas types a column from the kinds of values it
     reads (text, whole numbers, decimals, empty...), so the items whose
-    columns hold the same kinds are read together, and joining those reads
-    gives the types that joining the items would. SQLite gives each item's
-    kinds (``typeof``: null, integer, real, text, blob, one for each type
-    Python receives).
+    columns hold the same SQLite kinds (``typeof``) are read together, then
+    joined.
     """
     if not run_ids or not _table_exists(conn, table_name):
         return pd.DataFrame()
@@ -689,7 +687,7 @@ RESULTS_VERSION = 1
 
 
 class FullCache(CacheStrategy):
-    """Whole-step caching — one entry keyed by merged upstream + local params.
+    """Whole-step caching: one entry keyed by merged upstream + local params.
 
     Use for filter / merge / finalize steps where the result is either
     fully cached or fully recomputed.
@@ -722,7 +720,7 @@ class FullCache(CacheStrategy):
 
 
 class PartialCache(CacheStrategy):
-    """Per-item caching — each item cached independently, only missing
+    """Per-item caching: each item cached independently, only missing
     items are re-executed.
 
     Use for search steps where each item (sequence, species, genus)
@@ -733,8 +731,8 @@ class PartialCache(CacheStrategy):
 
     *result_col*: for a step that saves a row explaining why an item has no
     result (e.g. a species without a BOLD sequence), the column only real
-    results fill; an item with no row filling it counts as empty, so "Retry
-    empty results" queries it again.
+    results fill; an item with no row filling it counts as empty, so "Ask again
+    for empty results" queries it again.
     """
 
     def __init__(
@@ -947,7 +945,12 @@ def save_to_db(
             with get_connection(db_path) as conn:
                 # 0. Clear empty cache entries so failed items get retried
                 if retry_empty:
-                    clear_empty_cache(db_path, table_name, cache.result_col)
+                    clear_empty_cache(
+                        db_path,
+                        table_name,
+                        cache.result_col,
+                        step=log_as[0] if log_as else table_name,
+                    )
 
                 cached_dfs = []
                 cached_ids = []
@@ -1111,7 +1114,10 @@ def _empty_run_ids(
 
 
 def clear_empty_cache(
-    db_path: str | Path, table_name: str, result_col: str | None = None
+    db_path: str | Path,
+    table_name: str,
+    result_col: str | None = None,
+    step: str | None = None,
 ) -> int:
     """Remove cached entries that produced zero result rows (no row filling
     *result_col*, when given; see PartialCache).
@@ -1122,6 +1128,8 @@ def clear_empty_cache(
     serves genuinely empty results worth querying again (the source database
     may have changed), and databases written before failures were tracked,
     where a failed query was cached as empty.
+
+    *step* names the step in the log line (the table name by default).
 
     Returns the number of entries cleared.
     """
@@ -1144,7 +1152,9 @@ def clear_empty_cache(
             )
             _delete_provenance(conn, table_name, empty_ids)
             conn.commit()
+            n = len(empty_ids)
             logger.info(
-                f"Cleared {len(empty_ids)} empty cache entries from '{table_name}'"
+                f"{step or table_name}: {n} empty saved {pluralize(n, 'result')} "
+                "cleared"
             )
         return len(empty_ids)

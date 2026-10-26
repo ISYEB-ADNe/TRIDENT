@@ -1,7 +1,8 @@
-"""BOLD pipeline — produces the EXTRA (new barcode sequences) results list.
+"""BOLD pipeline: the EXTRA list, BOLD CO1 sequences (proxies) of the GEO
+species BLAST did not find.
 
 Step order:
-    1. prepare_bold_input(geo_df, ncbi_search_df)       → list[str]
+    1. prepare_bold_input(geo_df, ncbi_search_df, name_table) → (list[str], int)
        prepare_bold_other_names(species_list, name_table) → dict
     2. run_bold_search(species_list, other_names, ...)  → (bold_search_df, params)
     3. run_bold_filter(bold_search_df, ...)             → (bold_filter_df, params)
@@ -9,7 +10,8 @@ Step order:
     5. finalize_extra_results(bold_merge_df, ...)       → (extra_df, params)
 
 Exploration:
-    build_extra_summary(extra_df)
+    build_extra_summary(extra_df, geo_df, ncbi_search_df, name_table)
+    build_extra_seq_summary(pair_summary)
 """
 
 from collections.abc import Callable
@@ -148,10 +150,11 @@ def run_bold_search(
         species_list: Species names to query.
         other_names: See prepare_bold_other_names. Not part of the cache
             key: a species cached without a sequence is queried under its
-            other names by "Retry empty results".
+            other names by "Ask again for empty results".
         keep_only_COI5P: If True, only retain COI-5P marker records.
-        keep_ncbi: If True, retain records also found in NCBI.
-        progress_handler: Optional progress tracker (dict or tqdm-like).
+        keep_ncbi: If True, keep the records BOLD mined from GenBank.
+        progress_handler: Optional progress tracker (a dict with "current", or
+            tqdm-like).
         user_agent: User-Agent header for HTTP requests.
         failure_sink: If provided, species whose query failed (e.g. network or
             403 errors) are appended here so the cache layer can skip them and
@@ -238,10 +241,10 @@ def run_bold_filter(
         bold_search_df: Output of run_bold_search; its rows without a
             sequence are left out.
         longest_n: Max sequences to keep per species (None = keep all non-redundant).
-        similarity: Percent identity threshold above which sequences are redundant.
-        bold_search_params: Parameter dict from run_bold_search, propagated into
-            this step's cache key (caching only).
-        progress_handler: Optional progress tracker (dict or tqdm-like).
+        similarity: Percent identity at or above which sequences are redundant.
+        bold_search_params: Params of run_bold_search, for the cache key only.
+        progress_handler: Optional progress tracker (a dict with "current", or
+            tqdm-like).
 
     Returns:
         Filtered DataFrame with representative sequences per species.
@@ -296,7 +299,7 @@ def run_bold_filter(
 ### BOLD MERGE ###
 
 # The proxy's columns, as the BOLD search names them, and as EXTRA and HYPO
-# name them: in the other steps seq_id and dna_sequence are the (M)OTU/ASV's.
+# name them: in the other steps seq_id and dna_sequence are the sequence's.
 PROXY_COLUMNS = {
     "seq_id": "proxy_id",
     "dna_sequence": "proxy_sequence",
@@ -342,8 +345,8 @@ def run_bold_merge(
         ncbi_search_df: NCBI BLAST search results, for the pairs that need a
             proxy (see needs_proxy); the in_mol flag is used without it.
         name_table: See build_name_table.
-        bold_filter_params: Parameters from run_bold_filter (for caching).
-        geo_params: Parameters from finalize_geo_results (for caching).
+        bold_filter_params: Params of run_bold_filter, for the cache key only.
+        geo_params: Params of finalize_geo_results, for the cache key only.
 
     Returns:
         Merged DataFrame with GEO sequences joined to matching BOLD sequences
@@ -409,11 +412,11 @@ def run_bold_merge(
 def finalize_extra_results(
     bold_merge_df: pd.DataFrame, bold_merge_params: dict | None = None
 ) -> pd.DataFrame:
-    """Finalize EXTRA (new BOLD sequences) output for export or analysis.
+    """Finalize the EXTRA list.
 
     Args:
         bold_merge_df: Merged BOLD DataFrame from run_bold_merge().
-        bold_merge_params: Parameters from run_bold_merge (for caching).
+        bold_merge_params: Params of run_bold_merge, for the cache key only.
 
     Returns:
         Finalized EXTRA DataFrame.
@@ -440,11 +443,9 @@ def build_extra_summary(
     ncbi_search_df: pd.DataFrame | None,
     name_table: pd.DataFrame | None,
 ) -> pd.DataFrame:
-    """Build per-(seq_id, species) table showing BOLD record counts.
-
-    Creates a skeleton of all (seq_id, species) pairs that were queried
-    in BOLD, then left-joins the actual record counts. Pairs with zero
-    records indicate species queried but not found.
+    """Number of BOLD sequences kept for each (seq_id, species) pair that
+    needed a proxy (see needs_proxy); 0 when BOLD gave none (see the
+    search's bold_outcome).
 
     Args:
         extra_df: Finalized EXTRA DataFrame (from finalize_extra_results).
@@ -456,7 +457,7 @@ def build_extra_summary(
         DataFrame with columns: seq_id, scientificName, n_bold_sequences (the
         pair's BOLD sequences kept by the filter).
     """
-    # Records per (seq_id, scientificName) pair from EXTRA results
+    # BOLD sequences per (seq_id, scientificName) pair of the EXTRA list
     extra_stats = (
         extra_df.groupby(["seq_id", "scientificName"], observed=False)
         .size()
@@ -468,7 +469,7 @@ def build_extra_summary(
 
     all_pairs = queried_df[["seq_id", "scientificName"]].drop_duplicates()
 
-    # Left-merge: 0 records for species not found in BOLD
+    # Left-merge: 0 for a pair without BOLD sequence
     summary = all_pairs.merge(extra_stats, on=["seq_id", "scientificName"], how="left")
     summary["n_bold_sequences"] = summary["n_bold_sequences"].fillna(0).astype(int)
 

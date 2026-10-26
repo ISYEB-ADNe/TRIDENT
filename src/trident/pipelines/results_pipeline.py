@@ -1,16 +1,16 @@
-"""Results assembly — combines MOL+GEO and HYPO species into a unified results table.
+"""Results assembly: the MOL+GEO and HYPO species in one results table.
 
 Unlike other pipelines, this module mostly aggregates the outputs of the
 other steps. Its one search is the GBIF export's WoRMS lookup of higher-level
 taxa (run_higher_taxa_lookup), saved per name like the other steps' searches.
 
     build_results_df(sequences_df, geo_df, mol_df, ...) → DataFrame
-    build_gbif_export_df(results_df, ...) → DataFrame (one row per MOTU/ASV)
+    build_gbif_export_df(results_df, ...) → DataFrame (one row per sequence)
     run_higher_taxa_lookup(names, ...) → (records_df, params)
-    resolve_sequences(results_df) → DataFrame (species count and shared rank per MOTU/ASV)
+    resolve_sequences(results_df) → DataFrame (species count and shared taxon per sequence)
     add_check_hit(df) → DataFrame
     add_low_identity_warning(df, threshold) → DataFrame
-    best_identity_per_sequence(df, query_cover) → DataFrame (identity and via per MOTU/ASV)
+    best_identity_per_sequence(df, query_cover) → DataFrame (identity and via per sequence)
     flag_low_identity(df, threshold, best_identity) → DataFrame
     build_species_flow(seq_id, ..., name_table) → list of (source, target, names) links
     species_flow_table(seq_id, links, ...) → DataFrame (one row per name)
@@ -92,7 +92,7 @@ EXPORT_COLS = [
 
 def add_check_hit(df):
     """Flag (hypo_check_hit) the HYPO species whose target marker the HYPO
-    check found in NCBI: a hit in hypo_check_identity, empty otherwise.
+    check found in GenBank: a hit in hypo_check_identity, empty otherwise.
 
     A hypothetical species is one whose marker is absent from GenBank, so any
     check hit puts it up for review, whatever its identity or cover.
@@ -167,7 +167,7 @@ def _select_columns(df, extra=None):
 
 
 def _build_mol_geo_part(geo_df, mol_df, name_table):
-    """Build MOL+GEO rows: species confirmed via NCBI + geographically validated.
+    """Build MOL+GEO rows: the MOL species of each sequence that GEO kept.
 
     Each row keeps the best MOL hit of its species for its sequence (the
     mol_* columns TAX gave it) and gets the NCBI names of its MOL hits,
@@ -182,7 +182,8 @@ def _build_mol_geo_part(geo_df, mol_df, name_table):
 
 
 def _build_hypo_part(hypo_df, geo_df, mol_df, name_table):
-    """Build HYPO rows: hypothetical species supported by a BOLD/NCBI proxy."""
+    """Build HYPO rows: hypothetical species supported by a BOLD proxy (CO1)
+    BLASTed against GenBank."""
     hypo = hypo_df.copy()
     hypo["validation_step"] = "HYPO"
 
@@ -252,7 +253,7 @@ def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None, *, name_table):
         if col in results.columns:
             results[col] = pd.to_numeric(results[col], errors="coerce")
 
-    # Empty sequences — add rows for seq_ids with no species assigned
+    # Empty sequences: add rows for seq_ids with no species assigned
     all_seq_ids = sequences_df["seq_id"].unique()
     present_seqs = set(results["seq_id"].dropna().unique())
     missing_seqs = [s for s in all_seq_ids if s not in present_seqs]
@@ -266,7 +267,7 @@ def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None, *, name_table):
 
 
 # ---------------------------------------------------------------------------
-# GBIF export (one row per MOTU/ASV)
+# GBIF export (one row per sequence)
 # ---------------------------------------------------------------------------
 
 TAXONOMY_HIERARCHY = [
@@ -329,7 +330,7 @@ def _lone_taxon(row) -> dict:
 
 
 def _find_common_taxonomy(group: pd.DataFrame) -> dict:
-    """Find the lowest common taxonomic rank for a group of species rows.
+    """Find the lowest shared taxon of a group of species rows.
 
     Returns a dict with taxonomy columns filled to the common level,
     plus scientificName, taxonRank, and identificationRemarks.
@@ -366,7 +367,7 @@ def _find_common_taxonomy(group: pd.DataFrame) -> dict:
             resolved_name = values[0]
 
     if resolved_rank is None:
-        # No common level found — clear all taxonomy
+        # No common level found: clear all taxonomy
         for c in TAXONOMY_HIERARCHY:
             result[c] = pd.NA
         result["scientificName"] = pd.NA
@@ -378,7 +379,7 @@ def _find_common_taxonomy(group: pd.DataFrame) -> dict:
         result["scientificName"] = resolved_name
         result["taxonRank"] = TAXONOMY_RANKS.get(resolved_rank, resolved_rank)
 
-    # Higher-level taxonID/authorship left empty for now (needs WoRMS lookup)
+    # Filled from WoRMS by build_gbif_export_df.
     result["scientificNameAuthorship"] = pd.NA
     result["taxonID"] = pd.NA
     result["taxonID_db"] = pd.NA
@@ -497,9 +498,9 @@ def filter_excluded_results(
 
 @preserve_sequence_order("seq_id", "results_df")
 def build_gbif_export_df(results_df: pd.DataFrame, db_path=None) -> pd.DataFrame:
-    """Build a GBIF export with one row per MOTU/ASV.
+    """Build a GBIF export with one row per sequence.
 
-    Multi-species MOTUs are resolved to their lowest common taxon,
+    A sequence with several species is resolved to their lowest shared taxon,
     with individual species listed in identificationRemarks. The taxonID and
     authorship of that taxon come from WoRMS (run_higher_taxa_lookup, saved in
     *db_path*). When the WoRMS request for a name fails, the rows of that name
@@ -516,7 +517,7 @@ def build_gbif_export_df(results_df: pd.DataFrame, db_path=None) -> pd.DataFrame
             row["dna_sequence"] = group["dna_sequence"].iloc[0]
 
         if species_rows.empty:
-            # Empty sequence — no species assigned
+            # Empty sequence: no species assigned
             rows.append(row)
             continue
 
@@ -630,7 +631,7 @@ def run_higher_taxa_lookup(
         f"{found}/{len(names)} {pluralize(len(names), 'taxon')} found",
         failed,
         "taxon",
-        retry="Build the one-row-per-sequence table again to retry them.",
+        retry="Build the table again to retry them.",
     )
     return pd.DataFrame(rows, columns=HIGHER_TAXA_COLS)
 
@@ -677,7 +678,10 @@ def _fill_worms_records(
             }
         elif records:
             found = sorted({r.get("rank") or "?" for r in records})
-            logger.warning(f"No WoRMS {rank} record for '{name}' (found: {found})")
+            logger.warning(
+                f"No WoRMS {rank} record for '{name}' (found: {found}; check: "
+                f"{worms_search_url(name)})"
+            )
 
     # Clean authorships
     if cache:
@@ -695,7 +699,7 @@ def _fill_worms_records(
 
 
 # ---------------------------------------------------------------------------
-# Species flow (one MOTU/ASV through the steps)
+# Species flow (one sequence through the steps)
 # ---------------------------------------------------------------------------
 
 
@@ -707,14 +711,14 @@ FLOW_NODES = {
     "mol": (1, "MOL list", "76, 120, 168"),
     "tax_out": (2, "Not kept at TAX", "186, 176, 172"),
     "tax_mol": (2, "MOL species (TAX)", "76, 120, 168"),
-    "tax_added": (2, "Added by TAX (congeners)", "245, 133, 24"),
+    "tax_added": (2, "Added by TAX", "245, 133, 24"),
     "geo_out": (3, "Not in the GEO area", "186, 176, 172"),
     "geo_not_run": (3, "GEO not run", "186, 176, 172"),
     "mol_geo": (3, "MOL+GEO", "76, 120, 168"),
     "added_geo": (3, "Added, in the GEO area", "245, 133, 24"),
-    "hypo": (4, "Confirmed by HYPO", "245, 133, 24"),
+    "hypo": (4, "Validated by HYPO", "245, 133, 24"),
     "no_proxy": (4, "No BOLD proxy (EXTRA)", "186, 176, 172"),
-    "hypo_out": (4, "Not confirmed by HYPO", "186, 176, 172"),
+    "hypo_out": (4, "Not validated by HYPO", "186, 176, 172"),
     "extra_not_run": (4, "EXTRA not run", "186, 176, 172"),
     "hypo_not_run": (4, "HYPO not run", "186, 176, 172"),
     "excluded": (5, "Excluded by hand", "186, 176, 172"),

@@ -181,8 +181,9 @@ def count_phrase(
 
 class StepLog:
     """Log lines of one search step, the same for every source: a line per
-    item it queries ("BOLD search 12/33: Gadus morhua, 45 records") and an end
-    line ("BOLD search done after 6 min: 1240 records").
+    item it queries ("BOLD search 12/33: Gadus morhua, 45 BOLD sequences") and
+    an end line ("BOLD search done after 6 min: 1240 BOLD sequences for 30
+    species").
 
     The first item is logged at INFO, then an item when the last line is at
     least ITEM_INTERVAL seconds old, otherwise at DEBUG: a slow source (BOLD takes about 10 s per

@@ -224,8 +224,8 @@ def resolve_accepted_name(
             note: why WoRMS records of the name did not resolve it, or None.
 
     Raises:
-        Network/HTTP errors (other than 404, which means "not found") propagate
-        so the caller can route them to a failure_sink and retry.
+        Network/HTTP errors (other than 204 and 404, which mean "not found")
+        propagate so the caller can route them to a failure_sink and retry.
     """
     not_found = {
         "input": taxon_name,
@@ -314,8 +314,8 @@ def get_children_by_aphia_id(
         List of raw taxon records as dictionaries. Empty list if none found.
 
     Raises:
-        Network/HTTP errors (other than 404, which means "no more children")
-        propagate, on any page: a partial list must not pass for the complete
+        Network/HTTP errors (other than 204 and 404, which mean "no more
+        children") propagate, on any page: a partial list must not pass for the complete
         one, so the caller reports the genus as failed and it is retried.
     """
     all_children = []
@@ -506,11 +506,11 @@ def get_species_from_genus_list(
         genus_list: List of genus names to query.
         delay: Delay in seconds between requests to avoid rate limiting.
         accepted_only: If True, keep only species with status 'accepted'.
-        progress_handler: Optional progress tracker (dict with 'current' key,
-            or object with .update() method).
+        progress_handler: Optional progress tracker (a dict with "current", or
+            tqdm-like).
         user_agent: User-Agent header for HTTP requests.
         marine_only: If True (default), WoRMS returns only marine-flagged
-            children; uncheck to include non-marine records.
+            children; False also returns non-marine records.
         result_sink: Called with the species of each genus and the genus once
             it is done (see save_to_db), unless its query errored.
 
@@ -571,7 +571,7 @@ def get_species_from_genus_list(
                 )
 
         except Exception as e:
-            # An error (not a valid empty) — track so the caller can retry it
+            # An error (not a valid empty): track it so the caller can retry it
             # instead of caching the genus as empty.
             log.failed(genus, f"{e} (check: {worms_search_url(genus)})")
             failed_genera.append(genus)
