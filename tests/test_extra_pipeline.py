@@ -128,8 +128,9 @@ def test_proxy_only_where_ncbi_did_not_find_the_species():
 
 
 def test_resumed_bold_filter_filters_only_the_new_species(tmp_path, monkeypatch):
-    """Species filtered before are read back; only a new one is filtered, and
-    each keeps one of its identical sequences."""
+    """Species filtered before are read back; only a new one, or one whose BOLD
+    records changed, is filtered, and each keeps one of its identical
+    sequences."""
     filtered = []
     real = extra_pipeline.select_longest_sequences
 
@@ -139,11 +140,15 @@ def test_resumed_bold_filter_filters_only_the_new_species(tmp_path, monkeypatch)
 
     monkeypatch.setattr(extra_pipeline, "select_longest_sequences", select)
 
-    def search_df(species):
+    def search_df(species, longer=()):
         return pd.DataFrame(
             {
                 "scientificName": [s for s in species for _ in range(2)],
-                "dna_sequence": ["ACGTACGTAC"] * 2 * len(species),
+                "dna_sequence": [
+                    "ACGTACGTACGT" if s in longer else "ACGTACGTAC"
+                    for s in species
+                    for _ in range(2)
+                ],
             }
         )
 
@@ -153,3 +158,12 @@ def test_resumed_bold_filter_filters_only_the_new_species(tmp_path, monkeypatch)
     df, _ = run_bold_filter(search_df(["A", "B", "C"]), similarity=98, db_path=db_path)
     assert filtered == [2]
     assert sorted(df["scientificName"]) == ["A", "B", "C"]
+
+    filtered.clear()
+    df, _ = run_bold_filter(
+        search_df(["A", "B", "C"], longer=["A"]), similarity=98, db_path=db_path
+    )
+    assert filtered == [2]
+    assert df.loc[df["scientificName"] == "A", "dna_sequence"].tolist() == [
+        "ACGTACGTACGT"
+    ]

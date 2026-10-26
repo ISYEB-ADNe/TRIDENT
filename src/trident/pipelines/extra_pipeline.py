@@ -27,7 +27,13 @@ from trident.core.utils import (
     normalize_name,
 )
 from trident.core.constants import BOLD_SIMILARITY
-from trident.core.database import save_to_db, PartialCache, FullCache, CustomCache
+from trident.core.database import (
+    save_to_db,
+    PartialCache,
+    FullCache,
+    CustomCache,
+    fingerprint,
+)
 from trident.core.sequence_selection import select_longest_sequences
 
 from trident.clients.bold import get_records_from_species_list, with_sequences
@@ -189,9 +195,13 @@ def _bold_filter_params(
         "bold_longest_n": longest_n,
         "bold_similarity": similarity,
     }
+    # Each species carries a fingerprint of its own BOLD rows, so it is
+    # filtered again when the search returns other records for it.
     inputs = [
-        {"scientificName": species, **params}
-        for species in with_sequences(bold_search_df)["scientificName"].unique()
+        {"scientificName": species, "_fp_bold_rows": fingerprint(rows), **params}
+        for species, rows in with_sequences(bold_search_df).groupby(
+            "scientificName", sort=False
+        )
     ]
     return inputs, params
 

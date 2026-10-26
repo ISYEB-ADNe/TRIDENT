@@ -597,7 +597,7 @@ def display_run_button(
         st.warning("⚠️ Settings have changed since the last run.")
         btn_label = "🚀 Run with New Settings"
         btn_type = "primary"
-        btn_help = "Overwrite previous results with new parameters"
+        btn_help = "Run with the new settings"
 
     c1, c2 = st.columns([2, 1])
     with c1:
@@ -701,26 +701,12 @@ def run_step_workflow(
         mode, new_string, btn_key=btn_key, logs_prefix=logs_prefix, starts=starts
     )
     if clicked:
-        # Force a fresh run when the settings changed or the cache is erased.
-        # IDENTICAL re-runs reuse cached items: only failed or missing items
-        # are re-executed (important for PartialCache steps). Continuing a
-        # stopped run with the same settings does not force: it already
-        # applied them, and the items it cached are the ones to keep.
-        # The settings that make the results (as for "Settings have changed"):
-        # others, such as threads or batch size, do not stop a run continuing.
-        result_settings = (
-            {k: current_params.get(k) for k in compare_keys}
-            if compare_keys
-            else current_params
-        )
-        resuming = (
-            flag_key in st.session_state.get(STOPPED_STEPS, ())
-            and runs[flag_key]["result_settings"] == result_settings
-            and "Erase" not in cache_mode
-        )
+        # Only "Erase cached results" forces a fresh run. Otherwise the step
+        # reuses the items saved for its current settings and runs the others,
+        # whether the settings changed or a stopped run continues: every
+        # setting in *compare_keys* is part of the step's cache key.
         runs[flag_key] = {
-            "result_settings": result_settings,
-            "force": (mode == "CHANGED" or "Erase" in cache_mode) and not resuming,
+            "force": "Erase" in cache_mode,
             "retry": "Retry" in cache_mode,
             "job_kwargs": job_kwargs or {},
             "starts": starts + 1,
