@@ -2,6 +2,7 @@
 and geographic bounding box calculations."""
 
 import re
+import threading
 from collections.abc import Callable
 from typing import Literal
 from urllib.parse import quote
@@ -329,8 +330,10 @@ def match_taxon_names(
         n_jobs: Number of parallel threads.
         user_agent: User-Agent header for HTTP requests.
 
-    Each call creates its own session: requests.Session is not thread-safe, so
-    sharing one across the threading backend can corrupt the pool state.
+    Each thread has its own session, reused for all its names (a new session
+    per name would open a new connection each time): requests.Session is not
+    thread-safe, so sharing one across the threading backend can corrupt the
+    pool state.
 
     Returns:
         DataFrame with one row per name containing GBIF match metadata.
@@ -341,11 +344,23 @@ def match_taxon_names(
         return pd.DataFrame(columns=GBIF_MATCH_COLUMNS)
 
     log = StepLog("GBIF name match", len(names))
+    local = threading.local()
+    sessions = []  # every thread's session, closed once all names are matched
+    sessions_lock = threading.Lock()
+
+    def thread_session():
+        if not hasattr(local, "session"):
+            local.session = create_session(user_agent=user_agent)
+            with sessions_lock:
+                sessions.append(local.session)
+        return local.session
 
     def match(name):
+        # Once stopped, no session: the match raises its own stop
+        session = None if stop.stop_requested() else thread_session()
         with log.query(name):
             result = _match_single_taxon_name(
-                name, worms_ids.get(name), user_agent=user_agent
+                name, worms_ids.get(name), session=session, user_agent=user_agent
             )
         match_type = str(result.get("matchType", "")).lower()
         check = f"check: {gbif_search_url(name)}"
@@ -380,6 +395,10 @@ def match_taxon_names(
         return result
 
     results = stop.run_threads(match, [(name,) for name in names], n_jobs)
+    # Closed once all names are matched. A stop can end run_threads while
+    # threads still use theirs: those are left to be released with them.
+    for session in sessions:
+        session.close()
 
     results_df = pd.DataFrame(results)
     errored = results_df["matchType"] == "ERROR"

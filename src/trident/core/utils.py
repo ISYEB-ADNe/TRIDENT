@@ -155,12 +155,28 @@ def species_for_sequences(df: pd.DataFrame) -> str:
     return f"{n_species:,} species for {n_seqs:,} {pluralize(n_seqs, 'sequence')}"
 
 
-def name_list(names: Sequence, shown: int = 5) -> str:
-    """Names as a log line lists them: the first *shown*, then "and N more"."""
-    text = ", ".join(str(name) for name in names[:shown])
+def name_list(
+    names: Sequence, shown: int = 5, sep: str = ", ", more: str = " and"
+) -> str:
+    """Names as a log line lists them: the first *shown*, joined by *sep*,
+    then "and N more" (*more* gives what precedes the number)."""
+    text = sep.join(str(name) for name in names[:shown])
     if len(names) > shown:
-        text += f" and {len(names) - shown} more"
+        text += f"{more} {len(names) - shown} more"
     return text
+
+
+def count_phrase(
+    values: pd.Series, noun: str = "", order: Sequence | None = None
+) -> str:
+    """How many times each value occurs, as in "15 not in BOLD, 14 only
+    GenBank copies": the values of *order* that occur, in that order, or
+    else all, the most frequent first (*noun* after each count, e.g.
+    "species")."""
+    counts = values.value_counts()
+    noun = f" {noun}" if noun else ""
+    order = counts.index if order is None else [o for o in order if o in counts]
+    return ", ".join(f"{counts[o]}{noun} {o}" for o in order)
 
 
 class StepLog:

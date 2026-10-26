@@ -15,8 +15,9 @@ import streamlit as st
 
 from trident.clients.gbif import area_label
 from trident.core.config import is_streamlit_cloud
-from trident.core.database import load_provenance
+from trident.core.database import fingerprint, load_provenance
 from trident.core.utils import (
+    count_phrase,
     name_list,
     normalize_name,
     pluralize,
@@ -25,7 +26,7 @@ from trident.core.utils import (
 from trident.pipelines.names import resolved_names, species_key, species_of
 
 from trident.pipelines.results_pipeline import (
-    build_species_flow,
+    build_species_flows,
     plot_species_flow,
     species_flow_table,
     build_results_df,
@@ -191,11 +192,12 @@ def _flag_low_identity(df, threshold, best_identity):
 FLOW_TABLES = ["ncbi_search_df", "mol_df", "tax_df", "geo_df", "extra_df", "hypo_df"]
 
 
-def _species_flow(seq_id):
-    """The sequence's species flow (see build_species_flow) for the steps run."""
+def _species_flows(seq_ids):
+    """The species flow of each sequence (see build_species_flows) for the
+    steps run."""
     state = st.session_state
-    return build_species_flow(
-        seq_id,
+    return build_species_flows(
+        seq_ids,
         **{key: state.get(key) for key in FLOW_TABLES},
         excluded=state.get("excluded_results", []),
         name_table=state.get("name_table"),
@@ -219,9 +221,10 @@ def _lost_at(seq_ids):
     for key in memo["excluded"] ^ excluded:
         lost.pop(key.split("||", 1)[0], None)
     memo["excluded"] = excluded
-    for seq_id in seq_ids:
-        if seq_id not in lost:
-            lost[seq_id] = flow_lost_at(_species_flow(seq_id))
+    missing = [seq_id for seq_id in seq_ids if seq_id not in lost]
+    if missing:
+        flows = _species_flows(missing)
+        lost.update({seq_id: flow_lost_at(links) for seq_id, links in flows.items()})
     return {seq_id: lost[seq_id] for seq_id in seq_ids}
 
 
@@ -280,11 +283,6 @@ def _filtered_seq_ids(assignments, choice):
         "HYPO check": assignments["check_hit"],
     }.get(choice)
     return assignments["seq_id"] if mask is None else assignments.loc[mask, "seq_id"]
-
-
-def _count_phrase(counts):
-    """Counts as "2 family, 1 order"."""
-    return ", ".join(f"{n} {label}" for label, n in counts.items())
 
 
 def _default_threshold():
@@ -430,7 +428,7 @@ def show_summary(assignments, curated_df, results_df, threshold):
                 for rank, n in zip(higher["taxonRank"], higher["n_species"])
             ]
         )
-        st.caption(f"Higher rank: {_count_phrase(ranks.value_counts())}.")
+        st.caption(f"Higher rank: {count_phrase(ranks)}.")
     if not unassigned.empty:
         reasons = unassigned["note"].value_counts()
         st.caption(
@@ -711,7 +709,7 @@ def _show_lost_at(seq_id, step):
 def show_species_flow(seq_id):
     """The selected sequence's candidates at each step, as a Sankey."""
     state = st.session_state
-    links = _species_flow(seq_id)
+    links = _species_flows([seq_id])[seq_id]
     if not links:
         st.info("No NCBI hit for this sequence.")
         return
@@ -766,7 +764,7 @@ def show_sequence_detail(results_df, assignments, threshold):
                 assignments["seq_id"], assignments["n_species"], assignments["note"]
             )
         }
-        selected_seq = sequence_selector(format_fn=lambda s: labels.get(s, s))
+        selected_seq = sequence_selector(labels=labels)
         row = by_seq.loc[selected_seq]
         n = row["n_species"]
         rank = row["taxonRank"].lower() if pd.notna(row["taxonRank"]) else None
@@ -1132,25 +1130,24 @@ def show_exports(curated_df):
             )
             with dl2:
                 # Built in the script run, where the session's contact email
-                # and the spinner apply; offered for the results it was built from.
-                def fingerprint():
-                    rows = pd.util.hash_pandas_object(
-                        curated_df[export_cols], index=False
-                    )
-                    return int(rows.sum())
-
+                # and the spinner apply; offered for the results it was built
+                # from, which are hashed only once an export exists.
+                shown = None
                 if st.button("📥 GBIF export (CSV)", width="stretch", key="gbif_csv"):
+                    shown = fingerprint(curated_df[export_cols])
                     with st.spinner("Building the GBIF export..."):
                         gbif_df = build_gbif_export_df(
                             curated_df, db_path=st.session_state.get("db_path")
                         )
                     st.session_state._gbif_export = (
-                        fingerprint(),
+                        shown,
                         gbif_df.to_csv(index=False),
                         failed_items(gbif_df),
                     )
                 built = st.session_state.get("_gbif_export")
-                if built and built[0] == fingerprint():
+                if built and built[0] == (
+                    shown or fingerprint(curated_df[export_cols])
+                ):
                     if built[2]:
                         n = len(built[2])
                         st.warning(

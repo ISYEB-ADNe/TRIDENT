@@ -23,6 +23,7 @@ from trident.ui.ui import (
     record_empty_step,
     failed_items,
     show_failed_items_banner,
+    lazy_expander,
     styled_or_plain,
     COL,
     get_recent_param_sets,
@@ -430,62 +431,63 @@ def gbif_search_workflow():
 
     # Results Preview
     if mode != "NEW" and st.session_state.gbif_search_df is not None:
-        with st.expander(
+        with lazy_expander(
             f"Inspect GBIF search results ({species_for_sequences(st.session_state.gbif_search_df)})",
-            expanded=False,
-        ):
-            df = _with_gbif_names(st.session_state.gbif_search_df)
-            cols = df.columns.tolist()
-            priority = [
-                "seq_id",
-                "scientificName",
-                "gbif_scientificName",
-                "gbif_taxonURL",
-                "gbif_extent",
-                "occurrences",
-                "genus",
-                "specificEpithet",
-                "family",
-                "order",
-                "class",
-                "phylum",
-                "kingdom",
-            ]
-            ordered = priority + [c for c in cols if c not in priority]
-            if df["in_mol"].astype(bool).any():
-                st.caption(":green[■] Species also in MOL list")
-            styled_df = styled_or_plain(df, highlight_in_mol)
-            st.dataframe(
-                styled_df,
-                width="stretch",
-                hide_index=True,
-                column_order=ordered,
-                column_config={
-                    "seq_id": COL["seq_id"],
-                    "scientificName": COL["scientificName"],
-                    "gbif_scientificName": COL["gbif_scientificName"],
-                    "gbif_taxonURL": COL["gbif_taxonURL"],
-                    "gbif_extent": COL["gbif_extent"],
-                    "gbif_speciesID": None,
-                    "occurrences": COL["occurrences"],
-                    "genus": COL["genus"],
-                    "specificEpithet": COL["specificEpithet"],
-                    "family": COL["family"],
-                    "order": COL["order"],
-                    "class": COL["class"],
-                    "phylum": COL["phylum"],
-                    "kingdom": COL["kingdom"],
-                    "dna_sequence": None,
-                    "in_mol": None,
-                    "mol_top_identity_percentage": None,
-                    "mol_top_query_cover": None,
-                    "taxonURL": None,
-                    "scientificNameAuthorship": None,
-                    "taxonRank": None,
-                    "taxonID": None,
-                    "taxonID_db": None,
-                },
-            )
+            key="geo_search_results",
+        ) as is_open:
+            if is_open:
+                df = _with_gbif_names(st.session_state.gbif_search_df)
+                cols = df.columns.tolist()
+                priority = [
+                    "seq_id",
+                    "scientificName",
+                    "gbif_scientificName",
+                    "gbif_taxonURL",
+                    "gbif_extent",
+                    "occurrences",
+                    "genus",
+                    "specificEpithet",
+                    "family",
+                    "order",
+                    "class",
+                    "phylum",
+                    "kingdom",
+                ]
+                ordered = priority + [c for c in cols if c not in priority]
+                if df["in_mol"].astype(bool).any():
+                    st.caption(":green[■] Species also in MOL list")
+                styled_df = styled_or_plain(df, highlight_in_mol)
+                st.dataframe(
+                    styled_df,
+                    width="stretch",
+                    hide_index=True,
+                    column_order=ordered,
+                    column_config={
+                        "seq_id": COL["seq_id"],
+                        "scientificName": COL["scientificName"],
+                        "gbif_scientificName": COL["gbif_scientificName"],
+                        "gbif_taxonURL": COL["gbif_taxonURL"],
+                        "gbif_extent": COL["gbif_extent"],
+                        "gbif_speciesID": None,
+                        "occurrences": COL["occurrences"],
+                        "genus": COL["genus"],
+                        "specificEpithet": COL["specificEpithet"],
+                        "family": COL["family"],
+                        "order": COL["order"],
+                        "class": COL["class"],
+                        "phylum": COL["phylum"],
+                        "kingdom": COL["kingdom"],
+                        "dna_sequence": None,
+                        "in_mol": None,
+                        "mol_top_identity_percentage": None,
+                        "mol_top_query_cover": None,
+                        "taxonURL": None,
+                        "scientificNameAuthorship": None,
+                        "taxonRank": None,
+                        "taxonID": None,
+                        "taxonID_db": None,
+                    },
+                )
 
 
 # --------------------------------------------------------------------
@@ -803,40 +805,42 @@ def display_gbif_sequence_table(
                 render_styled_table(df)
 
 
-def _geo_sequence_label(seq_id):
-    """Format sequence selector label with species counts."""
+def _geo_sequence_labels():
+    """Sequence selector label of each sequence: species counts (one pass
+    over the GBIF results for all)."""
     params = st.session_state.geo_params
     target_extent = str(params["gbif_filter_extent"])
     min_occ = params["gbif_min_occurrences"]
 
     df = st.session_state.gbif_search_df
-    seq_df = df[df["seq_id"] == seq_id]
-
-    if seq_df.empty:
-        return f"{seq_id} (no data)"
-
-    total = seq_df["scientificName"].nunique()
+    total = df.groupby("seq_id")["scientificName"].nunique()
 
     # Count species in GEO list meeting threshold in priority extent
-    geo_species = set(
-        st.session_state.geo_df[st.session_state.geo_df["seq_id"] == seq_id][
-            "scientificName"
-        ]
+    pair = ["seq_id", "scientificName"]
+    in_geo = pd.MultiIndex.from_frame(df[pair]).isin(
+        pd.MultiIndex.from_frame(st.session_state.geo_df[pair])
     )
-    geo_seq_df = seq_df[seq_df["scientificName"].isin(geo_species)]
-    local_mask = (geo_seq_df["gbif_extent"].astype(str) == target_extent) & (
-        geo_seq_df["occurrences"] >= min_occ
-    )
-    local_count = geo_seq_df.loc[local_mask, "scientificName"].nunique()
+    local = df[
+        in_geo
+        & (df["gbif_extent"].astype(str) == target_extent)
+        & (df["occurrences"] >= min_occ)
+    ]
+    local_count = local.groupby("seq_id")["scientificName"].nunique()
 
     area = area_label(params["gbif_filter_extent"], params.get("gbif_area"))
-    return f"{seq_id}: {local_count}/{total} species {area}"
+    return {
+        seq_id: f"{seq_id}: {local_count.get(seq_id, 0)}/{total[seq_id]} species {area}"
+        if seq_id in total.index
+        else f"{seq_id} (no data)"
+        for seq_id in st.session_state.sequences_id
+    }
 
 
 def display_gbif_sequence():
     """Display detailed GBIF results for a selected sequence."""
 
-    selected_seq = sequence_selector(format_fn=_geo_sequence_label)
+    labels = _geo_sequence_labels()
+    selected_seq = sequence_selector(labels=labels)
     df = st.session_state.gbif_search_df
 
     seq_df = df[(df["seq_id"] == selected_seq)].copy()
@@ -933,11 +937,12 @@ def display_gbif_results():
         display_same_species(st.session_state.geo_df)
         display_missing_species()
 
-        with st.expander(
+        with lazy_expander(
             f"View full GEO list ({species_for_sequences(st.session_state.geo_df)})",
-            expanded=False,
-        ):
-            display_full_geo_list()
+            key="geo_full_list",
+        ) as is_open:
+            if is_open:
+                display_full_geo_list()
 
     with st.container(border=True):
         st.markdown("### 🔬 GEO List per (M)OTU/ASV")

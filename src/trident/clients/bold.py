@@ -11,6 +11,7 @@ from loguru import logger
 from trident.core import stop
 from trident.core.http import create_session, with_optional_session
 from trident.core.utils import (
+    count_phrase,
     StepLog,
     extract_specific_epithet,
     name_list,
@@ -547,16 +548,6 @@ def get_records_from_species_list(
     return bold_df, failed_species
 
 
-def outcome_counts(
-    outcomes: pd.Series, noun: str = "", order: list[str] = OUTCOMES_WITHOUT_SEQUENCES
-) -> str:
-    """How many species have each outcome of *order*, as in "15 not in BOLD,
-    14 only GenBank copies" (*noun* after each count, e.g. "species")."""
-    counts = outcomes.value_counts()
-    noun = f" {noun}" if noun else ""
-    return ", ".join(f"{counts[o]}{noun} {o}" for o in order if o in counts)
-
-
 def _log_outcomes(log: StepLog, bold_search_df: pd.DataFrame, failed: list[str]):
     """End the step's log: the sequences found and the species of each
     outcome without one, then one line naming them per outcome."""
@@ -570,7 +561,7 @@ def _log_outcomes(log: StepLog, bold_search_df: pd.DataFrame, failed: list[str])
     if found_as:
         summary += f" ({len(found_as)} under another name)"
     outcomes = outcomes_by_species(bold_search_df)
-    counts = outcome_counts(outcomes, "species")
+    counts = count_phrase(outcomes, "species", OUTCOMES_WITHOUT_SEQUENCES)
     log.done(f"{summary}, {counts}" if counts else summary, failed, "species")
     if found_as:
         logger.info(f"BOLD search, found under another name: {name_list(found_as)}")

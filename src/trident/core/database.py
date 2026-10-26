@@ -255,10 +255,12 @@ def fingerprint(df: "pd.DataFrame | None") -> str:
     """Stable, row-order-independent content hash of a DataFrame.
 
     Returns ``"empty"`` for an empty or missing frame. Sensitive to values,
-    columns, and dtypes; insensitive to row order.
+    column names and dtypes (90 and 90.0 differ); insensitive to row and
+    column order.
     """
     if df is None or len(df) == 0:
         return "empty"
+    df = df[sorted(df.columns, key=str)]
     # Row-order-independent: sort the per-row hashes (vectorised) and hash the
     # raw bytes, avoiding a per-row str()/join over large frames.
     row_hashes = np.sort(pd.util.hash_pandas_object(df, index=False).to_numpy())
@@ -323,22 +325,45 @@ def _row_keys(df: pd.DataFrame, match_map: dict[str, str]) -> pd.Series:
     return pd.Series(list(zip(*columns)), index=df.index, dtype=object)
 
 
-def _find_cached_run_id(
-    conn: sqlite3.Connection, table_name: str, item: dict
-) -> int | None:
-    """Return the run_id matching *item*, or None."""
-    inputs_table = f"{table_name}_inputs"
+def _find_cached_run_ids(
+    conn: sqlite3.Connection, table_name: str, items: list[dict]
+) -> list[int | None]:
+    """The run_id of each of *items*: the first inputs row holding its values
+    (as ``_params_to_sql_values`` writes them), or None. None for all when
+    the inputs table, or one of an item's keys in it, does not exist yet.
 
+    The inputs table is read once: a step can have thousands of items.
+    """
     try:
-        conditions = " AND ".join([f"{k} IS ?" for k in item.keys()])
-        values = tuple(_params_to_sql_values(item).values())
-        cursor = conn.execute(
-            f"SELECT run_id FROM {inputs_table} WHERE {conditions}", values
-        )
-        row = cursor.fetchone()
-        return row[0] if row else None
+        cursor = conn.execute(f"SELECT * FROM {table_name}_inputs")
     except sqlite3.OperationalError:
-        return None
+        return [None] * len(items)
+    columns = [col[0] for col in cursor.description]
+    rows = cursor.fetchall()
+    run_id_at = columns.index("run_id")
+    found = []
+    by_keys: dict[tuple, dict] = {}  # item keys -> their values -> run_id
+    for item in items:
+        keys = tuple(item)
+        if keys not in by_keys:
+            by_keys[keys] = {}
+            if set(keys) <= set(columns):
+                at = [columns.index(k) for k in keys]
+                for row in rows:
+                    stored = tuple(_stored_key(row[i]) for i in at)
+                    by_keys[keys].setdefault(stored, row[run_id_at])
+        values = tuple(_params_to_sql_values(item).values())
+        found.append(by_keys[keys].get(values))
+    return found
+
+
+def _stored_key(value):
+    """An inputs value as the text ``_params_to_sql_values`` writes: a number
+    stored as a number (by a column's type) matches its text, as SQLite's
+    ``IS`` comparison makes it."""
+    if value is None or isinstance(value, str):
+        return value
+    return str(_normalize_number(value))
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -354,18 +379,57 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     return cursor.fetchone() is not None
 
 
-def _load_cached_df(
-    conn: sqlite3.Connection, table_name: str, run_id: int
+def _index_run_id(conn: sqlite3.Connection, table_name: str) -> None:
+    """Index the run_id of *table_name*, if it exists: each cached item is
+    read by its run_id, which would otherwise scan the whole table."""
+    if _table_exists(conn, table_name):
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS {table_name}_run_id ON {table_name} (run_id)"
+        )
+
+
+def _load_cached_items(
+    conn: sqlite3.Connection, table_name: str, run_ids: list[int]
 ) -> pd.DataFrame:
-    """Load cached results for *run_id* (without the run_id column)."""
-    if not _table_exists(conn, table_name):
+    """The rows of the items *run_ids*, in that order (each item's rows in
+    table order), without the run_id column; empty without rows.
+
+    They come typed as reading each item on its own and joining the reads
+    would type them, with a few reads instead of one per item (seconds on
+    thousands of items). pandas types a column from the kinds of values it
+    reads (text, whole numbers, decimals, empty...), so the items whose
+    columns hold the same kinds are read together, and joining those reads
+    gives the types that joining the items would. SQLite gives each item's
+    kinds (``typeof``: null, integer, real, text, blob, one for each type
+    Python receives).
+    """
+    if not run_ids or not _table_exists(conn, table_name):
         return pd.DataFrame()
-    df = pd.read_sql_query(
-        f"SELECT * FROM {table_name} WHERE run_id = ?", conn, params=(run_id,)
-    )
-    if "run_id" in df.columns:
-        df = df.drop("run_id", axis=1)
-    return df
+    in_ids = "run_id IN (SELECT value FROM json_each(?))"
+    columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table_name})")]
+    kinds_sql = ", ".join(f'group_concat(DISTINCT typeof("{col}"))' for col in columns)
+    kinds = conn.execute(
+        f"SELECT run_id, {kinds_sql} FROM {table_name} WHERE {in_ids} GROUP BY run_id",
+        (json.dumps(run_ids),),
+    ).fetchall()
+    if not kinds:  # the items have no rows (a search with no result)
+        return pd.DataFrame()
+    groups: dict[tuple, list[int]] = {}
+    for run_id, *columns in kinds:
+        key = tuple(frozenset(column.split(",")) for column in columns)
+        groups.setdefault(key, []).append(run_id)
+    reads = [
+        pd.read_sql_query(
+            f"SELECT * FROM {table_name} WHERE {in_ids} ORDER BY rowid",
+            conn,
+            params=(json.dumps(ids),),
+        )
+        for ids in groups.values()
+    ]
+    df = pd.concat(reads, ignore_index=True)
+    position = {run_id: i for i, run_id in enumerate(run_ids)}
+    order = df["run_id"].map(position).to_numpy().argsort(kind="stable")
+    return df.iloc[order].drop(columns="run_id").reset_index(drop=True)
 
 
 def _delete_run(conn: sqlite3.Connection, table_name: str, run_id: int) -> None:
@@ -849,17 +913,18 @@ def save_to_db(
                     clear_empty_cache(db_path, table_name, cache.result_col)
 
                 cached_dfs = []
+                cached_ids = []
                 uncached_items = []
 
                 # 1. Classify each item as cached or uncached
-                for idx, item in enumerate(cache_items):
-                    run_id = _find_cached_run_id(conn, table_name, item)
-
+                _index_run_id(conn, table_name)
+                run_ids = _find_cached_run_ids(conn, table_name, cache_items)
+                for idx, (item, run_id) in enumerate(zip(cache_items, run_ids)):
                     if run_id is not None and not force_rerun:
                         logger.debug(
                             f"Item {idx + 1}/{len(cache_items)}: cached (run_id={run_id})"
                         )
-                        cached_dfs.append(_load_cached_df(conn, table_name, run_id))
+                        cached_ids.append(run_id)
                     else:
                         if run_id is not None:
                             logger.debug(
@@ -870,8 +935,9 @@ def save_to_db(
                             _delete_provenance(conn, table_name, [run_id])
                         uncached_items.append(item)
 
+                cached_dfs.append(_load_cached_items(conn, table_name, cached_ids))
                 _log_cache_use(
-                    func.__name__, log_as, len(cached_dfs), len(uncached_items)
+                    func.__name__, log_as, len(cached_ids), len(uncached_items)
                 )
                 if log_reuse_as and not uncached_items:
                     logger.info(f"{log_reuse_as}: saved result reused (same settings)")
@@ -962,7 +1028,15 @@ def save_to_db(
                     if non_empty
                     else pd.DataFrame()
                 )
-                ensure_columns(result_df, _load_step_columns(conn, table_name))
+                # The step's columns, in the order it recorded them: a result
+                # read back has the table's order, where a column added after
+                # the table was created comes last, so a live and a cached
+                # result would differ.
+                columns = _load_step_columns(conn, table_name)
+                ensure_columns(result_df, columns)
+                result_df = result_df[
+                    columns + [col for col in result_df.columns if col not in columns]
+                ]
                 result_df.attrs["failed_items"] = list(failure_sink)
                 return result_df, params
 

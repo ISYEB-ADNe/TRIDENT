@@ -375,6 +375,32 @@ V2_MATCHES = json.loads(
 )
 
 
+def test_name_matching_reuses_one_session_per_thread(monkeypatch):
+    """Each matching thread reuses one session for all its names (no new
+    connection per name), and every session is closed once all are matched."""
+    answer = next(iter(V2_MATCHES.values()))["body"]
+    sessions = []
+
+    class _CountedSession(_JsonSession):
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    def new_session(*a, **k):
+        sessions.append(_CountedSession(lambda params: answer))
+        return sessions[-1]
+
+    monkeypatch.setattr(gbif, "create_session", new_session)
+    names = [f"Species {i}" for i in range(60)]
+
+    matches = match_taxon_names(names, n_jobs=3)
+
+    assert len(matches) == 60
+    assert 1 <= len(sessions) <= 3
+    assert all(session.closed for session in sessions)
+
+
 def test_species_counted_under_gbif_species_of_worms_id_or_name(monkeypatch):
     """Each name keeps its row under the GBIF species of its WoRMS ID, or of its
     name or a variant of it; names sharing a species are both kept. A synonym

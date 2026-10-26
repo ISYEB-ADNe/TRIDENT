@@ -16,6 +16,7 @@ from trident.ui.ui import (
     record_empty_step,
     failed_items,
     show_failed_items_banner,
+    lazy_expander,
     styled_or_plain,
     COL,
     StreamlitLogSink,
@@ -545,33 +546,45 @@ def display_worms_sequence_table(sequence_worms):
     )
 
 
-def _tax_sequence_label(seq_id):
-    """Format sequence selector label with species count."""
+def _tax_sequence_labels():
+    """Sequence selector label of each sequence: species counts (one pass
+    over the TAX list for all)."""
     tax_df = st.session_state.tax_df
-    seq_data = tax_df[tax_df["seq_id"] == seq_id]
-    if seq_data.empty:
-        return f"{seq_id} (no species)"
-    n_species = seq_data["scientificName"].nunique()
-    in_mol = (
-        seq_data.loc[seq_data["in_mol"].astype(bool), "scientificName"].nunique()
-        if "in_mol" in seq_data.columns
-        else 0
-    )
-    new = n_species - in_mol
+    sequences = st.session_state.sequences_id
+    if tax_df.empty:  # its summary may have no columns
+        return {seq_id: f"{seq_id} (no species)" for seq_id in sequences}
+    n_species = tax_df.groupby("seq_id")["scientificName"].nunique()
+    if "in_mol" in tax_df.columns:
+        from_mol = tax_df[tax_df["in_mol"].astype(bool)]
+        in_mol = from_mol.groupby("seq_id")["scientificName"].nunique()
+    else:
+        in_mol = pd.Series(dtype=int)
     # MOL species not in the TAX list (see build_tax_summary).
     summary = st.session_state.tax_summary_df
-    counts = summary.loc[summary["seq_id"] == seq_id, ["MOL Species", "Overlap"]]
-    missing = (counts["MOL Species"] - counts["Overlap"]).sum()
-    label = f"{seq_id} — {n_species} species ({in_mol} from MOL, +{new} new"
-    if missing:
-        label += f", {missing} missing"
-    return label + ")"
+    missing = (
+        (summary["MOL Species"] - summary["Overlap"]).groupby(summary["seq_id"]).sum()
+    )
+    labels = {}
+    for seq_id in sequences:
+        if seq_id not in n_species.index:
+            labels[seq_id] = f"{seq_id} (no species)"
+            continue
+        n_in_mol = in_mol.get(seq_id, 0)
+        new = n_species[seq_id] - n_in_mol
+        label = (
+            f"{seq_id}: {n_species[seq_id]} species ({n_in_mol} from MOL, +{new} new"
+        )
+        if missing.get(seq_id, 0):
+            label += f", {missing[seq_id]} missing"
+        labels[seq_id] = label + ")"
+    return labels
 
 
 def display_worms_sequence():
     """Display detailed WoRMS results for a selected sequence."""
 
-    selected_seq = sequence_selector(format_fn=_tax_sequence_label)
+    labels = _tax_sequence_labels()
+    selected_seq = sequence_selector(labels=labels)
 
     df = st.session_state.tax_df
     seq_df = df[(df["seq_id"] == selected_seq)]
@@ -651,11 +664,12 @@ def display_worms_results():
         display_mol_rejected()
         display_worms_summary()
 
-        with st.expander(
+        with lazy_expander(
             f"View full TAX list ({species_for_sequences(st.session_state.tax_df)})",
-            expanded=False,
-        ):
-            display_full_tax_list()
+            key="tax_full_list",
+        ) as is_open:
+            if is_open:
+                display_full_tax_list()
 
     with st.container(border=True):
         st.markdown("### 🔬 TAX List per (M)OTU/ASV")

@@ -19,6 +19,8 @@ import trident.pipelines as pipe
 from trident.ui.ui import (
     failed_items,
     show_failed_items_banner,
+    show_filter_success,
+    lazy_expander,
     styled_or_plain,
     COL,
     BLAST_HELP,
@@ -262,41 +264,42 @@ def ncbi_search_workflow():
     if mode != "NEW":
         display_ncbi_search_overview()
 
-        with st.expander(
+        with lazy_expander(
             f"Inspect raw NCBI/BLAST results ({len(st.session_state.ncbi_search_df):,} hits)",
-            expanded=False,
-        ):
-            cols = st.session_state.ncbi_search_df.columns.tolist()
-            priority = [
-                "seq_id",
-                "scientificName",
-                "hit_url",
-                "identity_percentage",
-                "query_cover",
-                "hit_def",
-            ]
-            ordered = priority + [c for c in cols if c not in priority]
-            st.dataframe(
-                st.session_state.ncbi_search_df[ordered],
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "seq_id": COL["seq_id"],
-                    "scientificName": COL["scientificName"],
-                    "hit_url": COL["hit_url"],
-                    "identity_percentage": COL["identity_percentage"],
-                    "query_cover": COL["query_cover"],
-                    "hit_def": COL["hit_def"],
-                    "dna_sequence": None,
-                    "genus": COL["genus"],
-                    "specificEpithet": COL["specificEpithet"],
-                    "align_length": COL["align_length"],
-                    "identities": COL["identities"],
-                    "gaps": COL["gaps"],
-                    "query_start": COL["query_start"],
-                    "query_end": COL["query_end"],
-                },
-            )
+            key="mol_search_results",
+        ) as is_open:
+            if is_open:
+                cols = st.session_state.ncbi_search_df.columns.tolist()
+                priority = [
+                    "seq_id",
+                    "scientificName",
+                    "hit_url",
+                    "identity_percentage",
+                    "query_cover",
+                    "hit_def",
+                ]
+                ordered = priority + [c for c in cols if c not in priority]
+                st.dataframe(
+                    st.session_state.ncbi_search_df[ordered],
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "seq_id": COL["seq_id"],
+                        "scientificName": COL["scientificName"],
+                        "hit_url": COL["hit_url"],
+                        "identity_percentage": COL["identity_percentage"],
+                        "query_cover": COL["query_cover"],
+                        "hit_def": COL["hit_def"],
+                        "dna_sequence": None,
+                        "genus": COL["genus"],
+                        "specificEpithet": COL["specificEpithet"],
+                        "align_length": COL["align_length"],
+                        "identities": COL["identities"],
+                        "gaps": COL["gaps"],
+                        "query_start": COL["query_start"],
+                        "query_end": COL["query_end"],
+                    },
+                )
 
 
 # --------------------------------------------------------------------
@@ -486,9 +489,7 @@ def _filter_success_message():
     """Show success message when filter results exist."""
     mol_df = st.session_state.mol_df
     if mol_df is not None:
-        st.success(
-            f"✅ Filtering complete: {len(mol_df):,}/{len(st.session_state.ncbi_search_df):,} hits retained"
-        )
+        show_filter_success(len(mol_df), len(st.session_state.ncbi_search_df), "hits")
 
 
 def ncbi_filter_workflow():
@@ -874,26 +875,33 @@ def display_ncbi_filter_warnings(cut, species_details):
         )
 
 
-def _mol_sequence_label(seq_id):
-    """Format sequence selector label with species count, hits, top identity, and filter method."""
+def _mol_sequence_labels():
+    """Sequence selector label of each sequence: species count, hits, top
+    identity and filter method (one pass over the MOL list for all)."""
     df = st.session_state.mol_df
-    seq_data = df[df["seq_id"] == seq_id]
-    if seq_data.empty:
-        return f"{seq_id} (no hits)"
-    n_species = seq_data["scientificName"].nunique()
-    n_hits = len(seq_data)
-    top_id = seq_data["identity_percentage"].max()
-    method = FILTER_METHOD_LABELS.get(
-        seq_data["filter_method"].iloc[0], seq_data["filter_method"].iloc[0]
-    )
-    return (
-        f"{seq_id} — {n_species} species, {n_hits} hits, top {top_id:.1f}% ({method})"
-    )
+    by_seq = df.groupby("seq_id", sort=False)
+    n_species = by_seq["scientificName"].nunique()
+    n_hits = by_seq.size()
+    top_id = by_seq["identity_percentage"].max()
+    # The method of the sequence's first row
+    method = df.drop_duplicates("seq_id").set_index("seq_id")["filter_method"]
+    labels = {}
+    for seq_id in st.session_state.sequences_id:
+        if seq_id not in n_hits.index:
+            labels[seq_id] = f"{seq_id} (no hits)"
+            continue
+        label = FILTER_METHOD_LABELS.get(method[seq_id], method[seq_id])
+        labels[seq_id] = (
+            f"{seq_id}: {n_species[seq_id]} species, {n_hits[seq_id]} hits, "
+            f"top {top_id[seq_id]:.1f}% ({label})"
+        )
+    return labels
 
 
 def display_ncbi_per_sequence():
     """Display detailed results per sequence."""
-    selected_sequence = sequence_selector(format_fn=_mol_sequence_label)
+    labels = _mol_sequence_labels()
+    selected_sequence = sequence_selector(labels=labels)
 
     if st.session_state.mol_df[
         st.session_state.mol_df["seq_id"] == selected_sequence
@@ -996,11 +1004,12 @@ def display_ncbi_results():
 
         display_ncbi_summary()
 
-        with st.expander(
+        with lazy_expander(
             f"View full MOL list ({len(final_df):,} hits: {species_for_sequences(final_df)})",
-            expanded=False,
-        ):
-            display_full_mol_list()
+            key="mol_full_list",
+        ) as is_open:
+            if is_open:
+                display_full_mol_list()
 
     # Per-sequence details
     with st.container(border=True):

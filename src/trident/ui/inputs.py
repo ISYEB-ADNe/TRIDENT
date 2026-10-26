@@ -259,9 +259,8 @@ def _auto_restore_from_db():
 
     with st.spinner("Restoring sequences from database...", show_time=True):
         try:
-            conn = sqlite3.connect(db_path)
-            seqs_df = pd.read_sql("SELECT * FROM sequences", conn)
-            conn.close()
+            with get_connection(db_path) as conn:
+                seqs_df = pd.read_sql("SELECT * FROM sequences", conn)
 
             if not seqs_df.empty:
                 st.session_state.sequences_df = seqs_df

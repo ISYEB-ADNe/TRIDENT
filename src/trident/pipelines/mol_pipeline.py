@@ -310,11 +310,12 @@ def build_ncbi_search_overview(
         saturation warning flag.
     """
     all_seq_ids = sequences_df["seq_id"].unique()
-    present_ids = set(ncbi_search_df["seq_id"].unique())
+    identities = ncbi_search_df.groupby("seq_id")["identity_percentage"]
+    stats = identities.agg(["size", "min", "max"])
 
     rows = []
     for seq_id in all_seq_ids:
-        if seq_id not in present_ids:
+        if seq_id not in stats.index:
             rows.append(
                 {
                     "seq_id": seq_id,
@@ -327,10 +328,8 @@ def build_ncbi_search_overview(
             )
             continue
 
-        group = ncbi_search_df[ncbi_search_df["seq_id"] == seq_id]
-        n_hits = len(group)
-        min_id = group["identity_percentage"].min()
-        max_id = group["identity_percentage"].max()
+        n_hits = stats.at[seq_id, "size"]
+        min_id, max_id = stats.at[seq_id, "min"], stats.at[seq_id, "max"]
         identity_range = max_id - min_id
 
         rows.append(

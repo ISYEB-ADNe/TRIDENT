@@ -13,18 +13,19 @@ from trident.clients.bold import (
     OUTCOMES_WITHOUT_SEQUENCES,
     SEQUENCES,
     bold_search_url,
-    outcome_counts,
     outcomes_by_species,
     names_in_bold,
     with_sequences,
 )
 import trident.pipelines as pipe
 
-from trident.core.utils import species_for_sequences
+from trident.core.utils import count_phrase, species_for_sequences
 from trident.ui.ui import (
     record_empty_step,
     failed_items,
     show_failed_items_banner,
+    show_filter_success,
+    lazy_expander,
     COL,
     get_recent_param_sets,
     param_preset_selector,
@@ -178,47 +179,48 @@ def bold_search_workflow():
                 st.session_state.bold_search_failed, "species", "species", source="BOLD"
             )
             show_species_without_sequences_banner()
-        sequences = _with_bold_names(st.session_state.bold_search_df)
-        with st.expander(
-            f"Inspect full BOLD search results ({len(sequences):,} sequences)",
-            expanded=False,
-        ):
-            df = sequences
-            st.dataframe(
-                df,
-                width="stretch",
-                hide_index=True,
-                column_order=[
-                    "scientificName",
-                    "bold_scientificName",
-                    "seq_url",
-                    "genus",
-                    "specificEpithet",
-                    "family",
-                    "order",
-                    "class",
-                    "phylum",
-                    "kingdom",
-                    "dna_sequence",
-                ],
-                column_config={
-                    "seq_id": None,
-                    "scientificName": COL["scientificName"],
-                    "bold_scientificName": COL["bold_scientificName"],
-                    "seq_url": COL["bold_seq_url"],
-                    "genus": COL["genus"],
-                    "specificEpithet": COL["specificEpithet"],
-                    "family": COL["family"],
-                    "order": COL["order"],
-                    "class": COL["class"],
-                    "phylum": COL["phylum"],
-                    "kingdom": COL["kingdom"],
-                    "dna_sequence": COL["bold_dna_sequence"],
-                    "taxonRank": None,
-                    "taxonID": None,
-                    "taxonID_db": None,
-                },
-            )
+        n_sequences = len(with_sequences(st.session_state.bold_search_df))
+        with lazy_expander(
+            f"Inspect full BOLD search results ({n_sequences:,} sequences)",
+            key="extra_search_results",
+        ) as is_open:
+            if is_open:
+                df = _with_bold_names(st.session_state.bold_search_df)
+                st.dataframe(
+                    df,
+                    width="stretch",
+                    hide_index=True,
+                    column_order=[
+                        "scientificName",
+                        "bold_scientificName",
+                        "seq_url",
+                        "genus",
+                        "specificEpithet",
+                        "family",
+                        "order",
+                        "class",
+                        "phylum",
+                        "kingdom",
+                        "dna_sequence",
+                    ],
+                    column_config={
+                        "seq_id": None,
+                        "scientificName": COL["scientificName"],
+                        "bold_scientificName": COL["bold_scientificName"],
+                        "seq_url": COL["bold_seq_url"],
+                        "genus": COL["genus"],
+                        "specificEpithet": COL["specificEpithet"],
+                        "family": COL["family"],
+                        "order": COL["order"],
+                        "class": COL["class"],
+                        "phylum": COL["phylum"],
+                        "kingdom": COL["kingdom"],
+                        "dna_sequence": COL["bold_dna_sequence"],
+                        "taxonRank": None,
+                        "taxonID": None,
+                        "taxonID_db": None,
+                    },
+                )
 
 
 QUERY_FAILED = "query failed"
@@ -306,7 +308,7 @@ def show_species_without_sequences_banner() -> None:
     outcomes = outcomes[~outcomes.isin([SEQUENCES, QUERY_FAILED])]
     if outcomes.empty:
         return
-    reasons = outcome_counts(outcomes, order=REASONS)
+    reasons = count_phrase(outcomes, order=REASONS)
     n_queried = len(st.session_state.bold_input_species)
     st.info(
         f"{len(outcomes)}/{n_queried} species without a usable BOLD sequence "
@@ -449,8 +451,10 @@ def _filter_success_message():
     """Show success message when filter results exist."""
     extra_df = st.session_state.extra_df
     if extra_df is not None and st.session_state.bold_filter_df is not None:
-        st.success(
-            f"✅ Filtering complete: {len(st.session_state.bold_filter_df):,}/{len(with_sequences(st.session_state.bold_search_df)):,} sequences retained"
+        show_filter_success(
+            len(st.session_state.bold_filter_df),
+            len(with_sequences(st.session_state.bold_search_df)),
+            "sequences",
         )
 
 
@@ -733,50 +737,51 @@ def display_bold_results():
         display_extra_summary()
         display_same_species(extra_df)
 
-        with st.expander(
+        with lazy_expander(
             f"View full EXTRA list ({len(extra_df):,} BOLD records: {species_for_sequences(extra_df)})",
-            expanded=False,
-        ):
-            st.dataframe(
-                extra_df,
-                width="stretch",
-                hide_index=True,
-                column_order=[
-                    "seq_id",
-                    "scientificName",
-                    "taxonURL",
-                    "seq_url",
-                    "genus",
-                    "specificEpithet",
-                    "family",
-                    "order",
-                    "class",
-                    "phylum",
-                    "kingdom",
-                    "seq_id_extra",
-                    "dna_sequence_extra",
-                ],
-                column_config={
-                    "seq_id": COL["seq_id"],
-                    "scientificName": COL["scientificName"],
-                    "taxonURL": COL["taxonURL"],
-                    "seq_url": COL["bold_seq_url"],
-                    "genus": COL["genus"],
-                    "specificEpithet": COL["specificEpithet"],
-                    "family": COL["family"],
-                    "order": COL["order"],
-                    "class": COL["class"],
-                    "phylum": COL["phylum"],
-                    "kingdom": COL["kingdom"],
-                    "seq_id_extra": st.column_config.TextColumn("BOLD Process ID"),
-                    "dna_sequence_extra": COL["bold_dna_sequence"],
-                    "dna_sequence": None,
-                    "scientificNameAuthorship": None,
-                    "taxonRank": None,
-                    "taxonID": None,
-                    "taxonID_db": None,
-                },
-            )
+            key="extra_full_list",
+        ) as is_open:
+            if is_open:
+                st.dataframe(
+                    extra_df,
+                    width="stretch",
+                    hide_index=True,
+                    column_order=[
+                        "seq_id",
+                        "scientificName",
+                        "taxonURL",
+                        "seq_url",
+                        "genus",
+                        "specificEpithet",
+                        "family",
+                        "order",
+                        "class",
+                        "phylum",
+                        "kingdom",
+                        "seq_id_extra",
+                        "dna_sequence_extra",
+                    ],
+                    column_config={
+                        "seq_id": COL["seq_id"],
+                        "scientificName": COL["scientificName"],
+                        "taxonURL": COL["taxonURL"],
+                        "seq_url": COL["bold_seq_url"],
+                        "genus": COL["genus"],
+                        "specificEpithet": COL["specificEpithet"],
+                        "family": COL["family"],
+                        "order": COL["order"],
+                        "class": COL["class"],
+                        "phylum": COL["phylum"],
+                        "kingdom": COL["kingdom"],
+                        "seq_id_extra": st.column_config.TextColumn("BOLD Process ID"),
+                        "dna_sequence_extra": COL["bold_dna_sequence"],
+                        "dna_sequence": None,
+                        "scientificNameAuthorship": None,
+                        "taxonRank": None,
+                        "taxonID": None,
+                        "taxonID_db": None,
+                    },
+                )
 
     with st.container(border=True):
         st.markdown("### 🔬 EXTRA List per (M)OTU/ASV")

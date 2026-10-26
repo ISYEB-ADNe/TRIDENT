@@ -4,16 +4,11 @@ TRIDENT Streamlit application entry point.
 Run with: uv run trident  (or: streamlit run src/trident/ui/app.py)
 """
 
-from pathlib import Path
-
 import streamlit as st
 from trident.ui import ui
 from trident.core import config
 from trident.clients.ncbi import reload_ncbi_credentials
 from trident.logging import LOG_LEVELS, get_log_level, set_log_level, setup_logging
-
-# Resolve the logo next to this module so it works from any working directory.
-LOGO = str(Path(__file__).with_name("logo.png"))
 
 # Tab configuration: (Display Name, Session State Key)
 TAB_CONFIG = {
@@ -91,10 +86,10 @@ def main():
     # for large runs (the styled_or_plain fallback still guards extreme cases).
     ui.apply_styler_limit()
 
-    st.set_page_config(layout="wide", page_title="TRIDENT", page_icon=LOGO)
+    st.set_page_config(layout="wide", page_title="TRIDENT", page_icon=ui.logo_png())
     ui.init_session_state()
 
-    st.logo(LOGO, size="large")
+    st.logo(ui.logo_png(), size="large")
 
     st.title("TRIDENT")
     st.caption("Taxonomic Resolution and IDentification using Environmental dNa Traces")

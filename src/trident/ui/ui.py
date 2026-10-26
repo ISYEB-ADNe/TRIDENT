@@ -4,25 +4,29 @@ Contains all Streamlit-specific UI functions that are reusable across the app.
 """
 
 import concurrent.futures
+import contextlib
 import functools
+import io
 import logging
 import os
 import queue
 import sqlite3
 import threading
-import time
 import uuid
 from dataclasses import dataclass, field, fields, asdict
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 from loguru import logger
+from PIL import Image
 
 from trident.clients.ncbi import BLAST_SLOW_THREADS
 from trident.core.utils import pluralize
 from trident.core import stop
+from trident.core.database import get_connection
 from trident.pipelines.names import same_species_groups
 from trident.logging import get_log_level
 from trident.ui.defaults import (
@@ -438,9 +442,14 @@ def get_analysis_status(
 
 
 def display_run_button(
-    mode: str, new_string: str, btn_key: str, logs_prefix: str = ""
+    mode: str, new_string: str, btn_key: str, logs_prefix: str = "", starts: int = 0
 ) -> tuple[bool, str]:
     """Renders the standardized status message and button.
+
+    The button's key is *btn_key* with the number of times the step was
+    started (*starts*): a click on the button still on screen from before the
+    step started (a double click) has the old key, and Streamlit ignores it
+    instead of starting the step again.
 
     Returns:
         Tuple of (clicked, cache_mode) where cache_mode is the selected cache
@@ -482,7 +491,11 @@ def display_run_button(
     c1, c2 = st.columns([2, 1])
     with c1:
         clicked = st.button(
-            btn_label, type=btn_type, help=btn_help, width="stretch", key=btn_key
+            btn_label,
+            type=btn_type,
+            help=btn_help,
+            width="stretch",
+            key=f"{btn_key}_{starts}",
         )
     with c2:
         cache_mode = st.selectbox(
@@ -571,8 +584,10 @@ def run_step_workflow(
             "⏹️ Search stopped. The results already received are kept: run the "
             "step again to continue where it stopped."
         )
+    runs = st.session_state.setdefault(STEP_RUNS, {})
+    starts = runs.get(flag_key, {}).get("starts", 0)
     clicked, cache_mode = display_run_button(
-        mode, new_string, btn_key=btn_key, logs_prefix=logs_prefix
+        mode, new_string, btn_key=btn_key, logs_prefix=logs_prefix, starts=starts
     )
     if clicked:
         # Force a fresh run when the settings changed or the cache is erased.
@@ -580,7 +595,6 @@ def run_step_workflow(
         # are re-executed (important for PartialCache steps). Continuing a
         # stopped run with the same settings does not force: it already
         # applied them, and the items it cached are the ones to keep.
-        runs = st.session_state.setdefault(STEP_RUNS, {})
         # The settings that make the results (as for "Settings have changed"):
         # others, such as threads or batch size, do not stop a run continuing.
         result_settings = (
@@ -598,6 +612,7 @@ def run_step_workflow(
             "force": (mode == "CHANGED" or "Erase" in cache_mode) and not resuming,
             "retry": "Retry" in cache_mode,
             "job_kwargs": job_kwargs or {},
+            "starts": starts + 1,
         }
         drop_jobs(flag_key)
         st.session_state[flag_key] = True
@@ -620,6 +635,11 @@ def reset_for_new_analysis(key_name: str):
     # last one would not be applied again to the now empty settings.
     for key in [k for k in st.session_state if str(k).startswith(PRESET_MARKER)]:
         del st.session_state[key]
+
+
+def show_filter_success(kept: int, total: int, noun: str, tail: str = "") -> None:
+    """Say how many of the search's *total* rows (*noun*) a filter kept."""
+    st.success(f"✅ Filtering complete: {kept:,}/{total:,} {noun} retained{tail}")
 
 
 def next_step_button(label: str, tab_id: str):
@@ -730,14 +750,16 @@ SELECTED_SEQUENCE_KEY = "selected_sequence"
 
 def sequence_selector(
     show_sequence: bool = True,
-    format_fn: Callable[[str], str] | None = None,
+    labels: dict[str, str] | None = None,
 ) -> str:
-    """Select a sequence, searchable by ID, kept from one tab to the next."""
+    """Select a sequence, searchable by ID, kept from one tab to the next.
+    *labels* gives the text shown for each sequence (its ID by default).
+    """
     sequences = st.session_state.sequences_id
     persist_value(SELECTED_SEQUENCE_KEY, sequences[0])
-    # Labels are computed here because the selectbox may call format_func
+    # The labels are computed before the selectbox, which may call format_func
     # outside the script run (e.g. in tests), where session state is empty.
-    labels = {seq: (format_fn or str)(seq) for seq in sequences}
+    labels = labels or {}
     selected_sequence = st.selectbox(
         "Select a sequence (type to search):",
         sequences,
@@ -888,6 +910,17 @@ class StreamlitLogSink:
 STYLER_MAX_CELLS = 2_000_000
 
 
+@functools.cache
+def logo_png(width: int = 480) -> bytes:
+    """The app logo as a PNG at most *width* pixels wide, made once: given the
+    1920 px file, Streamlit would decode and shrink it on every run."""
+    with Image.open(Path(__file__).with_name("logo.png")) as image:
+        image.thumbnail((width, width))
+        png = io.BytesIO()
+        image.save(png, format="PNG")
+    return png.getvalue()
+
+
 def apply_styler_limit() -> None:
     """Raise pandas' Styler render cap to STYLER_MAX_CELLS (call once at startup)."""
     pd.set_option("styler.render.max_elements", STYLER_MAX_CELLS)
@@ -919,6 +952,17 @@ def styled_or_plain(df, *row_style_fns, max_cells: int = STYLER_MAX_CELLS):
     return styler
 
 
+@contextlib.contextmanager
+def lazy_expander(label: str, key: str):
+    """A closed expander that yields whether it is open, for content drawn only
+    then (``if is_open:``). Streamlit otherwise runs the content of a closed
+    expander on every rerun, and a large table costs seconds to draw and send.
+    Opening or closing it reruns the app."""
+    section = st.expander(label, key=key, on_change="rerun")
+    with section:
+        yield section.open
+
+
 def run_with_progress(
     fn,
     *args,
@@ -942,7 +986,7 @@ def run_with_progress(
         progress: The dict the job updates and ``on_poll`` reads, if any.
         on_poll: Zero-arg callback invoked each tick (typically updates the
             progress bar from a shared ``progress_info`` dict).
-        poll_interval: Seconds to sleep between ticks.
+        poll_interval: Longest wait between two ticks, in seconds.
 
     Returns:
         Whatever ``fn`` returns.
@@ -968,7 +1012,7 @@ def run_with_progress(
             # button (a rerun) takes effect instead of waiting for the job.
             while not job["future"].done():
                 waiting.info("Finishing the previous search first...")
-                time.sleep(poll_interval)
+                concurrent.futures.wait([job["future"]], timeout=poll_interval)
             waiting.empty()
         job = None
     if job is None:
@@ -999,7 +1043,9 @@ def run_with_progress(
             on_poll()
         if logsink is not None:
             logsink.flush_to_ui()
-        time.sleep(poll_interval)
+        # Returns as soon as the job ends: a step whose results are all saved
+        # does not wait a whole tick.
+        concurrent.futures.wait([future], timeout=poll_interval)
     # A finished job stays until its step is run again or reset (drop_jobs):
     # the abandoned run may still be polling it, and either run may finish first.
     error = future.exception()
@@ -1199,26 +1245,24 @@ def get_recent_param_sets(db_path, table_name, columns, limit=5):
     if not os.path.exists(db_path):
         return []
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        # A table without one of these columns predates that setting: no preset
-        stored = {row[1] for row in cursor.execute(f"PRAGMA table_info({table_name})")}
-        if stored and not set(columns) <= stored:
-            conn.close()
-            logger.debug(f"No presets from {table_name}: written before {columns}")
-            return []
-        cols_sql = ", ".join(columns)
-        where_clauses = " AND ".join(
-            f"{col} IS NOT NULL AND {col} <> 'None' AND {col} <> ''" for col in columns
-        )
-        query = f"""
-            SELECT {cols_sql} FROM {table_name}
-            WHERE {where_clauses}
-            GROUP BY {cols_sql} ORDER BY MAX(run_id) DESC LIMIT ?
-        """
-        cursor.execute(query, (-1 if limit is None else limit,))
-        rows = cursor.fetchall()
-        conn.close()
+        with get_connection(db_path) as conn:
+            # A table without one of these columns predates that setting: no preset
+            info = conn.execute(f"PRAGMA table_info({table_name})")
+            stored = {row[1] for row in info}
+            if stored and not set(columns) <= stored:
+                logger.debug(f"No presets from {table_name}: written before {columns}")
+                return []
+            cols_sql = ", ".join(columns)
+            where_clauses = " AND ".join(
+                f"{col} IS NOT NULL AND {col} <> 'None' AND {col} <> ''"
+                for col in columns
+            )
+            query = f"""
+                SELECT {cols_sql} FROM {table_name}
+                WHERE {where_clauses}
+                GROUP BY {cols_sql} ORDER BY MAX(run_id) DESC LIMIT ?
+            """
+            rows = conn.execute(query, (-1 if limit is None else limit,)).fetchall()
         return [dict(zip(columns, row)) for row in rows]
     except sqlite3.OperationalError as exc:
         # A missing table is normal before its step has run for the first time,

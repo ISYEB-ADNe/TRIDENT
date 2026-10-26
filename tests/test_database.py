@@ -1,5 +1,6 @@
 """Tests for trident.core.database — save_to_db decorator and cache strategies."""
 
+import random
 import sqlite3
 
 import pandas as pd
@@ -295,6 +296,71 @@ def test_empty_result_gets_every_column_seen_for_the_step(db_path):
     df, _ = step(["empty"], db_path=db_path)  # cache hit, no rows
     assert df.empty
     assert set(df.columns) == {"name", "extra"}
+
+
+def test_cached_result_has_the_columns_of_a_live_run(db_path):
+    """A result read back has the step's columns in the same order as when it
+    ran, though a column empty when its table was created is stored last."""
+
+    @save_to_db(
+        "test_col_order", cache=PartialCache(items_kwarg="names", item_key="name")
+    )
+    def step(names):
+        return pd.DataFrame({"name": names, "note": [None] * len(names), "n": 1})
+
+    live, _ = step(["a"], db_path=db_path)
+    cached, _ = step(["a"], db_path=db_path)
+    assert list(live.columns) == list(cached.columns) == ["name", "note", "n"]
+
+
+def test_cached_item_found_when_stored_as_a_number(db_path):
+    """An inputs value stored as a number (by its column's type) still matches
+    the item, as the text the cache writes."""
+    calls = []
+
+    @save_to_db(
+        "test_num",
+        cache=PartialCache(items_kwarg="names", item_key="name", params={"k": "k"}),
+    )
+    def step(names, k=90):
+        calls.append(names)
+        return pd.DataFrame({"name": names})
+
+    step(["a"], db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE copy AS SELECT name, CAST(k AS INTEGER) AS k, run_id FROM test_num_inputs"
+        )
+        conn.execute("DROP TABLE test_num_inputs")
+        conn.execute("ALTER TABLE copy RENAME TO test_num_inputs")
+    step(["a"], db_path=db_path)
+    assert calls == [["a"]]
+
+
+def test_cached_items_read_together_keep_their_types(db_path):
+    """Cached items read together come back typed and ordered as reading each
+    on its own and joining them: pandas types a column from the values it
+    reads, and here items mix every kind SQLite returns."""
+    kinds = [None, 7, 2.5, "text", b"bytes"]
+    rng = random.Random(0)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE step (a, b, c, run_id INTEGER)")
+        for run_id in range(1, 61):
+            for _ in range(rng.randint(0, 3)):
+                values = [rng.choice(kinds[: rng.randint(1, 5)]) for _ in range(3)]
+                conn.execute("INSERT INTO step VALUES (?, ?, ?, ?)", (*values, run_id))
+    order = rng.sample(range(1, 61), 60)
+
+    with sqlite3.connect(db_path) as conn:
+        alone = [
+            pd.read_sql_query("SELECT * FROM step WHERE run_id = ?", conn, params=(i,))
+            for i in order
+        ]
+        together = database._load_cached_items(conn, "step", order)
+    expected = pd.concat([df for df in alone if not df.empty], ignore_index=True)
+    pd.testing.assert_frame_equal(
+        together, expected.drop(columns="run_id"), check_dtype=True
+    )
 
 
 def test_no_items_runs_the_function_for_its_columns(db_path):
@@ -711,6 +777,9 @@ def test_fingerprint_order_independent_and_value_sensitive():
     df2 = df1.iloc[::-1].reset_index(drop=True)  # same rows, reversed
     df3 = pd.DataFrame({"a": [1, 3], "b": ["x", "y"]})  # a value changed
     assert fingerprint(df1) == fingerprint(df2)  # row order does not matter
+    # nor column order: a result read back from the database may have its
+    # columns in another order than the step returned them
+    assert fingerprint(df1) == fingerprint(df1[["b", "a"]])
     assert fingerprint(df1) != fingerprint(df3)  # value change flips it
     assert fingerprint(pd.DataFrame()) == "empty"
     assert fingerprint(None) == "empty"

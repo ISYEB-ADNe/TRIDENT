@@ -33,6 +33,7 @@ from trident.core.http import create_session
 from trident.core.utils import (
     StepLog,
     ensure_columns,
+    name_list,
     notify_progress,
     pluralize,
     normalize_name,
@@ -742,15 +743,35 @@ def _added(rows):
     return ~_in_mol(rows)
 
 
-def _keys(names, name_table):
-    """{name: species key} of a set of names."""
-    names = sorted(names)
-    return dict(zip(names, species_key(pd.Series(names, dtype=object), name_table)))
+class _SpeciesNames:
+    """species_key and species_of of names, each computed once per name: one
+    lookup serves all the flows of build_species_flows (both map each name on
+    its own, so computing them for more names at once gives the same)."""
 
+    def __init__(self, name_table):
+        self.name_table = name_table
+        self._key = {}
+        self._species = {}
 
-def _without(names, keys, name_table):
-    """The names whose species is not in keys."""
-    return {name for name, key in _keys(names, name_table).items() if key not in keys}
+    def _fill(self, known, fn, names):
+        missing = sorted({name for name in names if name not in known})
+        if missing:
+            series = pd.Series(missing, dtype=object)
+            known.update(zip(missing, fn(series, self.name_table)))
+
+    def keys(self, names):
+        """{name: species key} of a set of names."""
+        self._fill(self._key, species_key, names)
+        return {name: self._key[name] for name in names}
+
+    def species(self, names):
+        """The species of a set of names (see species_of)."""
+        self._fill(self._species, species_of, names)
+        return {self._species[name] for name in names}
+
+    def without(self, names, keys):
+        """The names whose species is not in keys."""
+        return {name for name, key in self.keys(names).items() if key not in keys}
 
 
 def build_species_flow(
@@ -764,6 +785,7 @@ def build_species_flow(
     excluded=(),
     *,
     name_table,
+    species_names=None,
 ):
     """One sequence's candidates through the steps, for the steps run so far.
 
@@ -776,14 +798,17 @@ def build_species_flow(
         excluded: "{seq_id}||{scientificName}" keys of the candidates excluded
             by hand.
         name_table: See build_name_table.
+        species_names: The lookup of the names' species, shared by
+            build_species_flows; one for this sequence otherwise.
 
     Returns:
         List of (source, target, names) links between FLOW_NODES, each with
         at least one name.
     """
+    lookup = species_names or _SpeciesNames(name_table)
     hits = _names(ncbi_search_df, seq_id)
     mol = _names(mol_df, seq_id)
-    key_of = _keys(hits | mol, name_table)
+    key_of = lookup.keys(hits | mol)
     hit_keys = {key_of[name] for name in hits}
     mol_keys = {key_of[name] for name in mol}
     # A hit of a species that MOL kept, under any of its names, is not a loss.
@@ -797,12 +822,12 @@ def build_species_flow(
     tax_mol = _names(tax_df, seq_id, _in_mol)
     # A congener BLAST returned and the MOL filter rejected, which TAX keeps
     # on request, stays a filter loss: EXTRA seeks no proxy for it.
-    tax_added = _without(_names(tax_df, seq_id, _added), hit_keys, name_table)
+    tax_added = lookup.without(_names(tax_df, seq_id, _added), hit_keys)
     # MOL species (by their WoRMS name) that TAX does not list.
-    mol_species = set(species_of(pd.Series(sorted(mol), dtype=object), name_table))
-    tax_mol_keys = set(_keys(tax_mol, name_table).values())
+    mol_species = lookup.species(mol)
+    tax_mol_keys = set(lookup.keys(tax_mol).values())
     links += [
-        ("mol", "tax_out", _without(mol_species, tax_mol_keys, name_table)),
+        ("mol", "tax_out", lookup.without(mol_species, tax_mol_keys)),
         ("mol", "tax_mol", tax_mol),
     ]
     if geo_df is None:
@@ -813,7 +838,7 @@ def build_species_flow(
         return _nonempty(links)
 
     mol_geo = _names(geo_df, seq_id, _in_mol)
-    added_geo = _without(_names(geo_df, seq_id, _added), hit_keys, name_table)
+    added_geo = lookup.without(_names(geo_df, seq_id, _added), hit_keys)
     links += [
         ("tax_mol", "geo_out", tax_mol - mol_geo),
         ("tax_mol", "mol_geo", mol_geo),
@@ -849,6 +874,67 @@ def build_species_flow(
         ("hypo", "excluded", hypo & excluded),
     ]
     return _nonempty(links)
+
+
+def build_species_flows(
+    seq_ids,
+    ncbi_search_df,
+    mol_df,
+    tax_df=None,
+    geo_df=None,
+    extra_df=None,
+    hypo_df=None,
+    excluded=(),
+    *,
+    name_table,
+):
+    """build_species_flow of each of *seq_ids*, as {seq_id: links}. The rows
+    of these sequences are split by sequence once, instead of each step table
+    being filtered again for every sequence (seconds on thousands of
+    sequences)."""
+    tables = {
+        key: None if df is None else df[df["seq_id"].isin(seq_ids)]
+        for key, df in {
+            "ncbi_search_df": ncbi_search_df,
+            "mol_df": mol_df,
+            "tax_df": tax_df,
+            "geo_df": geo_df,
+            "extra_df": extra_df,
+            "hypo_df": hypo_df,
+        }.items()
+    }
+    by_seq = {
+        key: (dict(tuple(df.groupby("seq_id", sort=False))), df.iloc[:0])
+        for key, df in tables.items()
+        if df is not None
+    }
+
+    # The names' species keys, looked up once for all the flows, and the
+    # species of the MOL names (the only ones a flow asks the species of).
+    lookup = _SpeciesNames(name_table)
+    names = set().union(
+        *(df["scientificName"].dropna() for df in tables.values() if df is not None)
+    )
+    mol_df = tables["mol_df"]
+    mol = set() if mol_df is None else set(mol_df["scientificName"].dropna())
+    lookup.keys(names | lookup.species(mol))
+
+    def rows_of(key, seq_id):
+        if key not in by_seq:
+            return None
+        groups, empty = by_seq[key]
+        return groups.get(seq_id, empty)
+
+    return {
+        seq_id: build_species_flow(
+            seq_id,
+            **{key: rows_of(key, seq_id) for key in tables},
+            excluded=excluded,
+            name_table=name_table,
+            species_names=lookup,
+        )
+        for seq_id in seq_ids
+    }
 
 
 def _nonempty(links):
@@ -904,13 +990,9 @@ def flow_lost_at(links):
     )
 
 
-def _name_list(names):
+def _hover_names(names):
     """Names for a hover box, cut after FLOW_HOVER_NAMES."""
-    names = sorted(names)
-    shown = "<br>".join(names[:FLOW_HOVER_NAMES])
-    if len(names) > FLOW_HOVER_NAMES:
-        shown += f"<br>… and {len(names) - FLOW_HOVER_NAMES} more"
-    return shown
+    return name_list(sorted(names), FLOW_HOVER_NAMES, sep="<br>", more="<br>… and")
 
 
 def _is_end(node, links):
@@ -993,7 +1075,7 @@ def plot_species_flow(links):
                 color=[f"rgb({FLOW_NODES[n][2]})" for n in used],
                 x=[min(max(x[FLOW_NODES[n][0]], 0.001), 0.999) for n in used],
                 y=[min(max(y[n], 0.001), 0.999) for n in used],
-                customdata=[_name_list(node_names[n]) for n in used],
+                customdata=[_hover_names(node_names[n]) for n in used],
                 hovertemplate="%{customdata}<extra></extra>",
                 pad=20,
             ),
@@ -1002,7 +1084,7 @@ def plot_species_flow(links):
                 target=[index[dst] for _, dst, _ in links],
                 value=[len(names) for _, _, names in links],
                 color=[f"rgba({FLOW_NODES[src][2]}, 0.35)" for src, _, _ in links],
-                customdata=[_name_list(names) for _, _, names in links],
+                customdata=[_hover_names(names) for _, _, names in links],
                 hovertemplate="%{customdata}<extra></extra>",
             ),
         )
