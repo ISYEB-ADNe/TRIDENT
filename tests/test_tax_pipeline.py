@@ -144,16 +144,16 @@ def test_species_a_source_counts_as_one_are_grouped_for_checking():
 
     assert groups.set_index("scientificName").to_dict("index") == {
         "Chroicocephalus saundersi": {
-            "sameSpeciesAs": "Larus saundersi (GBIF)",
+            "same_species_as": "Larus saundersi (GBIF)",
             "group": 1,
         },
         "Larus saundersi": {
-            "sameSpeciesAs": "Chroicocephalus saundersi (GBIF), "
+            "same_species_as": "Chroicocephalus saundersi (GBIF), "
             "Saundersilarus saundersi (BOLD)",
             "group": 1,
         },
         "Saundersilarus saundersi": {
-            "sameSpeciesAs": "Larus saundersi (BOLD)",
+            "same_species_as": "Larus saundersi (BOLD)",
             "group": 1,
         },
     }
@@ -200,6 +200,7 @@ def test_merge_credits_synonym_in_mol():
             "scientificName": ["Gadus ogac"],
             "identity_percentage": [99.0],
             "query_cover": [100.0],
+            "hit_url": ["url1"],
         }
     )
     # WoRMS genus expansion of Gadus -> two accepted species.
@@ -215,7 +216,10 @@ def test_merge_credits_synonym_in_mol():
     morhua = out[out["scientificName"] == "Gadus morhua"].iloc[0]
     # synonym credited against the accepted species
     assert bool(macro["in_mol"]) is True
-    assert macro["mol_top_identity_percentage"] == 99.0
+    assert (macro["mol_identity"], macro["mol_hit_url"]) == (
+        99.0,
+        "url1",
+    )
     # the other expanded species is not a MOL hit
     assert bool(morhua["in_mol"]) is False
 
@@ -273,6 +277,7 @@ def _liparis_mol():
             "scientificName": ["Liparis loeselii", "Liparis oldname", "Liparis sp."],
             "identity_percentage": [99.0, 99.0, 99.0],
             "query_cover": [100.0, 100.0, 100.0],
+            "hit_url": ["url1", "url2", "url3"],
         }
     )
 
@@ -300,7 +305,7 @@ def test_homonym_report_says_which_mol_species_and_sequences_keep_each():
     worms = _liparis_worms()
     report = genus_homonyms(worms, _merge(worms, _liparis_mol(), _LIPARIS_NAMES))
     assert report["genusID"].tolist() == [126160, 425907]
-    assert report["molSpecies"].tolist() == ["Liparis fabricii", "Liparis loeselii"]
+    assert report["mol_species"].tolist() == ["Liparis fabricii", "Liparis loeselii"]
     assert report["sequences"].tolist() == ["2/3", "2/3"]
 
 
@@ -347,7 +352,7 @@ def test_summary_counts_and_lists_the_synonyms_merged():
     them; the synonyms WoRMS merges are listed."""
     summary = summarize_name_resolution(*_resolved_mol())
     assert (summary.n_names, summary.n_species) == (6, 4)
-    assert summary.renamed[["scientificName", "acceptedName"]].values.tolist() == [
+    assert summary.renamed[["scientificName", "accepted_name"]].values.tolist() == [
         ["Gadus ogac", "Gadus macrocephalus"],
         ["Myoxocephalus verrucosus", "Myoxocephalus scorpius"],
     ]
@@ -358,7 +363,7 @@ def test_not_found_names_exclude_failed_lookups_and_tell_their_genus():
     name not found whose genus is in TAX lost no candidates."""
     tax = pd.DataFrame({"genus": ["Liparis"]})
     summary = summarize_name_resolution(*_resolved_mol(), tax_df=tax)
-    not_found = summary.not_found[["scientificName", "genusInTax"]]
+    not_found = summary.not_found[["scientificName", "genus_in_tax"]]
     assert not_found.values.tolist() == [["Liparis sp.", True]]
 
 
@@ -401,6 +406,7 @@ def test_species_rejected_by_mol_are_dropped_for_that_sequence_only():
             ],
             "identity_percentage": [100.0, 95.0, 94.0, 100.0],
             "query_cover": [100.0, 100.0, 80.0, 100.0],
+            "hit_url": ["url1", "url2", "url3", "url4"],
         }
     )
     # Gadus ogac reached the MOL list for another sequence, so its species is known.

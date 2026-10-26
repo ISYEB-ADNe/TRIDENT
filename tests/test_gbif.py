@@ -328,7 +328,46 @@ def test_merge_drops_species_without_gbif_data(monkeypatch):
     merged = inspect.unwrap(geo_pipeline.run_gbif_merge)(gbif_search_df, tax_df)
 
     assert merged.empty
-    assert {"seq_id", "scientificName", "in_mol", "gbif_extent"} <= set(merged.columns)
+    assert {"seq_id", "scientificName", "in_mol", "geo_extent"} <= set(merged.columns)
+
+
+def test_merge_keeps_whole_counts_when_a_species_lacks_gbif_data():
+    """A TAX species GBIF does not hold leaves the merge, and the counts of
+    the others stay whole numbers (a decimal column would be saved as such)."""
+    gbif_search_df = pd.DataFrame(
+        {
+            "scientificName": ["Gadus morhua"],
+            "taxonURL": ["https://www.gbif.org/taxon/X"],
+            "occurrences": [12],
+            "gbif_extent": ["500"],
+        }
+    )
+    tax_df = pd.DataFrame(
+        {"seq_id": ["s1", "s1"], "scientificName": ["Gadus morhua", "Gadus ogac"]}
+    )
+
+    merged = inspect.unwrap(geo_pipeline.run_gbif_merge)(gbif_search_df, tax_df)
+
+    assert merged["scientificName"].tolist() == ["Gadus morhua"]
+    assert pd.api.types.is_integer_dtype(merged["geo_occurrences"])
+
+
+def test_filter_finds_the_extent_however_it_is_written():
+    """The filter's extent matches the saved one whether given as 250, 250.0
+    or "250" (a notebook may pass a float)."""
+    merged = pd.DataFrame(
+        {
+            "seq_id": ["s1", "s1"],
+            "scientificName": ["Gadus morhua", "Gadus morhua"],
+            "geo_occurrences": [12, 40],
+            "geo_extent": ["250", "global"],
+        }
+    ).reindex(columns=[*geo_pipeline.GEO_LIST_COLUMNS, "geo_extent"])
+    kept = [
+        inspect.unwrap(geo_pipeline.run_gbif_filter)(merged, extent, 3)
+        for extent in (250, 250.0, "250")
+    ]
+    assert [df["geo_occurrences"].tolist() for df in kept] == [[12]] * 3
 
 
 def test_geo_list_takes_gbif_counts_not_gbif_names():
@@ -358,8 +397,12 @@ def test_geo_list_takes_gbif_counts_not_gbif_names():
     merged = inspect.unwrap(geo_pipeline.run_gbif_merge)(gbif_search_df, tax_df)
 
     row = merged.iloc[0]
-    assert (row["genus"], row["taxonID"], row["occurrences"]) == ("Larus", "343919", 12)
-    assert row["gbif_taxonURL"] == "https://www.gbif.org/taxon/5YGFL"
+    assert (row["genus"], row["taxonID"], row["geo_occurrences"]) == (
+        "Larus",
+        "343919",
+        12,
+    )
+    assert row["geo_url"] == "https://www.gbif.org/taxon/5YGFL"
     assert not {"gbif_scientificName", "gbif_matched_by"} & set(merged.columns)
 
 

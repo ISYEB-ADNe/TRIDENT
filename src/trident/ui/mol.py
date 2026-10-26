@@ -22,7 +22,7 @@ from trident.ui.ui import (
     show_filter_success,
     lazy_expander,
     styled_or_plain,
-    COL,
+    column_config,
     BLAST_HELP,
     get_recent_param_sets,
     param_preset_selector,
@@ -57,6 +57,23 @@ from trident.ui.defaults import (
 )
 
 FILTER_METHOD_LABELS = {"barcoding_gap": "Barcoding Gap", "similarity": "Similarity"}
+
+# The columns of a BLAST hit the MOL tables show, after the sequence.
+HIT_COLUMNS = [
+    "scientificName",
+    "hit_url",
+    "identity_percentage",
+    "query_cover",
+    "hit_def",
+    "genus",
+    "specificEpithet",
+    "ncbi_taxid",
+    "align_length",
+    "identities",
+    "gaps",
+    "query_start",
+    "query_end",
+]
 
 # --------------------------------------------------------------------
 # SEARCH FUNCTIONS
@@ -269,36 +286,13 @@ def ncbi_search_workflow():
             key="mol_search_results",
         ) as is_open:
             if is_open:
-                cols = st.session_state.ncbi_search_df.columns.tolist()
-                priority = [
-                    "seq_id",
-                    "scientificName",
-                    "hit_url",
-                    "identity_percentage",
-                    "query_cover",
-                    "hit_def",
-                ]
-                ordered = priority + [c for c in cols if c not in priority]
+                shown = ["seq_id", *HIT_COLUMNS]
                 st.dataframe(
-                    st.session_state.ncbi_search_df[ordered],
+                    st.session_state.ncbi_search_df,
                     width="stretch",
                     hide_index=True,
-                    column_config={
-                        "seq_id": COL["seq_id"],
-                        "scientificName": COL["scientificName"],
-                        "hit_url": COL["hit_url"],
-                        "identity_percentage": COL["identity_percentage"],
-                        "query_cover": COL["query_cover"],
-                        "hit_def": COL["hit_def"],
-                        "dna_sequence": None,
-                        "genus": COL["genus"],
-                        "specificEpithet": COL["specificEpithet"],
-                        "align_length": COL["align_length"],
-                        "identities": COL["identities"],
-                        "gaps": COL["gaps"],
-                        "query_start": COL["query_start"],
-                        "query_end": COL["query_end"],
-                    },
+                    column_order=shown,
+                    column_config=column_config(shown),
                 )
 
 
@@ -361,7 +355,7 @@ def ncbi_filter_controls():
         default_qc = int(stored.get("ncbi_query_cover") or NCBI_QUERY_COVER_DEFAULT)
         persist_value("ncbi_query_cover", default_qc)
         qc = st.slider(
-            "Query Coverage (%)",
+            "Query Cover (%)",
             1,
             100,
             help="Minimum percentage of the query sequence that must be covered by the hit",
@@ -414,7 +408,7 @@ def ncbi_filter_controls():
                 "Low Identity Warning (%)",
                 50,
                 100,
-                help="Sequences with a top identity below this threshold are highlighted as warnings",
+                help="Hits below this identity are highlighted (red), and in the summary, the sequences with a species whose best hit is below it.",
                 key="ncbi_low_identity_threshold",
             )
             save_widget("ncbi_low_identity_threshold")
@@ -573,33 +567,19 @@ def display_ncbi_search_overview():
                     f"to capture more diverse matches."
                 )
 
+        shown = [
+            "seq_id",
+            "n_blast_hits",
+            "max_identity",
+            "min_identity",
+            "identity_range",
+        ]
         st.dataframe(
-            overview_df[
-                ["seq_id", "n_hits", "max_identity", "min_identity", "identity_range"]
-            ],
+            overview_df,
             width="stretch",
             hide_index=True,
-            column_config={
-                "seq_id": COL["seq_id"],
-                "n_hits": st.column_config.NumberColumn(
-                    "Hits", help="Number of BLAST hits returned"
-                ),
-                "max_identity": st.column_config.NumberColumn(
-                    "Max Identity (%)",
-                    format="%.2f",
-                    help="Highest identity percentage among all hits",
-                ),
-                "min_identity": st.column_config.NumberColumn(
-                    "Min Identity (%)",
-                    format="%.2f",
-                    help="Lowest identity percentage among all hits",
-                ),
-                "identity_range": st.column_config.NumberColumn(
-                    "Identity Range (%)",
-                    format="%.2f",
-                    help="Spread between highest and lowest identity (max - min)",
-                ),
-            },
+            column_order=shown,
+            column_config=column_config(shown),
         )
 
 
@@ -613,20 +593,20 @@ def display_ncbi_summary():
     )
 
     if summary_df["low_identity_warning"].any():
-        st.caption(f":red[■] Low Top Identity (<{threshold}%)")
+        st.caption(f":red[■] Sequences with a species below {threshold}%")
     styled_df = styled_or_plain(summary_df, highlight_low_identity)
+    shown = ["seq_id", "filter_method", "n_hits", "n_species", "top_identity"]
     st.dataframe(
         styled_df,
         width="stretch",
         hide_index=True,
-        column_config={
-            "low_identity_warning": None,
-            "seq_id": COL["seq_id"],
-            "top_identity": COL["top_identity"],
-            "hits_count": COL["hits_count"],
-            "species_count": COL["species_count"],
-            "filter_method": COL["filter_method"],
-        },
+        column_order=shown,
+        column_config=column_config(
+            shown,
+            n_hits=st.column_config.NumberColumn(
+                "Hits Kept", format="%d", help="Hits the MOL filter kept."
+            ),
+        ),
     )
 
 
@@ -648,7 +628,7 @@ def display_ncbi_sequence_summary(sequence_data):
     display_cols = [
         "scientificName",
         "hit_url",
-        "hit_count",
+        "n_hits",
         "identity_percentage",
         "query_cover",
         "low_identity_warning",
@@ -664,18 +644,19 @@ def display_ncbi_sequence_summary(sequence_data):
     )
     if df_display["low_identity_warning"].any():
         st.caption(f":red[■] Low Identity (<{threshold}%)")
+    shown = [
+        "scientificName",
+        "hit_url",
+        "n_hits",
+        "identity_percentage",
+        "query_cover",
+    ]
     st.dataframe(
         styled_df,
         width="stretch",
         hide_index=True,
-        column_config={
-            "low_identity_warning": None,
-            "scientificName": COL["scientificName"],
-            "identity_percentage": COL["identity_percentage"],
-            "hit_count": COL["hit_count"],
-            "query_cover": COL["query_cover"],
-            "hit_url": COL["hit_url"],
-        },
+        column_order=shown,
+        column_config=column_config(shown),
     )
 
 
@@ -814,7 +795,12 @@ def display_ncbi_sequence_plots(
 
 def display_ncbi_sequence_table(sequence_data):
     """Display detailed results table"""
-    display_cols = [
+    threshold = st.session_state.mol_params.get(
+        "ncbi_low_identity_threshold", NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
+    )
+    if sequence_data["low_identity_warning"].any():
+        st.caption(f":red[■] Low Identity (<{threshold}%)")
+    shown = [
         "scientificName",
         "identity_percentage",
         "query_cover",
@@ -822,35 +808,13 @@ def display_ncbi_sequence_table(sequence_data):
         "hit_def",
         "align_length",
         "identities",
-        "low_identity_warning",
     ]
-    cols_in_df = [c for c in display_cols if c in sequence_data.columns]
-    df_display = sequence_data[cols_in_df]
-
-    styled_df = styled_or_plain(df_display, highlight_low_identity)
-
-    threshold = st.session_state.mol_params.get(
-        "ncbi_low_identity_threshold", NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
-    )
-    if (
-        "low_identity_warning" in df_display.columns
-        and df_display["low_identity_warning"].any()
-    ):
-        st.caption(f":red[■] Low Identity (<{threshold}%)")
     st.dataframe(
-        styled_df,
+        styled_or_plain(sequence_data, highlight_low_identity),
         width="stretch",
         hide_index=True,
-        column_config={
-            "low_identity_warning": None,
-            "scientificName": COL["scientificName"],
-            "identity_percentage": COL["identity_percentage"],
-            "query_cover": COL["query_cover"],
-            "hit_url": COL["hit_url"],
-            "hit_def": COL["hit_def"],
-            "align_length": COL["align_length"],
-            "identities": COL["identities"],
-        },
+        column_order=shown,
+        column_config=column_config(shown),
     )
 
 
@@ -941,47 +905,21 @@ def display_ncbi_per_sequence():
 
 def display_full_mol_list():
     """Display the complete MOL list in a flat table."""
-    mol_df = st.session_state.mol_df
-    cols = mol_df.columns.tolist()
-    priority = [
-        "seq_id",
-        "filter_method",
-        "scientificName",
-        "hit_url",
-        "identity_percentage",
-        "query_cover",
-        "hit_def",
-    ]
-    ordered = priority + [c for c in cols if c not in priority]
+    mol_df = st.session_state.mol_df.assign(
+        filter_method=lambda df: df["filter_method"].replace(FILTER_METHOD_LABELS)
+    )
     threshold = st.session_state.mol_params.get(
         "ncbi_low_identity_threshold", NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
     )
     if mol_df["low_identity_warning"].any():
         st.caption(f":red[■] Low Identity (<{threshold}%)")
-    styled_df = styled_or_plain(mol_df[ordered], highlight_low_identity)
+    shown = ["seq_id", "filter_method", *HIT_COLUMNS]
     st.dataframe(
-        styled_df,
+        styled_or_plain(mol_df, highlight_low_identity),
         width="stretch",
         hide_index=True,
-        column_config={
-            "seq_id": COL["seq_id"],
-            "filter_method": COL["filter_method"],
-            "scientificName": COL["scientificName"],
-            "hit_url": COL["hit_url"],
-            "identity_percentage": COL["identity_percentage"],
-            "query_cover": COL["query_cover"],
-            "hit_def": COL["hit_def"],
-            "dna_sequence": None,
-            "genus": COL["genus"],
-            "specificEpithet": COL["specificEpithet"],
-            "align_length": COL["align_length"],
-            "identities": COL["identities"],
-            "gaps": COL["gaps"],
-            "query_start": COL["query_start"],
-            "query_end": COL["query_end"],
-            "identity_drop": None,
-            "low_identity_warning": None,
-        },
+        column_order=shown,
+        column_config=column_config(shown),
     )
 
 

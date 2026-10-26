@@ -48,7 +48,6 @@ from trident.core.utils import (
 )
 from trident.clients.ncbi import (
     BLAST_GIVE_UP,
-    BLAST_HIT_COLUMNS,
     BlastCircuit,
     BlastCpuLimit,
     BlastGaveUp,
@@ -58,6 +57,7 @@ from trident.clients.ncbi import (
     process_blast_results,
     submit_blast_batch,
 )
+from trident.pipelines.extra_pipeline import EXTRA_COLUMNS
 from trident.pipelines.names import ncbi_names, other_names
 
 
@@ -95,7 +95,7 @@ def hypo_queries(tax_df, mol_df, name_table) -> pd.DataFrame:
     columns = ["seq_id", "entrez_query", "mol_species"]
     if tax_df.empty:
         return pd.DataFrame(columns=columns)
-    mol = tax_df.loc[tax_df["in_mol"].astype(bool), ["seq_id", "scientificName"]]
+    mol = tax_df.loc[tax_df["in_mol"], ["seq_id", "scientificName"]]
     # The species' own name, also spelled with another case or spacing, is
     # already in the query.
     synonyms = mol.assign(
@@ -119,7 +119,7 @@ def count_hypo_searches(extra_df, queries_df) -> tuple[int, int]:
     search's cache item is the proxy record and its query).
     """
     searched = extra_df.merge(queries_df, on="seq_id")
-    n_searches = len(searched[["seq_id_extra", "entrez_query"]].drop_duplicates())
+    n_searches = len(searched[["proxy_id", "entrez_query"]].drop_duplicates())
     return n_searches, searched["seq_id"].nunique()
 
 
@@ -137,7 +137,7 @@ def prepare_hypo_input(extra_df, queries_df):
     species.
 
     Args:
-        extra_df: EXTRA DataFrame with proxy sequences (seq_id_extra, dna_sequence_extra).
+        extra_df: EXTRA DataFrame with proxy sequences (proxy_id, proxy_sequence).
         queries_df: Entrez query of each seq_id (see hypo_queries).
 
     Returns:
@@ -150,10 +150,8 @@ def prepare_hypo_input(extra_df, queries_df):
         if seq_id not in queries:
             continue
         seq_records = [
-            SeqRecord(Seq(seq.replace("-", "N")), id=seq_id_extra)
-            for seq, seq_id_extra in zip(
-                group["dna_sequence_extra"], group["seq_id_extra"]
-            )
+            SeqRecord(Seq(seq.replace("-", "N")), id=process_id)
+            for seq, process_id in zip(group["proxy_sequence"], group["proxy_id"])
         ]
         input_data[seq_id] = {
             "sequences": seq_records,
@@ -213,6 +211,19 @@ def _hypo_search_rebuild(input_selected, original_inputs):
     new_inputs = original_inputs.copy()
     new_inputs["sequences_dict"] = new_sequences_dict
     return new_inputs
+
+
+# The columns the HYPO search keeps of each proxy hit: those the merge reads
+# (see PROXY_HIT_COLUMNS), and the Entrez query the proxy was searched under.
+HYPO_SEARCH_COLUMNS = [
+    "seq_id",
+    "scientificName",
+    "identity_percentage",
+    "query_cover",
+    "hit_def",
+    "hit_url",
+    "entrez_query",
+]
 
 
 @save_to_db(
@@ -295,7 +306,7 @@ def run_hypo_search(
 
     circuit = BlastCircuit()  # shared by every job of this run
     blast_kwargs = {"evalue": 10 ** (-ev_exponent), "hitlist_size": max_hits}
-    no_hits = pd.DataFrame(columns=[*BLAST_HIT_COLUMNS, "entrez_query"])
+    no_hits = pd.DataFrame(columns=HYPO_SEARCH_COLUMNS)
 
     def keep(hits: pd.DataFrame) -> pd.DataFrame:
         """The hits above the identity cutoff, then the top N of each cache item
@@ -310,7 +321,7 @@ def run_hypo_search(
                 sort=["identity_percentage", "query_cover"],
                 n=ntop,
             )
-        return hits
+        return hits[HYPO_SEARCH_COLUMNS]
 
     def job(k, batch, query):
         # The label names the sequences whose BOLD records the batch searches,
@@ -369,6 +380,23 @@ def run_hypo_search(
 
 ### MERGE ###
 
+# The proxy search's columns the HYPO merge takes, and their HYPO names: the
+# proxy record, the MOL species its hit is on, and the hit.
+PROXY_HIT_COLUMNS = {
+    "seq_id": "proxy_id",
+    "scientificName": "proxy_hit_species",
+    "identity_percentage": "proxy_identity",
+    "query_cover": "proxy_query_cover",
+    "hit_def": "proxy_hit_def",
+    "hit_url": "proxy_hit_url",
+}
+# The columns of the HYPO merge and filter: the EXTRA list's, with the hit of
+# the candidate's proxy on a MOL species of the sequence.
+HYPO_HIT_COLUMNS = [
+    *EXTRA_COLUMNS,
+    *(name for col, name in PROXY_HIT_COLUMNS.items() if col != "seq_id"),
+]
+
 
 @save_to_db(
     table_name="hypo_merge",
@@ -387,7 +415,7 @@ def run_hypo_merge(
 ) -> pd.DataFrame:
     """Map proxy sequence IDs back to target sequences via EXTRA.
 
-    Joins BLAST search results (keyed by seq_id_extra and the Entrez query)
+    Joins BLAST search results (keyed by proxy_id and the Entrez query)
     with the EXTRA DataFrame to recover the original seq_id, scientificName,
     and target dna_sequence. Each seq_id gets only the hits found under its
     own query: a proxy shared by two seq_ids is searched once per query.
@@ -408,35 +436,23 @@ def run_hypo_merge(
     if extra_params is None:
         extra_params = {}
 
-    search_cols = [
-        "seq_id",
-        "scientificName",
-        "query_cover",
-        "identity_percentage",
-        "hit_def",
-        "hit_url",
-        "entrez_query",
-    ]
     queries = _query_map(queries_df)
-    merge_df = extra_df.assign(
-        entrez_query=pd.Series(
-            [queries.get(s, "") for s in extra_df["seq_id"]],
-            index=extra_df.index,
-            dtype=object,
+    merge_df = (
+        extra_df.assign(
+            entrez_query=pd.Series(
+                [queries.get(s, "") for s in extra_df["seq_id"]],
+                index=extra_df.index,
+                dtype=object,
+            )
         )
-    ).merge(
-        hypo_search_df[search_cols],
-        left_on=["seq_id_extra", "entrez_query"],
-        right_on=["seq_id", "entrez_query"],
-        suffixes=("", "_blast"),
+        .merge(
+            hypo_search_df[[*PROXY_HIT_COLUMNS, "entrez_query"]].rename(
+                columns=PROXY_HIT_COLUMNS
+            ),
+            on=["proxy_id", "entrez_query"],
+        )
+        .drop(columns="entrez_query")
     )
-    merge_df = merge_df.drop(columns="entrez_query")
-
-    # seq_id_blast is the duplicate from search (= seq_id_extra), drop it
-    # scientificName_blast is the BLAST hit species (not the target species)
-    merge_df = merge_df.rename(columns={"scientificName_blast": "scientificName_hit"})
-    cols_to_drop = [col for col in merge_df.columns if col.endswith("_blast")]
-    merge_df = merge_df.drop(columns=cols_to_drop)
 
     # NCBI's [orgn] also matches other nodes (e.g. "Gerres sp." records for
     # "Gerres oyena", records named after the hypothetical species itself):
@@ -448,12 +464,12 @@ def run_hypo_merge(
     in_list = pd.Series(
         [
             normalize_name(hit) in mol_species.get(seq_id, set())
-            for seq_id, hit in zip(merge_df["seq_id"], merge_df["scientificName_hit"])
+            for seq_id, hit in zip(merge_df["seq_id"], merge_df["proxy_hit_species"])
         ],
         index=merge_df.index,
         dtype=bool,
     )
-    return merge_df[in_list]
+    return merge_df.loc[in_list, HYPO_HIT_COLUMNS]
 
 
 ### FILTER ###
@@ -492,8 +508,8 @@ def run_hypo_filter(
         hypo_merge_params = {}
 
     return hypo_merge_df[
-        (hypo_merge_df["query_cover"] >= query_cover)
-        & (hypo_merge_df["identity_percentage"] >= identity)
+        (hypo_merge_df["proxy_query_cover"] >= query_cover)
+        & (hypo_merge_df["proxy_identity"] >= identity)
     ].copy()
 
 
@@ -511,20 +527,20 @@ def build_hypo_filter_summary(hypo_filter_df: pd.DataFrame) -> pd.DataFrame:
         hypo_filter_df: Filtered results from run_hypo_filter.
 
     Returns:
-        Summary DataFrame with columns: seq_id, scientificName, hit_count,
-        top_identity_percentage, top_query_cover.
+        Summary DataFrame with columns: seq_id, scientificName, n_hits,
+        proxy_identity, proxy_query_cover.
     """
     out_cols = [
         "seq_id",
         "scientificName",
-        "hit_count",
-        "identity_percentage",
-        "query_cover",
+        "n_hits",
+        "proxy_identity",
+        "proxy_query_cover",
     ]
 
     best_hits = (
         hypo_filter_df.sort_values(
-            ["identity_percentage", "query_cover"], ascending=[False, False]
+            ["proxy_identity", "proxy_query_cover"], ascending=[False, False]
         )
         .groupby(["seq_id", "scientificName"], observed=False, as_index=False)
         .first()
@@ -533,7 +549,7 @@ def build_hypo_filter_summary(hypo_filter_df: pd.DataFrame) -> pd.DataFrame:
     hit_counts = (
         hypo_filter_df.groupby(["seq_id", "scientificName"], observed=False)
         .size()
-        .reset_index(name="hit_count")
+        .reset_index(name="n_hits")
     )
 
     summary = best_hits.merge(hit_counts, on=["seq_id", "scientificName"])
@@ -637,6 +653,7 @@ def _hypo_check_rebuild(input_selected, original_inputs):
         match_map_dict={"seq_id": "seq_id", "scientificName": "scientificName"},
     ),
     log_as=("HYPO check", "species check"),
+    bool_columns=("hit_found",),
 )
 @preserve_sequence_order("seq_id", "hypo_filter_df")
 def run_hypo_check(
@@ -775,6 +792,17 @@ def run_hypo_check(
 
 ### FINALIZE HYPO RESULTS (final) ###
 
+# The check's columns the HYPO list takes, and their names there: the
+# sequence's best hit on the species when the check found the marker.
+CHECK_HIT_COLUMNS = {
+    "identity_percentage": "hypo_check_identity",
+    "query_cover": "hypo_check_query_cover",
+    "hit_url": "hypo_check_hit_url",
+}
+# The columns of the HYPO list: the best proxy hit of each candidate, with
+# the check's best hit when it found the marker.
+HYPO_COLUMNS = [*HYPO_HIT_COLUMNS, *CHECK_HIT_COLUMNS.values()]
+
 
 def best_check_hits(hypo_check_df, query_cover, columns=None):
     """Best check hit of each (seq_id, scientificName).
@@ -832,7 +860,7 @@ def finalize_hypo_results(
 
     # Best check hit per (seq_id, scientificName)
     check_hits = best_check_hits(
-        hypo_check_df[hypo_check_df["hit_found"].astype(bool)],
+        hypo_check_df[hypo_check_df["hit_found"]],
         query_cover,
         columns=[
             "seq_id",
@@ -841,26 +869,20 @@ def finalize_hypo_results(
             "query_cover",
             "hit_url",
         ],
-    ).rename(
-        columns={
-            "identity_percentage": "ncbi_top_identity_percentage",
-            "query_cover": "ncbi_top_query_cover",
-            "hit_url": "ncbi_top_hit_url",
-        }
-    )
+    ).rename(columns=CHECK_HIT_COLUMNS)
 
     # Keep best proxy hit per (seq_id, scientificName)
     hypo_df = top_hit_per_group(
         hypo_filter_df,
         keys=["seq_id", "scientificName"],
-        sort=["identity_percentage", "query_cover"],
+        sort=["proxy_identity", "proxy_query_cover"],
     ).reset_index(drop=True)
 
     # Merge check stats
     hypo_df = hypo_df.merge(check_hits, on=["seq_id", "scientificName"], how="left")
 
     logger.success(f"HYPO list: {species_for_sequences(hypo_df)}")
-    return hypo_df
+    return hypo_df[HYPO_COLUMNS]
 
 
 ### CHECK SUMMARY ###
@@ -878,13 +900,13 @@ def build_hypo_check_summary(
             (see best_check_hits).
 
     Returns:
-        Summary DataFrame with columns: seq_id, scientificName, hit_count,
+        Summary DataFrame with columns: seq_id, scientificName, n_hits,
         identity_percentage, query_cover, hit_url.
     """
     out_cols = [
         "seq_id",
         "scientificName",
-        "hit_count",
+        "n_hits",
         "identity_percentage",
         "query_cover",
         "hit_url",
@@ -893,14 +915,14 @@ def build_hypo_check_summary(
     best_hits = best_check_hits(hypo_check_df, query_cover)
 
     hit_counts = (
-        hypo_check_df[hypo_check_df["hit_found"].astype(bool)]
+        hypo_check_df[hypo_check_df["hit_found"]]
         .groupby(["seq_id", "scientificName"], observed=False)
         .size()
-        .reset_index(name="hit_count")
+        .reset_index(name="n_hits")
     )
 
     summary = best_hits.merge(hit_counts, on=["seq_id", "scientificName"], how="left")
-    summary["hit_count"] = summary["hit_count"].fillna(0).astype(int)
+    summary["n_hits"] = summary["n_hits"].fillna(0).astype(int)
 
     return summary[out_cols]
 

@@ -37,6 +37,27 @@ def test_no_children_is_not_a_failure(monkeypatch):
     assert list(df.columns) == worms.WORMS_TAXON_COLUMNS
 
 
+def test_authorship_keeps_its_parentheses(monkeypatch):
+    """WoRMS's authority reaches the TAX list as written: the parentheses of a
+    species moved to another genus are part of it (Darwin Core)."""
+    record = {
+        "AphiaID": 137084,
+        "valid_AphiaID": 137084,
+        "scientificname": "Odobenus rosmarus",
+        "valid_name": "Odobenus rosmarus",
+        "valid_authority": "(Linnaeus,  1758)",
+        "status": "accepted",
+        "rank": "Species",
+        "kingdom": "Animalia",
+        "genus": "Odobenus",
+        "url": "https://www.marinespecies.org/aphia.php?p=taxdetails&id=137084",
+    }
+    monkeypatch.setattr(worms, "get_genus_aphia_ids", lambda *a, **k: [137005])
+    monkeypatch.setattr(worms, "get_children_by_aphia_id", lambda *a, **k: [record])
+    df, _ = get_species_from_genus_list(["Odobenus"], delay=0)
+    assert df["scientificNameAuthorship"].tolist() == ["(Linnaeus, 1758)"]
+
+
 def test_marine_only_threaded_to_children(monkeypatch):
     """The marine_only flag (default True) reaches the children query."""
     captured = {}

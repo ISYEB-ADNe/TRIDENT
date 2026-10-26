@@ -46,159 +46,269 @@ logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").set
 # SHARED COLUMN CONFIGS
 # -------------------------------------------------------------------
 
+_Text = st.column_config.TextColumn
+_Number = st.column_config.NumberColumn
+_Link = st.column_config.LinkColumn
+_Check = st.column_config.CheckboxColumn
+
+
+def _percent(label: str, help: str) -> st.column_config.NumberColumn:
+    return _Number(label, format="%.2f", help=help)
+
+
+def _count(label: str, help: str) -> st.column_config.NumberColumn:
+    return _Number(label, format="%d", help=help)
+
+
+def _link(label: str) -> st.column_config.LinkColumn:
+    return _Link(label, display_text="🔗 View")
+
+
+# The display settings of every column the app shows, by column name: a tab
+# lists the columns it shows and takes their settings with column_config().
 COL = {
-    "seq_id": st.column_config.TextColumn(
-        "Sequence ID", help="Unique identifier from the FASTA header."
+    # The (M)OTU/ASV
+    "seq_id": _Text(
+        "Sequence ID", help="Identifier of the (M)OTU/ASV, from the FASTA header."
     ),
-    "dna_sequence": st.column_config.TextColumn(
-        "DNA Sequence", help="Raw genetic sequence (A, T, C, G)."
-    ),
-    "seq_length": st.column_config.NumberColumn(
-        "Nucleotides", format="%d bp", help="Number of base pairs in the sequence."
-    ),
-    "scientificName": st.column_config.TextColumn(
+    "dna_sequence": _Text("DNA Sequence", help="The (M)OTU/ASV sequence."),
+    "seq_length": _count("Length (bp)", "Length of the sequence in base pairs."),
+    # Taxonomy (Darwin Core)
+    "scientificName": _Text(
         "Scientific Name",
+        help="Species name: as NCBI gives it in the MOL step, the WoRMS "
+        "accepted name from TAX on.",
     ),
-    "ncbi_synonyms": st.column_config.TextColumn(
+    "kingdom": _Text("Kingdom"),
+    "phylum": _Text("Phylum"),
+    "class": _Text("Class"),
+    "order": _Text("Order"),
+    "family": _Text("Family"),
+    "genus": _Text("Genus"),
+    "specificEpithet": _Text("Epithet", help="Species epithet."),
+    "scientificNameAuthorship": _Text(
+        "Authorship",
+        help="Author and year of the name, as WoRMS gives them; in parentheses "
+        "when the species is no longer in the genus it was described in.",
+    ),
+    "taxonRank": _Text("Rank", help="Taxonomic rank of the species."),
+    "taxonID": _Text(
+        "Taxon ID", help="Identifier of the taxon in the taxonomy database."
+    ),
+    "taxonID_db": _Text("Taxon DB", help="Taxonomy database of the taxon ID."),
+    "taxonURL": _link("WoRMS Link"),
+    "genusID": _count(
+        "WoRMS Genus ID", "WoRMS ID of the genus the species was listed under."
+    ),
+    "ncbi_synonyms": _Text(
         "NCBI synonym",
-        help="NCBI/BLAST name(s) for this species that differ from the WoRMS-accepted name (synonyms/misspellings). Blank when NCBI already used the accepted name.",
+        help="NCBI/BLAST name(s) for this species that differ from the "
+        "WoRMS-accepted name (synonyms/misspellings). Blank when NCBI already "
+        "used the accepted name.",
     ),
-    "identity_percentage": st.column_config.NumberColumn(
-        "Identity (%)",
-        format="%.2f",
-        help="Percentage of matching bases in the alignment.",
-    ),
-    "query_cover": st.column_config.NumberColumn(
-        "Query Coverage (%)",
-        format="%.2f",
-        help="Percentage of the query sequence covered by the hit.",
-    ),
-    "hit_url": st.column_config.LinkColumn(
-        "NCBI Link",
-        display_text="🔗 View",
-    ),
-    "ncbi_top_hit_url": st.column_config.LinkColumn(
-        "NCBI Link",
-        display_text="🔗 View",
-    ),
-    "hit_def": st.column_config.TextColumn(
-        "Hit Definition",
-    ),
-    "hit_count": st.column_config.NumberColumn(
-        "Hit Count", format="%d", help="Total number of hits found for this species."
-    ),
-    "top_identity": st.column_config.NumberColumn(
-        "Top Identity (%)",
-        format="%.2f",
-        help="Highest identity percentage found for this sequence.",
-    ),
-    "hits_count": st.column_config.NumberColumn(
-        "Hits", format="%d", help="Total number of hits for this sequence."
-    ),
-    "species_count": st.column_config.NumberColumn(
-        "Species", format="%d", help="Total number of unique species for this sequence."
-    ),
-    "filter_method": st.column_config.TextColumn("Filter Method"),
-    "genus": st.column_config.TextColumn("Genus"),
-    "specificEpithet": st.column_config.TextColumn("Epithet"),
-    "align_length": st.column_config.NumberColumn(
-        "Alignment Length",
-        format="%d",
-        help="Length of the aligned region in base pairs.",
-    ),
-    "identities": st.column_config.NumberColumn(
-        "Identities", format="%d", help="Number of identical bases in the alignment."
-    ),
-    "gaps": st.column_config.NumberColumn(
-        "Gaps", format="%d", help="Number of gaps introduced in the alignment."
-    ),
-    "query_start": st.column_config.NumberColumn(
-        "Query Start",
-        format="%d",
-        help="Start position of the alignment on the query sequence.",
-    ),
-    "query_end": st.column_config.NumberColumn(
-        "Query End",
-        format="%d",
-        help="End position of the alignment on the query sequence.",
-    ),
-    "mol_top_identity_percentage": st.column_config.NumberColumn(
-        "MOL Identity (%)",
-        format="%.2f",
-        help="Identity percentage of the best NCBI hit for this species in the MOL step.",
-    ),
-    "mol_top_query_cover": st.column_config.NumberColumn(
-        "MOL Query Coverage (%)",
-        format="%.2f",
-        help="Query coverage of the best NCBI hit for this species in the MOL step.",
-    ),
-    "taxonURL": st.column_config.LinkColumn("WoRMS Link", display_text="🔗 View"),
-    "scientificNameAuthorship": st.column_config.TextColumn("Authorship"),
-    "family": st.column_config.TextColumn("Family"),
-    "kingdom": st.column_config.TextColumn("Kingdom"),
-    "phylum": st.column_config.TextColumn("Phylum"),
-    "class": st.column_config.TextColumn("Class"),
-    "order": st.column_config.TextColumn("Order"),
-    "taxonRank": st.column_config.TextColumn(
-        "Rank", help="Taxonomic rank of the species."
-    ),
-    "taxonID": st.column_config.NumberColumn(
-        "Taxon ID",
-        format="%d",
-        help="Unique identifier in the source taxonomy database.",
-    ),
-    "taxonID_db": st.column_config.TextColumn(
-        "Taxon DB", help="Source taxonomy database for the taxon ID."
-    ),
-    "bold_seq_url": st.column_config.LinkColumn("BOLD Link", display_text="🔗 View"),
-    "bold_scientificName": st.column_config.TextColumn(
-        "Name in BOLD",
-        help="The name BOLD files the records under, when the species was "
-        "found under another of its names (NCBI or GBIF).",
-    ),
-    "bold_dna_sequence": st.column_config.TextColumn(
-        "BOLD DNA Sequence", width="large"
-    ),
-    "gbif_taxonURL": st.column_config.LinkColumn("GBIF Link", display_text="🔗 View"),
-    "sameSpeciesAs": st.column_config.TextColumn(
+    "same_species_as": _Text(
         "Possibly same species as",
         help="Another source (in brackets) counts these species as one. WoRMS "
         "may keep one species under two names, or the sources may disagree. "
         "The names are kept and counted apart.",
     ),
-    "gbif_scientificName": st.column_config.TextColumn(
+    # BLAST hits (MOL search and list, HYPO check)
+    "identity_percentage": _percent(
+        "Identity (%)", "Percentage of matching bases in the alignment."
+    ),
+    "query_cover": _percent(
+        "Query Cover (%)", "Percentage of the query sequence covered by the hit."
+    ),
+    "hit_url": _link("NCBI Link"),
+    "hit_def": _Text("Hit Definition", help="Title of the GenBank record."),
+    "ncbi_taxid": _count("NCBI Taxon ID", "NCBI taxonomy ID of the hit's species."),
+    "align_length": _count(
+        "Alignment Length", "Length of the aligned region in base pairs."
+    ),
+    "identities": _count("Identities", "Number of identical bases in the alignment."),
+    "gaps": _count("Gaps", "Number of gaps introduced in the alignment."),
+    "query_start": _count(
+        "Query Start", "Start position of the alignment on the query sequence."
+    ),
+    "query_end": _count(
+        "Query End", "End position of the alignment on the query sequence."
+    ),
+    "filter_method": _Text(
+        "Filter Method",
+        help="How the MOL filter kept the hits of the sequence: above a "
+        "barcoding gap, or within a similarity range of the best hit.",
+    ),
+    # MOL summaries
+    "n_blast_hits": _count("BLAST Hits", "Hits NCBI BLAST returned for this sequence."),
+    "max_identity": _percent("Max Identity (%)", "Highest identity among the hits."),
+    "min_identity": _percent("Min Identity (%)", "Lowest identity among the hits."),
+    "identity_range": _percent(
+        "Identity Range (%)", "Spread between the highest and lowest identity."
+    ),
+    "n_hits": _count("Hits", "Number of hits."),
+    "n_species": _count("Species", "Number of species."),
+    "top_identity": _percent(
+        "Top Identity (%)", "Highest identity found for this sequence."
+    ),
+    # Best MOL hit of a species (TAX on)
+    "mol_identity": _percent(
+        "MOL Identity (%)", "Identity of the sequence's best MOL hit on this species."
+    ),
+    "mol_query_cover": _percent("MOL Query Cover (%)", "Query cover of that hit."),
+    "mol_hit_url": _link("NCBI Link"),
+    "in_mol": _Check("In MOL", help="The species is a MOL species of this sequence."),
+    # TAX
+    "n_mol_species": _count(
+        "MOL Species", "Species of the sequence's MOL list (by their WoRMS name)."
+    ),
+    "n_tax_species": _count("TAX Species", "Species of the sequence's TAX list."),
+    "n_both": _count("In Both", "Species in both the MOL and the TAX lists."),
+    "n_added": _count("Added", "Species the WoRMS genus expansion added."),
+    "accepted_name": _Text(
+        "WoRMS Accepted Name",
+        help="WoRMS lists the MOL name as a synonym of this name, or links them "
+        "through the NCBI taxid.",
+    ),
+    "note": _Text(
+        "Why",
+        help="Empty: WoRMS has no record of the name. Otherwise WoRMS has "
+        "records but none gives one accepted species, so the name is kept as "
+        "NCBI gives it.",
+    ),
+    "genus_in_tax": _Check(
+        "Genus in TAX",
+        help="The genus of this name is in the TAX list: its species are "
+        "candidates for the sequence anyway.",
+    ),
+    "mol_species": _Text(
+        "MOL Species in It", help="The MOL species that belong to this genus."
+    ),
+    "sequences": _Text(
+        "Kept for Sequences",
+        help="Sequences whose TAX list keeps this genus, out of the sequences "
+        "with this genus name.",
+    ),
+    # GEO
+    "geo_url": _link("GBIF Link"),
+    "geo_occurrences": _count(
+        "GBIF Occurrences",
+        "Number of GBIF occurrence records of this species in the search area "
+        "(the filtering area in the GEO list).",
+    ),
+    "geo_extent": _Text("Extent", help="Search area of the occurrence count."),
+    "gbif_scientificName": _Text(
         "Name in GBIF",
         help="The name GBIF gives the species, when it differs from WoRMS; a "
         "subspecies name when GBIF holds it as one (see the GBIF match log).",
     ),
-    "occurrences": st.column_config.NumberColumn(
-        "Occurrences",
-        format="%d",
-        help="Number of GBIF occurrence records for this species in the search area.",
+    # EXTRA
+    "proxy_id": _Text("BOLD Process ID", help="The BOLD record of the proxy."),
+    "proxy_sequence": _Text(
+        "BOLD DNA Sequence", width="large", help="The proxy's CO1 sequence."
     ),
-    "gbif_occurrences": st.column_config.NumberColumn(
-        "GBIF Occurrences",
-        format="%d",
-        help="Number of GBIF occurrence records for this species in the selected filtering area.",
+    "proxy_url": _link("BOLD Link"),
+    "bold_scientificName": _Text(
+        "Name in BOLD",
+        help="The name BOLD files the records under, when the species was "
+        "found under another of its names (NCBI or GBIF).",
     ),
-    "gbif_extent": st.column_config.TextColumn(
-        "Extent", help="Geographic search extent used for this record."
+    "bold_outcome": _Text("Why", help="Why the species has no usable BOLD sequence."),
+    "bold_url": _link("BOLD Link"),
+    "n_bold_sequences": _count(
+        "BOLD Sequences", "BOLD sequences kept by the filter, as proxies."
     ),
-    "total_records": st.column_config.NumberColumn(
-        "BOLD Records", format="%d", help="Total BOLD sequences found."
+    "n_species_queried": _count(
+        "Species Queried", "Species of this sequence searched in BOLD."
     ),
-    "species_queried": st.column_config.NumberColumn(
-        "Species Queried",
-        format="%d",
-        help="Total species queried in BOLD for this sequence.",
+    "n_species_found": _count(
+        "Species Found", "Species with at least one usable BOLD sequence."
     ),
-    "species_found": st.column_config.NumberColumn(
-        "Species Found", format="%d", help="Species with at least one BOLD record."
+    "n_species_missing": _count(
+        "Species Missing", "Species without a usable BOLD sequence."
     ),
-    "species_missing": st.column_config.NumberColumn(
-        "Species Missing", format="%d", help="Species queried but not found in BOLD."
+    # HYPO
+    "proxy_hit_species": _Text(
+        "Matched MOL Species",
+        help="The MOL species of this sequence that the candidate's BOLD CO1 "
+        "sequence matched in GenBank.",
+    ),
+    "proxy_identity": _percent(
+        "Proxy Identity (%)", "Identity of the CO1 proxy to the matched MOL species."
+    ),
+    "proxy_query_cover": _percent("Proxy Query Cover (%)", "Query cover of that hit."),
+    "proxy_hit_def": _Text("Hit Definition", help="Title of the GenBank record."),
+    "proxy_hit_url": _link("NCBI Link"),
+    "hit_found": _Check(
+        "Hit Found", help="The check found the target marker of the species in GenBank."
+    ),
+    "scientificName_NCBI": _Text(
+        "Check Hit Species", help="The GenBank species of the check hit."
+    ),
+    "hypo_check_identity": _percent(
+        "Check Identity (%)",
+        "Identity of the best hit the HYPO check found for the target marker "
+        "(empty: marker not found in GenBank).",
+    ),
+    "hypo_check_query_cover": _percent(
+        "Check Query Cover (%)", "Query cover of that hit."
+    ),
+    "hypo_check_hit_url": _link("NCBI Link"),
+    "hypo_check_hit": _Check(
+        "Marker in GenBank",
+        help="The HYPO check found the species' target marker in GenBank, "
+        "although a hypothetical species has none: check it.",
+    ),
+    # Results
+    "validation_step": _Text(
+        "Validation",
+        help="MOL+GEO = confirmed via NCBI + geography. HYPO = confirmed via "
+        "BOLD/NCBI proxy.",
+    ),
+    "via_mol_identity": _percent(
+        "Via Identity (%)",
+        "HYPO: this sequence's best MOL identity to the matched MOL species.",
+    ),
+    "keep": _Check("Keep", help="Uncheck to exclude the candidate from this sequence."),
+    "best_identity": _percent(
+        "Best Identity (%)",
+        "Best NCBI identity among the sequence's candidates: the MOL hit, or "
+        "the HYPO check hit of a HYPO species (hits covering at least the MOL "
+        "query cover). A HYPO species without check hit counts with the MOL "
+        "hit of the species its CO1 proxy matched.",
+    ),
+    "paths": _Text(
+        "Validation",
+        help="The validation of the sequence's candidates (see Validation).",
+    ),
+    # Species flow table
+    "species": _Text("Species"),
+    "origin": _Text("Origin", help="NCBI hit, or added by TAX (a congener)."),
+    "outcome": _Text("Ended At", help="The step where the name ended."),
+    "identity": _percent(
+        "Best NCBI Identity (%)",
+        "Best identity among this sequence's NCBI hits on the name.",
     ),
 }
+
+
+# The classification columns the tables show, from the genus up.
+RANK_COLUMNS = [
+    "genus",
+    "specificEpithet",
+    "family",
+    "order",
+    "class",
+    "phylum",
+    "kingdom",
+]
+
+
+def column_config(columns, **overrides) -> dict:
+    """The display settings of *columns* (from COL), with *overrides* for a
+    table that labels a column otherwise. A column without settings raises:
+    Streamlit would hide it."""
+    return {col: overrides[col] if col in overrides else COL[col] for col in columns}
+
 
 # Help text for the NCBI BLAST settings shared by the MOL and HYPO tabs.
 BLAST_HELP = {
@@ -1146,7 +1256,7 @@ def highlight_low_identity(row):
     return [style] * len(row)
 
 
-# What the check_hit flag means (see add_check_hit), and the legend of the
+# What the hypo_check_hit flag means (see add_check_hit), and the legend of the
 # rows highlight_check_hit colours.
 CHECK_HIT_NOTE = "HYPO species whose marker the HYPO check found in NCBI"
 CHECK_HIT_LEGEND = f":orange[■] {CHECK_HIT_NOTE}"
@@ -1154,7 +1264,7 @@ CHECK_HIT_LEGEND = f":orange[■] {CHECK_HIT_NOTE}"
 
 def highlight_check_hit(row):
     """Apply highlight style for HYPO species with a check hit (see add_check_hit)."""
-    style = "background-color: #ffe0b2;" if row.get("check_hit", False) else ""
+    style = "background-color: #ffe0b2;" if row.get("hypo_check_hit", False) else ""
     return [style] * len(row)
 
 
@@ -1195,13 +1305,13 @@ def same_species_as(names: pd.Series) -> pd.Series:
     """The species each of *names* is possibly the same as, indexed by name;
     only the linked ones (see same_species_groups)."""
     groups = same_species_groups(names, st.session_state.name_table)
-    return groups.set_index("scientificName")["sameSpeciesAs"]
+    return groups.set_index("scientificName")["same_species_as"]
 
 
 def with_same_species(df: pd.DataFrame) -> pd.DataFrame:
-    """df with sameSpeciesAs (see same_species_as); empty for other rows."""
+    """df with same_species_as (see same_species_as); empty for other rows."""
     names = df["scientificName"]
-    return df.assign(sameSpeciesAs=names.map(same_species_as(names)))
+    return df.assign(same_species_as=names.map(same_species_as(names)))
 
 
 def display_same_species(df: pd.DataFrame) -> None:
@@ -1223,11 +1333,8 @@ def display_same_species(df: pd.DataFrame) -> None:
             groups,
             width="stretch",
             hide_index=True,
-            column_order=["scientificName", "sameSpeciesAs"],
-            column_config={
-                "scientificName": COL["scientificName"],
-                "sameSpeciesAs": COL["sameSpeciesAs"],
-            },
+            column_order=["scientificName", "same_species_as"],
+            column_config=column_config(["scientificName", "same_species_as"]),
         )
 
 

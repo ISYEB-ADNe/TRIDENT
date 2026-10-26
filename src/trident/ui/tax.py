@@ -18,7 +18,7 @@ from trident.ui.ui import (
     show_failed_items_banner,
     lazy_expander,
     styled_or_plain,
-    COL,
+    column_config,
     StreamlitLogSink,
     run_with_progress,
     reset_state_after,
@@ -33,6 +33,25 @@ from trident.ui.ui import (
     save_widget,
 )
 
+
+# The taxonomy columns the TAX tables show, after the sequence.
+TAXONOMY_COLUMNS = [
+    "scientificName",
+    "taxonURL",
+    "scientificNameAuthorship",
+    "kingdom",
+    "phylum",
+    "class",
+    "order",
+    "family",
+    "genus",
+    "specificEpithet",
+    "taxonRank",
+    "taxonID",
+    "taxonID_db",
+]
+# The name column of the panels about MOL names.
+MOL_NAME = st.column_config.TextColumn("MOL Name (NCBI)")
 
 # --------------------------------------------------------------------
 # SEARCH FUNCTIONS
@@ -325,20 +344,13 @@ def render_worms_metrics():
             f"View the {n_renamed:,} MOL {pluralize(n_renamed, 'name')} renamed by WoRMS",
             expanded=False,
         ):
+            shown = ["scientificName", "accepted_name"]
             st.dataframe(
-                renamed[["scientificName", "acceptedName"]],
+                renamed,
                 width="stretch",
                 hide_index=True,
-                column_config={
-                    "scientificName": "MOL name (NCBI)",
-                    "acceptedName": st.column_config.TextColumn(
-                        "WoRMS accepted name",
-                        help=(
-                            "WoRMS lists the MOL name as a synonym of this "
-                            "name, or links them through the NCBI taxid."
-                        ),
-                    ),
-                },
+                column_order=shown,
+                column_config=column_config(shown, scientificName=MOL_NAME),
             )
 
     if not not_found.empty:
@@ -348,28 +360,13 @@ def render_worms_metrics():
             "WoRMS did not resolve",
             expanded=False,
         ):
+            shown = ["scientificName", "note", "genus_in_tax"]
             st.dataframe(
                 not_found,
                 width="stretch",
                 hide_index=True,
-                column_config={
-                    "scientificName": "MOL name",
-                    "note": st.column_config.TextColumn(
-                        "Why",
-                        help=(
-                            "Empty: WoRMS has no record of the name. Otherwise "
-                            "WoRMS has records but none gives one accepted "
-                            "species, so the name is kept as NCBI gives it."
-                        ),
-                    ),
-                    "genusInTax": st.column_config.CheckboxColumn(
-                        "Genus in TAX",
-                        help=(
-                            "The genus of this name is in the TAX list: its "
-                            "species are candidates for the sequence anyway."
-                        ),
-                    ),
-                },
+                column_order=shown,
+                column_config=column_config(shown, scientificName=MOL_NAME),
             )
 
 
@@ -389,26 +386,21 @@ def display_genus_homonyms():
             "them when none of its MOL species is in any: check that the "
             "species kept make sense."
         )
+        shown = [
+            "genus",
+            "genusID",
+            "kingdom",
+            "class",
+            "n_species",
+            "mol_species",
+            "sequences",
+        ]
         st.dataframe(
             homonyms,
             width="stretch",
             hide_index=True,
-            column_config={
-                "genus": "Genus",
-                "genusID": st.column_config.NumberColumn("WoRMS genus ID", format="%d"),
-                "kingdom": "Kingdom",
-                "class": "Class",
-                "n_species": "Species",
-                "molSpecies": st.column_config.TextColumn(
-                    "MOL species in it",
-                    help="The MOL species that belong to this genus.",
-                ),
-                "sequences": st.column_config.TextColumn(
-                    "Kept for sequences",
-                    help="Sequences whose TAX list keeps this genus, out of "
-                    "the sequences with this genus name.",
-                ),
-            },
+            column_order=shown,
+            column_config=column_config(shown),
         )
 
 
@@ -440,51 +432,43 @@ def display_mol_rejected(seq_id=None):
                 else "They are kept in the TAX list (setting off)."
             )
         )
+        shown = [
+            *(["seq_id"] if seq_id is None else []),
+            "scientificName",
+            "mol_identity",
+            "mol_query_cover",
+        ]
         st.dataframe(
-            rejected.sort_values(
-                ["seq_id", "mol_top_identity_percentage"], ascending=[True, False]
-            ),
+            rejected.sort_values(["seq_id", "mol_identity"], ascending=[True, False]),
             width="stretch",
             hide_index=True,
-            column_order=[
-                *(["seq_id"] if seq_id is None else []),
-                "scientificName",
-                "mol_top_identity_percentage",
-                "mol_top_query_cover",
-            ],
-            column_config={
-                "seq_id": COL["seq_id"],
-                "scientificName": COL["scientificName"],
-                "mol_top_identity_percentage": COL["mol_top_identity_percentage"],
-                "mol_top_query_cover": COL["mol_top_query_cover"],
-            },
+            column_order=shown,
+            # The best hit the MOL filter rejected, not a MOL hit.
+            column_config=column_config(
+                shown,
+                mol_identity=st.column_config.NumberColumn(
+                    "BLAST Identity (%)",
+                    format="%.2f",
+                    help="Identity of the best BLAST hit of this species for the "
+                    "sequence, which the MOL filter rejected.",
+                ),
+                mol_query_cover=st.column_config.NumberColumn(
+                    "BLAST Query Cover (%)",
+                    format="%.2f",
+                    help="Query cover of that hit.",
+                ),
+            ),
         )
 
 
 def display_worms_summary():
+    shown = ["seq_id", "n_mol_species", "n_tax_species", "n_both", "n_added"]
     st.dataframe(
         st.session_state.tax_summary_df,
         width="stretch",
         hide_index=True,
-        column_config={
-            "seq_id": COL["seq_id"],
-            "MOL Species": st.column_config.NumberColumn(
-                "MOL hits",
-                help="Total number of unique species identified during the MOL step.",
-            ),
-            "TAX Species": st.column_config.NumberColumn(
-                "TAX Total",
-                help="Total species identified in WoRMS for all genera associated with this sequence.",
-            ),
-            "Overlap": st.column_config.NumberColumn(
-                "Verified",
-                help="Species that appeared in both the MOL and TAX lists.",
-            ),
-            "New Species": st.column_config.NumberColumn(
-                "Expanded",
-                help="New species added by WoRMS genus expansion (not present in MOL).",
-            ),
-        },
+        column_order=shown,
+        column_config=column_config(shown),
     )
 
 
@@ -502,47 +486,13 @@ def display_worms_sequence_table(sequence_worms):
 
     styled_df = styled_or_plain(_with_ncbi_synonyms(sequence_worms), highlight_in_mol)
 
+    shown = [*TAXONOMY_COLUMNS, "ncbi_synonyms"]
     st.dataframe(
         styled_df,
         width="stretch",
         hide_index=True,
-        column_order=[
-            "scientificName",
-            "taxonURL",
-            "scientificNameAuthorship",
-            "kingdom",
-            "phylum",
-            "class",
-            "order",
-            "family",
-            "genus",
-            "specificEpithet",
-            "taxonRank",
-            "taxonID",
-            "taxonID_db",
-            "ncbi_synonyms",
-        ],
-        column_config={
-            "seq_id": None,
-            "dna_sequence": None,
-            "scientificName": COL["scientificName"],
-            "ncbi_synonyms": COL["ncbi_synonyms"],
-            "taxonURL": COL["taxonURL"],
-            "family": COL["family"],
-            "genus": COL["genus"],
-            "specificEpithet": COL["specificEpithet"],
-            "scientificNameAuthorship": COL["scientificNameAuthorship"],
-            "taxonRank": COL["taxonRank"],
-            "taxonID": COL["taxonID"],
-            "taxonID_db": COL["taxonID_db"],
-            "kingdom": COL["kingdom"],
-            "phylum": COL["phylum"],
-            "class": COL["class"],
-            "order": COL["order"],
-            "in_mol": None,
-            "mol_top_identity_percentage": None,
-            "mol_top_query_cover": None,
-        },
+        column_order=shown,
+        column_config=column_config(shown),
     )
 
 
@@ -555,14 +505,14 @@ def _tax_sequence_labels():
         return {seq_id: f"{seq_id} (no species)" for seq_id in sequences}
     n_species = tax_df.groupby("seq_id")["scientificName"].nunique()
     if "in_mol" in tax_df.columns:
-        from_mol = tax_df[tax_df["in_mol"].astype(bool)]
+        from_mol = tax_df[tax_df["in_mol"]]
         in_mol = from_mol.groupby("seq_id")["scientificName"].nunique()
     else:
         in_mol = pd.Series(dtype=int)
     # MOL species not in the TAX list (see build_tax_summary).
     summary = st.session_state.tax_summary_df
     missing = (
-        (summary["MOL Species"] - summary["Overlap"]).groupby(summary["seq_id"]).sum()
+        (summary["n_mol_species"] - summary["n_both"]).groupby(summary["seq_id"]).sum()
     )
     labels = {}
     for seq_id in sequences:
@@ -601,55 +551,14 @@ def display_worms_sequence():
 def display_full_tax_list():
     """Display the complete TAX list in a flat table."""
     df = with_same_species(_with_ncbi_synonyms(st.session_state.tax_df))
-    styled_df = styled_or_plain(df, highlight_in_mol)
-    cols = df.columns.tolist()
-    priority = [
-        "seq_id",
-        "scientificName",
-        "taxonURL",
-        "genus",
-        "specificEpithet",
-        "family",
-        "order",
-        "class",
-        "phylum",
-        "kingdom",
-    ]
-    # NCBI synonyms and the same-species note go last. A TAX table saved
-    # before NCBI synonyms were derived has a verbatimIdentification column,
-    # left out.
-    hidden = {"ncbi_synonyms", "sameSpeciesAs", "verbatimIdentification"}
-    middle = [c for c in cols if c not in priority and c not in hidden]
-    tail = ["ncbi_synonyms", "sameSpeciesAs"]
-    ordered = priority + middle + tail
+    shown = ["seq_id", *TAXONOMY_COLUMNS, "genusID", "ncbi_synonyms", "same_species_as"]
     st.caption(":green[■] Species also in MOL list")
     st.dataframe(
-        styled_df,
+        styled_or_plain(df, highlight_in_mol),
         width="stretch",
         hide_index=True,
-        column_order=ordered,
-        column_config={
-            "seq_id": COL["seq_id"],
-            "scientificName": COL["scientificName"],
-            "ncbi_synonyms": COL["ncbi_synonyms"],
-            "sameSpeciesAs": COL["sameSpeciesAs"],
-            "taxonURL": COL["taxonURL"],
-            "in_mol": None,
-            "mol_top_identity_percentage": None,
-            "mol_top_query_cover": None,
-            "genus": COL["genus"],
-            "specificEpithet": COL["specificEpithet"],
-            "family": COL["family"],
-            "order": COL["order"],
-            "class": COL["class"],
-            "phylum": COL["phylum"],
-            "kingdom": COL["kingdom"],
-            "scientificNameAuthorship": COL["scientificNameAuthorship"],
-            "taxonRank": COL["taxonRank"],
-            "taxonID": COL["taxonID"],
-            "taxonID_db": COL["taxonID_db"],
-            "dna_sequence": None,
-        },
+        column_order=shown,
+        column_config=column_config(shown),
     )
 
 

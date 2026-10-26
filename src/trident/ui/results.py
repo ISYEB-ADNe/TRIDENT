@@ -34,15 +34,13 @@ from trident.pipelines.results_pipeline import (
     flow_lost_at,
     filter_excluded_results,
     resolve_sequences,
-    RESULT_COLS,
     EXPORT_COLS,
-    VIA_COLS,
     build_gbif_export_df,
 )
 from trident.ui.defaults import NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
 from trident.ui.geo import display_gbif_sequence_table
 from trident.ui.ui import (
-    COL,
+    column_config,
     SELECTED_SEQUENCE_KEY,
     failed_items,
     persist_value,
@@ -62,57 +60,54 @@ from trident.ui.ui import (
 
 THRESHOLD_KEY = "flag_identity"
 
-# Candidate columns, with the MOL species a HYPO species' CO1 proxy matched
-# and the sequence's MOL identity to it after the species' own NCBI hit.
-CANDIDATE_COLS = [c for c in RESULT_COLS if c != "seq_id"]
-_hit_url = CANDIDATE_COLS.index("ncbi_top_hit_url") + 1
-CANDIDATE_COLS[_hit_url:_hit_url] = VIA_COLS
-RESULTS_COLUMN_CONFIG = {
-    "seq_id": COL["seq_id"],
-    "validation_step": st.column_config.TextColumn(
-        "Validation",
-        help="MOL+GEO = confirmed via NCBI + geography. HYPO = confirmed via BOLD/NCBI proxy.",
-    ),
-    "scientificName": COL["scientificName"],
-    "taxonURL": COL["taxonURL"],
-    "kingdom": COL["kingdom"],
-    "phylum": COL["phylum"],
-    "class": COL["class"],
-    "order": COL["order"],
-    "family": COL["family"],
-    "genus": COL["genus"],
-    "specificEpithet": COL["specificEpithet"],
-    "scientificNameAuthorship": COL["scientificNameAuthorship"],
-    "ncbi_top_identity_percentage": st.column_config.NumberColumn(
-        "Identity (%)",
-        format="%.2f",
-        help="Best NCBI BLAST identity for this species.",
-    ),
-    "ncbi_top_query_cover": st.column_config.NumberColumn(
-        "Query Cover (%)",
-        format="%.2f",
-        help="Query coverage of the best NCBI hit.",
-    ),
-    "ncbi_top_hit_url": COL["ncbi_top_hit_url"],
-    "bold_seq_url": COL["bold_seq_url"],
-    "gbif_occurrences": COL["gbif_occurrences"],
-    "gbif_taxonURL": COL["gbif_taxonURL"],
-    "low_identity_warning": None,
-    "check_hit": None,
-    "dna_sequence": None,
-}
-
-VIA_COLUMN_CONFIG = {
-    "via_mol_species": st.column_config.TextColumn(
-        "Via MOL species",
-        help="HYPO: the MOL species of this sequence that its best CO1 proxy hit matched.",
-    ),
-    "via_mol_identity": st.column_config.NumberColumn(
-        "Via identity (%)",
-        format="%.2f",
-        help="HYPO: this sequence's best MOL identity to that species.",
-    ),
-}
+# The columns of a candidate the Results tables show, after the sequence:
+# for a HYPO species, also the MOL species its CO1 proxy matched and the
+# sequence's MOL identity to it.
+CANDIDATE_COLS = [
+    "validation_step",
+    "scientificName",
+    "taxonURL",
+    "geo_url",
+    "kingdom",
+    "phylum",
+    "class",
+    "order",
+    "family",
+    "genus",
+    "specificEpithet",
+    "scientificNameAuthorship",
+    "mol_identity",
+    "mol_query_cover",
+    "mol_hit_url",
+    "hypo_check_identity",
+    "hypo_check_query_cover",
+    "hypo_check_hit_url",
+    "proxy_hit_species",
+    "proxy_identity",
+    "proxy_query_cover",
+    "via_mol_identity",
+    "proxy_url",
+    "geo_occurrences",
+]
+# The columns of a species' NCBI hits.
+NCBI_HIT_COLS = [
+    "seq_id",
+    "scientificName",
+    "hit_def",
+    "identity_percentage",
+    "query_cover",
+    "hit_url",
+]
+# The columns of the assignment table, one row per sequence.
+ASSIGNMENT_COLS = [
+    "seq_id",
+    "scientificName",
+    "taxonRank",
+    "n_species",
+    "best_identity",
+    "paths",
+    "note",
+]
 FILTER_KEY = "results_filter"
 ASSIGNMENTS_KEY = "results_assignments"
 
@@ -158,8 +153,12 @@ def _best_identity(df, query_cover):
     Returns:
         DataFrame indexed by seq_id with columns identity and via.
     """
-    direct = df["ncbi_top_identity_percentage"].where(
-        df["ncbi_top_query_cover"] >= query_cover
+    direct = (
+        df["mol_identity"]
+        .where(df["mol_query_cover"] >= query_cover)
+        .fillna(
+            df["hypo_check_identity"].where(df["hypo_check_query_cover"] >= query_cover)
+        )
     )
     hypo = df["validation_step"].eq("HYPO")
     via = df["via_mol_identity"].where(hypo & direct.isna())
@@ -167,7 +166,7 @@ def _best_identity(df, query_cover):
         {
             "seq_id": df["seq_id"],
             "identity": direct.fillna(via),
-            "via": df["via_mol_species"].where(via.notna()),
+            "via": df["proxy_hit_species"].where(via.notna()),
         }
     )
     # On a tie, the species' own hit wins over one through another species.
@@ -241,8 +240,8 @@ def _assignments(curated_df, threshold):
     table["paths"] = table["seq_id"].map(
         by_seq["validation_step"].agg(lambda s: " + ".join(sorted(s.unique())))
     )
-    check_hit = table["seq_id"].map(by_seq["check_hit"].any())
-    table["check_hit"] = check_hit.fillna(False).astype(bool)
+    check_hit = table["seq_id"].map(by_seq["hypo_check_hit"].any())
+    table["hypo_check_hit"] = check_hit.fillna(False).astype(bool)
 
     unassigned = table.loc[table["n_species"] == 0, "seq_id"].tolist()
     # Where it lost its last species, as its species flow shows it.
@@ -262,7 +261,7 @@ def _assignments(curated_df, threshold):
         if row["low_identity"]:
             via = f" (via {row['best_via']})" if pd.notna(row["best_via"]) else ""
             note.append(f"best identity below {threshold}%{via}")
-        if row["check_hit"]:
+        if row["hypo_check_hit"]:
             note.append(CHECK_HIT_NOTE)
         if pd.isna(row["taxonRank"]) and not row["species_level"]:
             note.append("no shared taxon" if row["n_species"] > 1 else "rank unknown")
@@ -280,7 +279,7 @@ def _filtered_seq_ids(assignments, choice):
         "Higher rank": (n_species > 0) & ~species_level,
         "Unassigned": n_species == 0,
         "Low identity": assignments["low_identity"],
-        "HYPO check": assignments["check_hit"],
+        "HYPO check": assignments["hypo_check_hit"],
     }.get(choice)
     return assignments["seq_id"] if mask is None else assignments.loc[mask, "seq_id"]
 
@@ -397,7 +396,7 @@ def show_summary(assignments, curated_df, results_df, threshold):
         len(higher),
         help=(
             "Sequences with several candidate species, assigned to the lowest "
-            "rank they share (as in the GBIF export)."
+            "rank they share (as in the one-row-per-sequence table)."
         ),
     )
     c4.metric(
@@ -407,7 +406,7 @@ def show_summary(assignments, curated_df, results_df, threshold):
     )
     c5.metric(
         "HYPO check",
-        int(assignments["check_hit"].sum()),
+        int(assignments["hypo_check_hit"].sum()),
         help=(
             "Sequences with a HYPO species whose marker the HYPO check found in "
             "NCBI, although a hypothetical species has no marker in GenBank: "
@@ -486,9 +485,18 @@ def show_summary(assignments, curated_df, results_df, threshold):
                     "seq_id",
                     "scientificName",
                     "validation_step",
-                    "ncbi_top_identity_percentage",
+                    "mol_identity",
+                    "hypo_check_identity",
                 ],
-                column_config=RESULTS_COLUMN_CONFIG,
+                column_config=column_config(
+                    [
+                        "seq_id",
+                        "scientificName",
+                        "validation_step",
+                        "mol_identity",
+                        "hypo_check_identity",
+                    ]
+                ),
             )
 
 
@@ -518,7 +526,7 @@ def show_bulk_buttons(assignments, curated_df, threshold):
     species, or every candidate of the low identity sequences (which then
     become unassigned). A second click restores what the button excluded."""
     species_rows = curated_df.dropna(subset=["scientificName"])
-    flagged = species_rows[species_rows["check_hit"]]
+    flagged = species_rows[species_rows["hypo_check_hit"]]
     low = assignments.loc[assignments["low_identity"], "seq_id"]
     low_rows = species_rows[species_rows["seq_id"].isin(low)]
     col1, col2 = st.columns(2)
@@ -591,39 +599,18 @@ def show_assignments(assignments, curated_df, threshold):
             on_select=partial(_select_sequence, table_key, shown["seq_id"].tolist()),
             selection_mode="single-row",
             key=table_key,
-            column_order=[
-                "seq_id",
-                "scientificName",
-                "taxonRank",
-                "n_species",
-                "best_identity",
-                "paths",
-                "note",
-            ],
-            column_config={
-                "seq_id": COL["seq_id"],
-                "scientificName": st.column_config.TextColumn(
+            column_order=ASSIGNMENT_COLS,
+            column_config=column_config(
+                ASSIGNMENT_COLS,
+                scientificName=st.column_config.TextColumn(
                     "Assignment",
                     help="The species, or the lowest taxon its candidates share.",
                 ),
-                "taxonRank": st.column_config.TextColumn("Rank"),
-                "n_species": st.column_config.NumberColumn(
+                n_species=st.column_config.NumberColumn(
                     "Candidates", help="Candidate species kept for this sequence."
                 ),
-                "best_identity": st.column_config.NumberColumn(
-                    "Best identity (%)",
-                    format="%.2f",
-                    help=(
-                        "Best NCBI identity among its candidates: the MOL hit, "
-                        "or the HYPO check hit of a HYPO species (hits covering "
-                        "at least the MOL query cover). A HYPO species without "
-                        "check hit counts with the MOL hit of the species its "
-                        "CO1 proxy matched."
-                    ),
-                ),
-                "paths": RESULTS_COLUMN_CONFIG["validation_step"],
-                "note": st.column_config.TextColumn("To check"),
-            },
+                note=st.column_config.TextColumn("To Check"),
+            ),
         )
 
 
@@ -639,13 +626,13 @@ LOST_AT_TABLES = {
 }
 LOST_AT_COLS = [
     "scientificName",
-    "acceptedName",
+    "accepted_name",
     "identity_percentage",
     "query_cover",
     "hit_def",
     "hit_url",
-    "gbif_occurrences",
-    "gbif_taxonURL",
+    "geo_occurrences",
+    "geo_url",
     "taxonURL",
 ]
 
@@ -690,7 +677,7 @@ def _show_lost_at(seq_id, step):
         rows = rows[rows["scientificName"].isin(names)]
     name_table = st.session_state.name_table
     if key == "mol_df" and not resolved_names(name_table).empty:
-        rows = rows.assign(acceptedName=species_of(rows["scientificName"], name_table))
+        rows = rows.assign(accepted_name=species_of(rows["scientificName"], name_table))
     if "identity_percentage" in rows.columns:
         rows = rows.sort_values("identity_percentage", ascending=False)
     st.caption(caption)
@@ -699,10 +686,7 @@ def _show_lost_at(seq_id, step):
         width="stretch",
         hide_index=True,
         column_order=[c for c in LOST_AT_COLS if c in rows.columns],
-        column_config={
-            **{c: COL[c] for c in LOST_AT_COLS if c in COL},
-            "acceptedName": st.column_config.TextColumn("Accepted name (WoRMS)"),
-        },
+        column_config=column_config(LOST_AT_COLS),
     )
 
 
@@ -739,16 +723,7 @@ def show_species_flow(seq_id):
             table,
             width="stretch",
             hide_index=True,
-            column_config={
-                "species": st.column_config.TextColumn("Species"),
-                "origin": st.column_config.TextColumn("Origin"),
-                "outcome": st.column_config.TextColumn("Ended at"),
-                "identity": st.column_config.NumberColumn(
-                    "Best NCBI identity (%)",
-                    format="%.2f",
-                    help="Best identity among this sequence's NCBI hits on the name.",
-                ),
-            },
+            column_config=column_config(["species", "origin", "outcome", "identity"]),
         )
 
 
@@ -808,7 +783,7 @@ def _show_candidates(results_df, assignments, threshold, selected_seq):
     legends = ["Uncheck Keep to exclude a candidate from this sequence."]
     if table["low_identity_warning"].any():
         legends.append(f":red[■] Best identity below {threshold}%")
-    if table["check_hit"].any():
+    if table["hypo_check_hit"].any():
         legends.append(CHECK_HIT_LEGEND)
     st.caption(" · ".join(legends))
 
@@ -821,72 +796,31 @@ def _show_candidates(results_df, assignments, threshold, selected_seq):
         on_change=_apply_keep_edits,
         args=(editor_key, row_keys),
         disabled=[c for c in table.columns if c != "keep"],
-        column_order=["keep"] + CANDIDATE_COLS,
-        column_config={
-            **RESULTS_COLUMN_CONFIG,
-            **VIA_COLUMN_CONFIG,
-            "keep": st.column_config.CheckboxColumn("Keep"),
-        },
+        column_order=["keep", *CANDIDATE_COLS],
+        column_config=column_config(["keep", *CANDIDATE_COLS]),
     )
 
 
 def _species_breakdown_columns(sp_df, is_hypo):
-    """Build column_order and column_config for the per-species breakdown table."""
-    if is_hypo:
-        col_order = [
+    """The columns of the per-species breakdown table of one validation."""
+    if not is_hypo:
+        return [
             "seq_id",
             "validation_step",
-            "proxy_identity_percentage",
-            "proxy_query_cover",
-            "gbif_occurrences",
+            "mol_identity",
+            "mol_query_cover",
+            "geo_occurrences",
         ]
-        col_config = {
-            "seq_id": COL["seq_id"],
-            "validation_step": RESULTS_COLUMN_CONFIG["validation_step"],
-            "proxy_identity_percentage": st.column_config.NumberColumn(
-                "Identity (%)",
-                format="%.2f",
-                help="BLAST identity from CO1 proxy validation.",
-            ),
-            "proxy_query_cover": st.column_config.NumberColumn(
-                "Query Cover (%)",
-                format="%.2f",
-                help="Query coverage from CO1 proxy validation.",
-            ),
-            "gbif_occurrences": COL["gbif_occurrences"],
-        }
-        if sp_df["ncbi_top_identity_percentage"].notna().any():
-            col_order.extend(["ncbi_top_identity_percentage", "ncbi_top_query_cover"])
-            col_config["ncbi_top_identity_percentage"] = st.column_config.NumberColumn(
-                "Check Identity (%)",
-                format="%.2f",
-                help="NCBI marker check identity (species found for target marker).",
-            )
-            col_config["ncbi_top_query_cover"] = st.column_config.NumberColumn(
-                "Check Query Cover (%)",
-                format="%.2f",
-                help="NCBI marker check query coverage.",
-            )
-    else:
-        col_order = [
-            "seq_id",
-            "validation_step",
-            "ncbi_top_identity_percentage",
-            "ncbi_top_query_cover",
-            "gbif_occurrences",
-        ]
-        col_config = {
-            "seq_id": COL["seq_id"],
-            "validation_step": RESULTS_COLUMN_CONFIG["validation_step"],
-            "ncbi_top_identity_percentage": RESULTS_COLUMN_CONFIG[
-                "ncbi_top_identity_percentage"
-            ],
-            "ncbi_top_query_cover": RESULTS_COLUMN_CONFIG["ncbi_top_query_cover"],
-            "gbif_occurrences": COL["gbif_occurrences"],
-        }
-
-    col_config["low_identity_warning"] = None
-    return col_order, col_config
+    shown = [
+        "seq_id",
+        "validation_step",
+        "proxy_identity",
+        "proxy_query_cover",
+        "geo_occurrences",
+    ]
+    if sp_df["hypo_check_identity"].notna().any():
+        shown += ["hypo_check_identity", "hypo_check_query_cover"]
+    return shown
 
 
 def _show_all_hits_expander(species, is_hypo):
@@ -899,33 +833,21 @@ def _show_all_hits_expander(species, is_hypo):
         if hits.empty:
             return
 
-        col_order = [
+        shown = [
             "seq_id",
-            "scientificName_hit",
-            "identity_percentage",
-            "query_cover",
-            "hit_url",
+            "proxy_hit_species",
+            "proxy_identity",
+            "proxy_query_cover",
+            "proxy_hit_url",
+            "proxy_url",
         ]
-        col_config = {
-            "seq_id": COL["seq_id"],
-            "scientificName_hit": st.column_config.TextColumn("Proxy Species"),
-            "identity_percentage": COL["identity_percentage"],
-            "query_cover": COL["query_cover"],
-            "hit_url": COL["hit_url"],
-        }
-        if "seq_url" in hits.columns:
-            col_order.append("seq_url")
-            col_config["seq_url"] = st.column_config.LinkColumn(
-                "BOLD Link", display_text="🔗 View"
-            )
-
         with st.expander(f"All proxy validation hits ({len(hits)})"):
             st.dataframe(
                 hits,
                 width="stretch",
                 hide_index=True,
-                column_order=col_order,
-                column_config=col_config,
+                column_order=shown,
+                column_config=column_config(shown),
             )
     else:
         mol_df = st.session_state.get("mol_df")
@@ -942,22 +864,11 @@ def _show_all_hits_expander(species, is_hypo):
                 hits,
                 width="stretch",
                 hide_index=True,
-                column_order=[
-                    "seq_id",
-                    "scientificName",
-                    "hit_def",
-                    "identity_percentage",
-                    "query_cover",
-                    "hit_url",
-                ],
-                column_config={
-                    "seq_id": COL["seq_id"],
-                    "scientificName": st.column_config.TextColumn("NCBI name"),
-                    "hit_def": COL["hit_def"],
-                    "identity_percentage": COL["identity_percentage"],
-                    "query_cover": COL["query_cover"],
-                    "hit_url": COL["hit_url"],
-                },
+                column_order=NCBI_HIT_COLS,
+                column_config=column_config(
+                    NCBI_HIT_COLS,
+                    scientificName=st.column_config.TextColumn("NCBI Name"),
+                ),
             )
 
 
@@ -1001,9 +912,9 @@ def show_results_per_species(results_df, assignments, threshold, same_species):
         links = []
         for col, label in (
             ("taxonURL", "WoRMS"),
-            ("gbif_taxonURL", "GBIF"),
-            ("ncbi_top_hit_url", "NCBI"),
-            ("bold_seq_url", "BOLD"),
+            ("geo_url", "GBIF"),
+            ("mol_hit_url", "NCBI"),
+            ("proxy_url", "BOLD"),
         ):
             if pd.notna(row.get(col)):
                 links.append(f"[🔗 {label}]({row[col]})")
@@ -1018,8 +929,7 @@ def show_results_per_species(results_df, assignments, threshold, same_species):
             if step_df.empty:
                 continue
             st.markdown(f"#### {step} Sequences")
-            col_order, col_config = _species_breakdown_columns(step_df, is_hypo)
-            col_config["check_hit"] = None
+            shown = _species_breakdown_columns(step_df, is_hypo)
             st.dataframe(
                 styled_or_plain(
                     _flag_low_identity(step_df, threshold, best_identity),
@@ -1028,8 +938,8 @@ def show_results_per_species(results_df, assignments, threshold, same_species):
                 ),
                 width="stretch",
                 hide_index=True,
-                column_order=col_order,
-                column_config=col_config,
+                column_order=shown,
+                column_config=column_config(shown),
             )
             _show_all_hits_expander(selected_species, is_hypo=is_hypo)
 
@@ -1044,7 +954,7 @@ def show_curated_results(curated_df, assignments, threshold):
         legends = ["One row per sequence and kept candidate species."]
         if table["low_identity_warning"].any():
             legends.append(f":red[■] Best identity below {threshold}%")
-        if table["check_hit"].any():
+        if table["hypo_check_hit"].any():
             legends.append(CHECK_HIT_LEGEND)
         if table["scientificName"].isna().any():
             legends.append(":gray[■] No species assigned")
@@ -1058,8 +968,8 @@ def show_curated_results(curated_df, assignments, threshold):
             ),
             width="stretch",
             hide_index=True,
-            column_order=["seq_id"] + CANDIDATE_COLS,
-            column_config={**RESULTS_COLUMN_CONFIG, **VIA_COLUMN_CONFIG},
+            column_order=["seq_id", *CANDIDATE_COLS],
+            column_config=column_config(["seq_id", *CANDIDATE_COLS]),
         )
 
 
@@ -1070,7 +980,7 @@ _SOURCE_STEPS = [
     ("gbif_search", "GBIF", "GEO"),
     ("bold_search", "BOLD", "EXTRA"),
     ("hypo_search", "NCBI", "HYPO"),
-    ("worms_higher_taxa", "WoRMS", "GBIF export"),
+    ("worms_higher_taxa", "WoRMS", "One row per sequence table"),
 ]
 
 
@@ -1115,15 +1025,17 @@ def show_exports(curated_df):
         if curated_df is not None:
             st.caption(
                 "Results after curation: one row per sequence and candidate "
-                "species (CSV), or one row per sequence at its assigned rank (GBIF)."
+                "species, or one row per sequence at its assigned rank. The "
+                "second follows Darwin Core and the FAIRe taxa table, ready for "
+                "a GBIF submission."
             )
             export_cols = [c for c in EXPORT_COLS if c in curated_df.columns]
             dl1, dl2 = st.columns(2)
             # Built when clicked, from the results shown now.
             dl1.download_button(
-                label="📥 Full results (CSV)",
+                label="📥 One row per candidate species (CSV)",
                 data=lambda: curated_df[export_cols].to_csv(index=False),
-                file_name=f"{analysis_name}_results.csv",
+                file_name=f"{analysis_name}_candidates.csv",
                 mime="text/csv",
                 width="stretch",
                 key="results_csv",
@@ -1133,9 +1045,13 @@ def show_exports(curated_df):
                 # and the spinner apply; offered for the results it was built
                 # from, which are hashed only once an export exists.
                 shown = None
-                if st.button("📥 GBIF export (CSV)", width="stretch", key="gbif_csv"):
+                if st.button(
+                    "📥 One row per sequence (Darwin Core CSV)",
+                    width="stretch",
+                    key="gbif_csv",
+                ):
                     shown = fingerprint(curated_df[export_cols])
-                    with st.spinner("Building the GBIF export..."):
+                    with st.spinner("Building the table..."):
                         gbif_df = build_gbif_export_df(
                             curated_df, db_path=st.session_state.get("db_path")
                         )
@@ -1153,13 +1069,14 @@ def show_exports(curated_df):
                         st.warning(
                             f"WoRMS could not be reached for {n} higher-level "
                             f"{pluralize(n, 'taxon')} ({name_list(built[2])}): "
-                            "their ID and author are left empty. Click GBIF "
-                            "export again later to complete them."
+                            "their ID and author are left empty. Build the "
+                            "one-row-per-sequence table again later to "
+                            "complete them."
                         )
                     st.download_button(
-                        label="⬇️ Download GBIF export",
+                        label="⬇️ Download the table",
                         data=built[1],
-                        file_name=f"{analysis_name}_gbif_export.csv",
+                        file_name=f"{analysis_name}_assignments.csv",
                         mime="text/csv",
                         width="stretch",
                         key="gbif_download",

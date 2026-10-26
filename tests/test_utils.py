@@ -6,7 +6,6 @@ from trident.core.utils import (
     extract_specific_epithet,
     notify_progress,
     preserve_sequence_order,
-    reorder_taxonomy_columns,
     ensure_columns,
     top_hit_per_group,
     normalize_name,
@@ -141,26 +140,6 @@ def test_extract_epithet_empty():
     assert extract_specific_epithet(None, "Gadus") is None
     assert extract_specific_epithet("Gadus morhua", None) is None
     assert extract_specific_epithet("", "") is None
-
-
-# --- reorder_taxonomy_columns ---
-
-
-def test_reorder_taxonomy_columns():
-    df = pd.DataFrame({"seq_id": ["a"], "genus": ["G"], "family": ["F"], "other": [1]})
-    result = reorder_taxonomy_columns(df)
-    # family should come before genus in taxonomy order
-    cols = list(result.columns)
-    assert cols.index("family") < cols.index("genus")
-    # seq_id stays first, other stays after taxonomy
-    assert cols[0] == "seq_id"
-    assert "other" in cols
-
-
-def test_reorder_no_taxonomy_cols():
-    df = pd.DataFrame({"a": [1], "b": [2]})
-    result = reorder_taxonomy_columns(df)
-    assert list(result.columns) == ["a", "b"]
 
 
 # --- preserve_sequence_order ---

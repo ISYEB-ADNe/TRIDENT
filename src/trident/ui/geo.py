@@ -25,7 +25,8 @@ from trident.ui.ui import (
     show_failed_items_banner,
     lazy_expander,
     styled_or_plain,
-    COL,
+    column_config,
+    RANK_COLUMNS,
     get_recent_param_sets,
     param_preset_selector,
     persist_value,
@@ -319,8 +320,8 @@ def _gbif_search_and_merge(
         gbif_search_params=gbif_search_params,
     )
 
-    if "gbif_extent" in gbif_merge_df.columns:
-        gbif_merge_df["gbif_extent"] = gbif_merge_df["gbif_extent"].astype(str)
+    if "geo_extent" in gbif_merge_df.columns:
+        gbif_merge_df["geo_extent"] = gbif_merge_df["geo_extent"].astype(str)
 
     return (
         gbif_merge_df,
@@ -437,56 +438,24 @@ def gbif_search_workflow():
         ) as is_open:
             if is_open:
                 df = _with_gbif_names(st.session_state.gbif_search_df)
-                cols = df.columns.tolist()
-                priority = [
+                shown = [
                     "seq_id",
                     "scientificName",
                     "gbif_scientificName",
-                    "gbif_taxonURL",
-                    "gbif_extent",
-                    "occurrences",
-                    "genus",
-                    "specificEpithet",
-                    "family",
-                    "order",
-                    "class",
-                    "phylum",
-                    "kingdom",
+                    "geo_url",
+                    "geo_extent",
+                    "geo_occurrences",
+                    *RANK_COLUMNS,
+                    "genusID",
                 ]
-                ordered = priority + [c for c in cols if c not in priority]
-                if df["in_mol"].astype(bool).any():
+                if df["in_mol"].any():
                     st.caption(":green[■] Species also in MOL list")
-                styled_df = styled_or_plain(df, highlight_in_mol)
                 st.dataframe(
-                    styled_df,
+                    styled_or_plain(df, highlight_in_mol),
                     width="stretch",
                     hide_index=True,
-                    column_order=ordered,
-                    column_config={
-                        "seq_id": COL["seq_id"],
-                        "scientificName": COL["scientificName"],
-                        "gbif_scientificName": COL["gbif_scientificName"],
-                        "gbif_taxonURL": COL["gbif_taxonURL"],
-                        "gbif_extent": COL["gbif_extent"],
-                        "gbif_speciesID": None,
-                        "occurrences": COL["occurrences"],
-                        "genus": COL["genus"],
-                        "specificEpithet": COL["specificEpithet"],
-                        "family": COL["family"],
-                        "order": COL["order"],
-                        "class": COL["class"],
-                        "phylum": COL["phylum"],
-                        "kingdom": COL["kingdom"],
-                        "dna_sequence": None,
-                        "in_mol": None,
-                        "mol_top_identity_percentage": None,
-                        "mol_top_query_cover": None,
-                        "taxonURL": None,
-                        "scientificNameAuthorship": None,
-                        "taxonRank": None,
-                        "taxonID": None,
-                        "taxonID_db": None,
-                    },
+                    column_order=shown,
+                    column_config=column_config(shown),
                 )
 
 
@@ -583,7 +552,7 @@ def gbif_filter_job(*, force_rerun, retry_empty=False, min_occurrences, extent):
     st.session_state.geo_summary_df = geo_summary_df
     st.session_state.geo_species = geo_df["scientificName"].unique().tolist()
     st.session_state.geo_and_mol_species = (
-        geo_df.loc[geo_df["in_mol"].astype(bool), "scientificName"].unique().tolist()
+        geo_df.loc[geo_df["in_mol"], "scientificName"].unique().tolist()
     )
 
     reset_state_after("geo_df")
@@ -664,24 +633,32 @@ def render_gbif_metrics():
         help="Species with both a direct NCBI hit (MOL) and geographic validation (GEO).",
     )
     c3.metric(
-        "Sequences with Hits",
+        "Sequences with Species",
         f"{seq_with_hits} / {total_seqs}",
-        help="Sequences that matched at least one species in this area.",
+        help="Sequences with at least one species in this area.",
     )
 
 
 def display_gbif_summary():
     extent_cols = [c for c in st.session_state.geo_summary_df.columns if c != "seq_id"]
+    shown = ["seq_id", *extent_cols]
     st.dataframe(
         st.session_state.geo_summary_df,
         width="stretch",
         hide_index=True,
-        column_order=["seq_id"] + extent_cols,
-        column_config={
-            "seq_id": COL["seq_id"],
-            "global": "🌍 Global Hits",
-            **{c: f"📍 {c}" for c in extent_cols if c != "global"},
-        },
+        column_order=shown,
+        column_config=column_config(
+            shown,
+            **{
+                c: st.column_config.NumberColumn(
+                    "🌍 Global" if c == "global" else f"📍 {c}",
+                    format="%d",
+                    help="Species of the sequence with at least the minimum "
+                    "number of occurrences in this area.",
+                )
+                for c in extent_cols
+            },
+        ),
     )
 
 
@@ -699,9 +676,7 @@ def display_missing_species():
     # A missing species that was a direct MOL hit takes a sequence's best match
     # out of GEO, so list it first with the sequences it was a hit for.
     tax_df = st.session_state.tax_df
-    mol_rows = tax_df[
-        tax_df["scientificName"].isin(missing) & tax_df["in_mol"].astype(bool)
-    ]
+    mol_rows = tax_df[tax_df["scientificName"].isin(missing) & tax_df["in_mol"]]
     mol_seqs = mol_rows.groupby("scientificName")["seq_id"].agg(
         lambda s: ", ".join(dict.fromkeys(s.astype(str)))
     )
@@ -724,10 +699,10 @@ def display_missing_species():
             hide_index=True,
             width="stretch",
             column_order=["scientificName", "seq_id"],
-            column_config={
-                "scientificName": COL["scientificName"],
-                "seq_id": "Sequences (MOL hit)",
-            },
+            column_config=column_config(
+                ["scientificName", "seq_id"],
+                seq_id=st.column_config.TextColumn("Sequences (MOL hit)"),
+            ),
         )
 
 
@@ -749,20 +724,15 @@ def display_gbif_sequence_table(
     has_identity = classification["has_identity"]
 
     col_order = (
-        ["scientificName", "gbif_taxonURL"]
+        ["scientificName", "geo_url"]
         + [c for c in extent_cols if c in df_wide.columns]
-        + (["mol_top_identity_percentage"] if has_identity else [])
+        + (["mol_identity"] if has_identity else [])
     )
 
-    col_config = {
-        "scientificName": COL["scientificName"],
-        "in_mol": None,
-        "mol_top_identity_percentage": COL["mol_top_identity_percentage"]
-        if has_identity
-        else None,
-        "gbif_taxonURL": COL["gbif_taxonURL"],
+    col_config = column_config(
+        col_order,
         **{c: st.column_config.NumberColumn(c, format="%d") for c in extent_cols},
-    }
+    )
 
     def render_styled_table(data_subset):
         df_to_show = data_subset.sort_values("scientificName", ascending=True)
@@ -775,7 +745,7 @@ def display_gbif_sequence_table(
             hide_index=True,
         )
 
-    if df_wide["in_mol"].astype(bool).any():
+    if df_wide["in_mol"].any():
         st.caption(":green[■] Species also in MOL list")
     for bucket in classification["buckets"]:
         kind, ext_col, df = bucket["kind"], bucket["extent_col"], bucket["df"]
@@ -822,8 +792,11 @@ def _geo_sequence_labels():
     )
     local = df[
         in_geo
-        & (df["gbif_extent"].astype(str) == target_extent)
-        & (df["occurrences"] >= min_occ)
+        & (
+            df["geo_extent"].map(get_extent_column_name)
+            == get_extent_column_name(target_extent)
+        )
+        & (df["geo_occurrences"] >= min_occ)
     ]
     local_count = local.groupby("seq_id")["scientificName"].nunique()
 
@@ -874,56 +847,25 @@ def _with_gbif_names(df: pd.DataFrame) -> pd.DataFrame:
 def display_full_geo_list():
     """Display the complete GEO list in a flat table."""
     geo_df = with_same_species(_with_gbif_names(st.session_state.geo_df))
-    cols = geo_df.columns.tolist()
-    priority = [
+    shown = [
         "seq_id",
         "scientificName",
-        "gbif_occurrences",
-        "mol_top_identity_percentage",
+        "geo_occurrences",
+        "mol_identity",
         "gbif_scientificName",
-        "sameSpeciesAs",
-        "gbif_taxonURL",
+        "same_species_as",
+        "geo_url",
         "taxonURL",
-        "genus",
-        "specificEpithet",
-        "family",
-        "order",
-        "class",
-        "phylum",
-        "kingdom",
+        *RANK_COLUMNS,
+        "genusID",
     ]
-    ordered = priority + [c for c in cols if c not in priority]
     st.caption(":green[■] Species also in MOL list")
-    styled_df = styled_or_plain(geo_df, highlight_in_mol)
     st.dataframe(
-        styled_df,
+        styled_or_plain(geo_df, highlight_in_mol),
         width="stretch",
         hide_index=True,
-        column_order=ordered,
-        column_config={
-            "seq_id": COL["seq_id"],
-            "scientificName": COL["scientificName"],
-            "gbif_scientificName": COL["gbif_scientificName"],
-            "sameSpeciesAs": COL["sameSpeciesAs"],
-            "gbif_taxonURL": COL["gbif_taxonURL"],
-            "taxonURL": COL["taxonURL"],
-            "gbif_occurrences": COL["gbif_occurrences"],
-            "genus": COL["genus"],
-            "specificEpithet": COL["specificEpithet"],
-            "family": COL["family"],
-            "order": COL["order"],
-            "class": COL["class"],
-            "phylum": COL["phylum"],
-            "kingdom": COL["kingdom"],
-            "in_mol": None,
-            "mol_top_identity_percentage": COL["mol_top_identity_percentage"],
-            "mol_top_query_cover": None,
-            "dna_sequence": None,
-            "scientificNameAuthorship": None,
-            "taxonRank": None,
-            "taxonID": None,
-            "taxonID_db": None,
-        },
+        column_order=shown,
+        column_config=column_config(shown),
     )
 
 

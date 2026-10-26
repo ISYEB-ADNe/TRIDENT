@@ -27,6 +27,7 @@ from trident.clients.gbif import (
 )
 
 from trident.core.constants import GBIF_MIN_OCCURRENCES
+from trident.pipelines.tax_pipeline import TAX_COLUMNS
 from trident.core.database import save_to_db, FullCache, CustomCache, warn_empty_params
 from trident.core.utils import (
     as_ids,
@@ -35,7 +36,6 @@ from trident.core.utils import (
     pluralize,
     species_for_sequences,
     ensure_columns,
-    reorder_taxonomy_columns,
     preserve_sequence_order,
 )
 
@@ -269,6 +269,18 @@ def run_gbif_search(
 
 ### MERGE PIPELINE ###
 
+# The GBIF search's columns the GEO list takes, and their GEO names: the
+# species' GBIF page, its occurrences and the area they were counted in.
+GEO_COLUMNS = {
+    "taxonURL": "geo_url",
+    "occurrences": "geo_occurrences",
+    "gbif_extent": "geo_extent",
+}
+
+# The columns of the GEO list: the TAX list's, with the species' GBIF page
+# and its occurrences in the filtering area.
+GEO_LIST_COLUMNS = [*TAX_COLUMNS, "geo_url", "geo_occurrences"]
+
 
 def _gbif_merge_params(
     gbif_search_df: pd.DataFrame,
@@ -292,10 +304,13 @@ def _gbif_merge_params(
     table_name="gbif_merge",
     cache=CustomCache(
         prepare_fn=_gbif_merge_params,
-        match_map_dict={"gbif_extent": "gbif_extent"},
+        match_map_dict={"gbif_extent": "geo_extent"},
         fingerprint_on=["gbif_search_df"],
+        # Every extent's rows have the same columns, from this merge.
+        whole_result=True,
     ),
     log_reuse_as="GEO list",
+    bool_columns=("in_mol",),
 )
 @preserve_sequence_order("seq_id", "tax_df")
 def run_gbif_merge(
@@ -345,15 +360,12 @@ def run_gbif_merge(
     # The GEO list keeps TAX's columns and adds GBIF's counts and taxon page
     # only: GBIF's name of each species goes to the name table (gbif_name_rows).
     gbif_counts = gbif_search_df.reindex(
-        columns=["scientificName", "taxonURL", "occurrences", "gbif_extent"]
-    ).rename(columns={"taxonURL": "gbif_taxonURL"})
-    merged_df = tax_df.merge(gbif_counts, on="scientificName", how="left")
-    merged_df = reorder_taxonomy_columns(merged_df)
-
-    # TAX species without GBIF data have no extent, so no cache entry can hold
-    # them. Drop them here, so the result is the same with or without a
-    # database.
-    return merged_df.dropna(subset=["gbif_extent"])
+        columns=["scientificName", *GEO_COLUMNS]
+    ).rename(columns=GEO_COLUMNS)
+    # Only the TAX species with GBIF data: the others have no extent, so no
+    # cache entry could hold them, and joining them first would turn the
+    # counts into decimals.
+    return tax_df.merge(gbif_counts, on="scientificName", how="inner")
 
 
 ### FILTER PIPELINE ###
@@ -369,6 +381,7 @@ def run_gbif_merge(
         inherit_from=["gbif_merge_params"],
     ),
     log_reuse_as="GEO filter",
+    bool_columns=("in_mol",),
 )
 @preserve_sequence_order("seq_id", "gbif_merge_df")
 def run_gbif_filter(
@@ -394,23 +407,24 @@ def run_gbif_filter(
 
     # 1. Validation
     if (
-        "gbif_extent" not in gbif_merge_df.columns
-        or "occurrences" not in gbif_merge_df.columns
+        "geo_extent" not in gbif_merge_df.columns
+        or "geo_occurrences" not in gbif_merge_df.columns
     ):
         raise ValueError(
-            "DataFrame must contain 'gbif_extent' and 'occurrences' columns."
+            "DataFrame must contain 'geo_extent' and 'geo_occurrences' columns."
         )
 
     # 2. Filter rows
-    mask = (gbif_merge_df["gbif_extent"].astype(str) == str(extent)) & (
-        gbif_merge_df["occurrences"] >= min_occurrences
-    )
+    # Compared by name: 250, 250.0 and "250" (as saved) are the same extent.
+    in_extent = gbif_merge_df["geo_extent"].map(
+        get_extent_column_name
+    ) == get_extent_column_name(extent)
+    mask = in_extent & (gbif_merge_df["geo_occurrences"] >= min_occurrences)
 
     filtered_df = gbif_merge_df[mask].copy()
 
     # 3. Cleanup
-    filtered_df = filtered_df.rename(columns={"occurrences": "gbif_occurrences"})
-    filtered_df = filtered_df.drop(columns=["gbif_extent"])
+    filtered_df = filtered_df[GEO_LIST_COLUMNS]
 
     logger.info(
         f"GEO filter: {filtered_df['scientificName'].nunique()} species with at "
@@ -427,6 +441,7 @@ def run_gbif_filter(
 @save_to_db(
     "results_geo",
     cache=FullCache(inherit_from=["gbif_filter_params"]),
+    bool_columns=("in_mol",),
 )
 @preserve_sequence_order("seq_id", "gbif_filter_df")
 def finalize_geo_results(
@@ -471,21 +486,21 @@ def build_geo_summary(
     # 1. Filter and Clean
     df = gbif_merge_df.dropna(subset=["seq_id"]).copy()
 
-    if "gbif_extent" not in df.columns or "occurrences" not in df.columns:
+    if "geo_extent" not in df.columns or "geo_occurrences" not in df.columns:
         logger.warning(
-            "Required columns 'gbif_extent' or 'occurrences' missing from GEO data."
+            "Required columns 'geo_extent' or 'geo_occurrences' missing from GEO data."
         )
         return pd.DataFrame(columns=["seq_id"])
 
-    df["gbif_extent"] = df["gbif_extent"].astype(str)
+    df["geo_extent"] = df["geo_extent"].astype(str)
 
     # 2. Determine Presence
-    df["is_present"] = (df["occurrences"] >= min_occurrences).astype(int)
+    df["is_present"] = (df["geo_occurrences"] >= min_occurrences).astype(int)
 
     # 3. Pivot the Long data to Wide
     summary_pivot = df.pivot_table(
         index="seq_id",
-        columns="gbif_extent",
+        columns="geo_extent",
         values="is_present",
         aggfunc="sum",
         fill_value=0,
@@ -503,7 +518,7 @@ def build_geo_summary(
 
 ### PER-SEQUENCE EXTENT CLASSIFICATION ###
 
-IDENTITY_COL = "mol_top_identity_percentage"
+IDENTITY_COL = "mol_identity"
 
 
 def classify_gbif_extents(
@@ -520,7 +535,7 @@ def classify_gbif_extents(
 
     Args:
         seq_df: Long-form rows for a single seq_id (scientificName, in_mol,
-            gbif_taxonURL, gbif_extent, occurrences, optionally identity).
+            geo_url, geo_extent, geo_occurrences, optionally identity).
         min_occurrences: Records within an extent needed to validate a species.
         extents: Search extents (km floats and/or "global").
         priority_extent: The extent currently driving results (km or "global").
@@ -543,9 +558,9 @@ def classify_gbif_extents(
     # Pivot long -> wide (one row per species, one column per extent)
     df_wide = (
         seq_df.pivot_table(
-            index=["scientificName", "in_mol", "gbif_taxonURL"],
-            columns="gbif_extent",
-            values="occurrences",
+            index=["scientificName", "in_mol", "geo_url"],
+            columns="geo_extent",
+            values="geo_occurrences",
             fill_value=0,
         )
         .reset_index()
@@ -560,7 +575,7 @@ def classify_gbif_extents(
         df_wide = df_wide.merge(identity_map, on="scientificName", how="left")
 
     # Standardize column names (e.g. 500 -> "500 km")
-    non_extent_cols = {"scientificName", "in_mol", "gbif_taxonURL", IDENTITY_COL}
+    non_extent_cols = {"scientificName", "in_mol", "geo_url", IDENTITY_COL}
     df_wide.columns = [
         get_extent_column_name(c) if c not in non_extent_cols else c
         for c in df_wide.columns

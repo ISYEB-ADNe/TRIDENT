@@ -17,9 +17,9 @@ def _long_df(rows):
             {
                 "scientificName": sp,
                 "in_mol": False,
-                "gbif_taxonURL": f"http://gbif/{sp}",
-                "gbif_extent": ext,
-                "occurrences": occ,
+                "geo_url": f"http://gbif/{sp}",
+                "geo_extent": ext,
+                "geo_occurrences": occ,
             }
             for sp, ext, occ in rows
         ]

@@ -45,12 +45,43 @@ def test_full_cache_miss_then_hit(db_path):
 
     df1, params1 = my_step([1, 2, 3], threshold=90, db_path=db_path)
     assert len(df1) == 3
-    assert params1 == {"threshold": 90}
+    assert params1["threshold"] == 90
 
     # Second call: same params → cached
     df2, params2 = my_step([99, 99], threshold=90, db_path=db_path)
     assert len(df2) == 3  # cached result, not the new input
-    assert params2 == {"threshold": 90}
+    assert params2 == params1
+
+
+def test_result_read_back_keeps_its_true_false_columns(db_path):
+    """A step's true/false column comes back from the analysis as booleans,
+    as the live result gives it (SQLite stores 1/0)."""
+
+    @save_to_db(
+        "test_bools", cache=FullCache(local={"t": "t"}), bool_columns=("in_mol",)
+    )
+    def my_step(t=1):
+        return pd.DataFrame({"name": ["A", "B"], "in_mol": [True, False]})
+
+    live, _ = my_step(db_path=db_path)
+    cached, _ = my_step(db_path=db_path)
+    pd.testing.assert_frame_equal(live, cached, check_dtype=True)
+
+
+def test_full_cache_computes_again_for_a_new_results_version(db_path, monkeypatch):
+    """A result saved under an older RESULTS_VERSION is computed again, with
+    the columns the step returns now: one it no longer returns stays out,
+    read live or from the cache."""
+
+    @save_to_db("test_version", cache=FullCache(local={"t": "t"}))
+    def my_step(data, t=1, name="x"):
+        return pd.DataFrame({name: data})
+
+    my_step([1, 2, 3], db_path=db_path)
+    monkeypatch.setattr(database, "RESULTS_VERSION", database.RESULTS_VERSION + 1)
+    live, _ = my_step([7], name="y", db_path=db_path)
+    cached, _ = my_step([8], name="y", db_path=db_path)
+    assert live.to_dict("list") == cached.to_dict("list") == {"y": [7]}
 
 
 def test_full_cache_different_params(db_path):
@@ -139,7 +170,7 @@ def test_full_cache_no_db():
 
     df, params = my_step(t=5)
     assert len(df) == 1
-    assert params == {"t": 5}
+    assert params["t"] == 5
 
 
 def test_full_cache_inherit_from(db_path):

@@ -49,8 +49,8 @@ def test_prepare_constrains_the_search_to_the_mol_list():
     extra_df = pd.DataFrame(
         {
             "seq_id": ["t1", "t1", "t2"],
-            "dna_sequence_extra": ["ACGT", "TTGG", "AAAA"],
-            "seq_id_extra": ["P1", "P2", "P3"],
+            "proxy_sequence": ["ACGT", "TTGG", "AAAA"],
+            "proxy_id": ["P1", "P2", "P3"],
         }
     )
     tax_df = pd.DataFrame(
@@ -110,10 +110,10 @@ def test_merge_maps_proxy_to_target_under_its_own_query():
         {
             "seq_id": ["t1", "t2"],
             "scientificName": ["Gadus morhua", "Gadus chalcogrammus"],
-            "seq_id_extra": ["P1", "P1"],
-            "dna_sequence_extra": ["ACGT", "ACGT"],
+            "proxy_id": ["P1", "P1"],
+            "proxy_sequence": ["ACGT", "ACGT"],
         }
-    )
+    ).reindex(columns=hypo_pipeline.EXTRA_COLUMNS)
     queries_df = pd.DataFrame(
         {
             "seq_id": ["t1", "t2"],
@@ -137,13 +137,13 @@ def test_merge_maps_proxy_to_target_under_its_own_query():
         }
     )
     out = _merge(hypo_search_df, extra_df, queries_df)
-    assert list(zip(out["seq_id"], out["scientificName_hit"])) == [
+    assert list(zip(out["seq_id"], out["proxy_hit_species"])) == [
         ("t1", "Gadus macrocephalus"),
         ("t2", "Gadus ogac"),
     ]
     row = out.iloc[0]
     assert row["scientificName"] == "Gadus morhua"  # target species preserved
-    assert row["identity_percentage"] == 92.0
+    assert row["proxy_identity"] == 92.0
     assert not any(c.endswith("_blast") for c in out.columns)  # dupes dropped
     assert "entrez_query" not in out.columns
 
@@ -156,8 +156,8 @@ def test_filter_keeps_only_rows_passing_both_thresholds():
         {
             "seq_id": ["t1", "t1", "t1"],
             "scientificName": ["A", "B", "C"],
-            "query_cover": [60.0, 40.0, 60.0],  # B fails query_cover
-            "identity_percentage": [96.0, 99.0, 90.0],  # C fails identity
+            "proxy_query_cover": [60.0, 40.0, 60.0],  # B fails query_cover
+            "proxy_identity": [96.0, 99.0, 90.0],  # C fails identity
         }
     )
     out = _filter(df, query_cover=50.0, identity=95.0)
@@ -173,10 +173,10 @@ def test_finalize_keeps_best_proxy_and_attaches_check():
         {
             "seq_id": ["t1", "t1"],
             "scientificName": ["Gadus morhua", "Gadus morhua"],
-            "identity_percentage": [95.0, 92.0],
-            "query_cover": [100.0, 100.0],
+            "proxy_identity": [95.0, 92.0],
+            "proxy_query_cover": [100.0, 100.0],
         }
-    )
+    ).reindex(columns=hypo_pipeline.HYPO_HIT_COLUMNS)
     # The per-species NCBI check found the marker at 90% over the whole
     # sequence, and at 100% over a short part of it.
     hypo_check_df = pd.DataFrame(
@@ -192,9 +192,9 @@ def test_finalize_keeps_best_proxy_and_attaches_check():
     out = _finalize(hypo_filter_df, hypo_check_df)
     assert len(out) == 1
     row = out.iloc[0]
-    assert row["identity_percentage"] == 95.0  # best proxy
+    assert row["proxy_identity"] == 95.0  # best proxy
     # The best check hit is the one covering the MOL query cover.
-    assert row["ncbi_top_identity_percentage"] == 90.0
+    assert row["hypo_check_identity"] == 90.0
 
 
 def test_finalize_check_absent_leaves_ncbi_stats_na():
@@ -202,10 +202,10 @@ def test_finalize_check_absent_leaves_ncbi_stats_na():
         {
             "seq_id": ["t1"],
             "scientificName": ["Gadus morhua"],
-            "identity_percentage": [95.0],
-            "query_cover": [100.0],
+            "proxy_identity": [95.0],
+            "proxy_query_cover": [100.0],
         }
-    )
+    ).reindex(columns=hypo_pipeline.HYPO_HIT_COLUMNS)
     # Check ran but found nothing (hit_found False) -> excluded from check_hits.
     hypo_check_df = pd.DataFrame(
         {
@@ -218,7 +218,7 @@ def test_finalize_check_absent_leaves_ncbi_stats_na():
         }
     )
     out = _finalize(hypo_filter_df, hypo_check_df)
-    assert pd.isna(out.iloc[0]["ncbi_top_identity_percentage"])
+    assert pd.isna(out.iloc[0]["hypo_check_identity"])
 
 
 def test_check_hits_stay_numeric_after_a_first_check_without_hit(tmp_path, monkeypatch):
@@ -267,17 +267,17 @@ def test_finalize_after_a_check_that_found_nothing(monkeypatch):
             "seq_id": ["t1"],
             "scientificName": ["Gadus morhua"],
             "dna_sequence": ["ACGT"],
-            "identity_percentage": [95.0],
-            "query_cover": [100.0],
+            "proxy_identity": [95.0],
+            "proxy_query_cover": [100.0],
         }
-    )
+    ).reindex(columns=hypo_pipeline.HYPO_HIT_COLUMNS)
 
     hypo_check_df = inspect.unwrap(run_hypo_check)(hypo_filter_df)
     out = _finalize(hypo_filter_df, hypo_check_df)
 
     assert set(hypo_pipeline.HYPO_CHECK_COLUMNS) <= set(hypo_check_df.columns)
     assert list(out["scientificName"]) == ["Gadus morhua"]
-    assert pd.isna(out.iloc[0]["ncbi_top_identity_percentage"])
+    assert pd.isna(out.iloc[0]["hypo_check_identity"])
 
 
 # --- run_hypo_search: failure handling ---

@@ -15,7 +15,7 @@ import trident.pipelines as pipe
 from trident.core.config import is_streamlit_cloud, results_dir
 from trident.core.database import check_schema_version, get_connection
 from trident.core.utils import pluralize
-from trident.ui.ui import prefill_settings, reset_for_new_analysis, COL
+from trident.ui.ui import column_config, prefill_settings, reset_for_new_analysis
 
 FASTA_EXTENSIONS = {"fasta", "fa", "txt", "fas"}
 DB_EXTENSIONS = {"db", "sqlite", "sqlite3"}
@@ -46,6 +46,10 @@ def _db_path(base_name: str) -> str:
     return str(results_dir() / f"{base_name}.db")
 
 
+# The columns of the sequences table.
+SEQUENCE_COLS = ["seq_id", "seq_length", "dna_sequence"]
+
+
 def display_fasta_sequence_table():
     """Renders the loaded sequences in an expandable table."""
     df = st.session_state.sequences_df
@@ -56,11 +60,8 @@ def display_fasta_sequence_table():
             df,
             width="stretch",
             hide_index=True,
-            column_config={
-                "seq_id": COL["seq_id"],
-                "dna_sequence": COL["dna_sequence"],
-                "seq_length": COL["seq_length"],
-            },
+            column_order=SEQUENCE_COLS,
+            column_config=column_config(SEQUENCE_COLS),
         )
 
 
@@ -260,7 +261,9 @@ def _auto_restore_from_db():
     with st.spinner("Restoring sequences from database...", show_time=True):
         try:
             with get_connection(db_path) as conn:
-                seqs_df = pd.read_sql("SELECT * FROM sequences", conn)
+                seqs_df = pd.read_sql(
+                    "SELECT seq_id, seq_length, dna_sequence FROM sequences", conn
+                )
 
             if not seqs_df.empty:
                 st.session_state.sequences_df = seqs_df

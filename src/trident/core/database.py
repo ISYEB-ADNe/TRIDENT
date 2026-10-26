@@ -209,7 +209,9 @@ def load_provenance(db_path: str | Path, table_name: str | None = None) -> pd.Da
 # columns, and any consumer reading a column would fail; nor do the rows of an
 # item saved alone carry the columns only other items fill (a HYPO check
 # without a hit has no hit columns). Each step records every column its
-# function has returned, and a result read back is given those columns.
+# function has returned, and a result read back is given those columns. A step
+# whose call makes its whole result (see CacheStrategy.whole_result) records
+# only that call's columns, so a column it no longer returns is left out.
 # ---------------------------------------------------------------------------
 
 _COLUMNS_TABLE = "step_columns"
@@ -225,11 +227,17 @@ def _load_step_columns(conn: sqlite3.Connection, step: str) -> list[str]:
     return json.loads(row[0]) if row else []
 
 
-def _record_step_columns(conn: sqlite3.Connection, step: str, df: pd.DataFrame) -> None:
-    """Record the columns of *df* not yet known for *step*."""
+def _record_step_columns(
+    conn: sqlite3.Connection, step: str, df: pd.DataFrame, replace: bool = False
+) -> None:
+    """Record the columns of *df* not yet known for *step*, or, with
+    *replace*, the columns of *df* only."""
     known = _load_step_columns(conn, step)
-    new = [col for col in df.columns if col not in known]
-    if not new:
+    if replace:
+        columns = list(df.columns)
+    else:
+        columns = known + [col for col in df.columns if col not in known]
+    if not columns or columns == known:
         return
     conn.execute(
         f"CREATE TABLE IF NOT EXISTS {_COLUMNS_TABLE} "
@@ -237,7 +245,7 @@ def _record_step_columns(conn: sqlite3.Connection, step: str, df: pd.DataFrame) 
     )
     conn.execute(
         f"INSERT OR REPLACE INTO {_COLUMNS_TABLE} (step, columns) VALUES (?, ?)",
-        (step, json.dumps(known + new)),
+        (step, json.dumps(columns)),
     )
 
 
@@ -616,6 +624,14 @@ def _result_sink(
     return result_sink
 
 
+def _as_booleans(df: pd.DataFrame, columns: tuple[str, ...]) -> None:
+    """Give *columns* of *df* as booleans, in place: SQLite gives them back as
+    1/0, and an empty result as untyped columns."""
+    for col in columns:
+        if col in df.columns:
+            df[col] = df[col].eq(True)
+
+
 def warn_empty_params(params: dict, name: str) -> None:
     """Log when an upstream params dict is empty (weakens cache key). At DEBUG:
     it is for developers, and an empty upstream result also gives one."""
@@ -653,6 +669,11 @@ class CacheStrategy(ABC):
     # _empty_run_ids); None: any row does.
     result_col: str | None = None
 
+    # Whether one call of the step makes its whole result (a step that only
+    # processes previous results): its columns are then those of its last
+    # call, not every column it ever returned (see _record_step_columns).
+    whole_result: bool = False
+
     @property
     def match_map(self) -> dict[str, str] | None:
         """Map from cache-dict keys to output DataFrame columns.
@@ -663,12 +684,22 @@ class CacheStrategy(ABC):
         return None
 
 
+# Version of the results of the steps cached whole (FullCache). Their key is
+# made of settings and data, not code: bump it when a step's output columns
+# change, so each step computes its result again (locally) instead of
+# returning one saved with the old columns. It is part of the step's params,
+# so the later steps' keys follow.
+RESULTS_VERSION = 1
+
+
 class FullCache(CacheStrategy):
     """Whole-step caching — one entry keyed by merged upstream + local params.
 
     Use for filter / merge / finalize steps where the result is either
     fully cached or fully recomputed.
     """
+
+    whole_result = True
 
     def __init__(
         self,
@@ -690,6 +721,7 @@ class FullCache(CacheStrategy):
             params[cache_key] = kwargs[kwarg_name]
         # Re-run when the upstream data changed, not only when params changed.
         params |= _fingerprint_params(kwargs, self.fingerprint_on)
+        params["_results_version"] = RESULTS_VERSION
         return [params], params
 
 
@@ -765,7 +797,9 @@ class CustomCache(CacheStrategy):
         rebuild_fn: Callable | None = None,
         match_map_dict: dict[str, str] | None = None,
         fingerprint_on: list[str] | None = None,
+        whole_result: bool = False,
     ):
+        self.whole_result = whole_result
         self._prepare_fn = prepare_fn
         self._rebuild_fn = rebuild_fn
         self._match_map = match_map_dict
@@ -820,6 +854,7 @@ def save_to_db(
     cache: CacheStrategy,
     log_as: tuple[str, str] | None = None,
     log_reuse_as: str | None = None,
+    bool_columns: tuple[str, ...] = (),
 ) -> Callable:
     """Decorator that adds SQLite caching to a pipeline function.
 
@@ -866,6 +901,10 @@ def save_to_db(
     Without it (the steps that only process a previous step's results), that
     line is logged at DEBUG.
 
+    *bool_columns* are the step's true/false columns: SQLite stores them as
+    1/0, and a result read back gives them as booleans again, as a live one
+    does.
+
     *log_reuse_as* is the name a step that only processes previous results
     gives its summary line, e.g. ``"GEO filter"``: when its whole result is
     reused, the step does not run, so it logs that instead of its summary.
@@ -903,8 +942,10 @@ def save_to_db(
                 if sink is None and "failure_sink" in sig.parameters:
                     sink = kwargs["failure_sink"] = []
                 result = func(*args, **kwargs)
-                if sink is not None and isinstance(result, pd.DataFrame):
-                    result.attrs["failed_items"] = list(sink)
+                if isinstance(result, pd.DataFrame):
+                    _as_booleans(result, bool_columns)
+                    if sink is not None:
+                        result.attrs["failed_items"] = list(sink)
                 return result, params
 
             with get_connection(db_path) as conn:
@@ -987,7 +1028,9 @@ def save_to_db(
                             f"got {type(new_df)}"
                         )
                     if new_df is not None:
-                        _record_step_columns(conn, table_name, new_df)
+                        _record_step_columns(
+                            conn, table_name, new_df, replace=cache.whole_result
+                        )
                     failed = _item_filter(failure_sink, match_map)
                     rest = [
                         item
@@ -1034,9 +1077,11 @@ def save_to_db(
                 # result would differ.
                 columns = _load_step_columns(conn, table_name)
                 ensure_columns(result_df, columns)
-                result_df = result_df[
-                    columns + [col for col in result_df.columns if col not in columns]
-                ]
+                # Columns the table keeps from older results stay out of a
+                # whole result.
+                extra = [] if cache.whole_result and columns else result_df.columns
+                result_df = result_df[columns + [c for c in extra if c not in columns]]
+                _as_booleans(result_df, bool_columns)
                 result_df.attrs["failed_items"] = list(failure_sink)
                 return result_df, params
 

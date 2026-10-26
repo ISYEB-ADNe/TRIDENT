@@ -366,19 +366,14 @@ def get_children_by_aphia_id(
 
 
 def clean_authorships(authorships: pd.Series) -> pd.Series:
-    """Remove parentheses and extra whitespace from WoRMS authorship strings.
+    """WoRMS authorship strings with their whitespace collapsed.
 
-    Args:
-        authorships: Series of raw authorship strings.
-
-    Returns:
-        Series with parentheses removed and whitespace normalised.
+    Parentheses are kept: under the zoological and botanical codes they say
+    the name was moved from the one it was described under ("(Linnaeus, 1758)" for
+    Odobenus rosmarus, described as Trichechus rosmarus), and Darwin Core's
+    scientificNameAuthorship keeps them.
     """
-    return (
-        authorships.str.replace(r"[()]", "", regex=True)
-        .str.replace(r"\s+", " ", regex=True)
-        .str.strip()
-    )
+    return authorships.str.replace(r"\s+", " ", regex=True).str.strip()
 
 
 # Output columns of the accepted-species taxonomy, also present when no species

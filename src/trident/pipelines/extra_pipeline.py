@@ -22,7 +22,6 @@ from trident.core.utils import (
     name_list,
     pluralize,
     species_for_sequences,
-    reorder_taxonomy_columns,
     preserve_sequence_order,
     notify_progress,
     normalize_name,
@@ -32,6 +31,7 @@ from trident.core.database import save_to_db, PartialCache, FullCache, CustomCac
 from trident.core.sequence_selection import select_longest_sequences
 
 from trident.clients.bold import get_records_from_species_list, with_sequences
+from trident.clients.worms import WORMS_TAXON_COLUMNS
 from trident.pipelines.names import found_by_blast, other_names as names_besides
 
 
@@ -57,7 +57,7 @@ def needs_proxy(
     """
     needed = ~found_by_blast(geo_df, ncbi_search_df, name_table)
     if "in_mol" in geo_df.columns:
-        needed &= ~geo_df["in_mol"].astype(bool)
+        needed &= ~geo_df["in_mol"]
     return needed
 
 
@@ -285,6 +285,25 @@ def run_bold_filter(
 
 ### BOLD MERGE ###
 
+# The proxy's columns, as the BOLD search names them, and as EXTRA and HYPO
+# name them: in the other steps seq_id and dna_sequence are the (M)OTU/ASV's.
+PROXY_COLUMNS = {
+    "seq_id": "proxy_id",
+    "dna_sequence": "proxy_sequence",
+    "seq_url": "proxy_url",
+}
+
+# The GEO list's columns the EXTRA list keeps: the candidate and its TAX
+# taxonomy.
+GEO_KEPT_COLUMNS = [
+    "seq_id",
+    "dna_sequence",
+    *(col for col in WORMS_TAXON_COLUMNS if col != "genusID"),
+]
+# The columns of the EXTRA list: each candidate that needs a proxy, with one
+# of its BOLD sequences.
+EXTRA_COLUMNS = [*GEO_KEPT_COLUMNS, *PROXY_COLUMNS.values()]
+
 
 @save_to_db(
     table_name="bold_merge",
@@ -307,7 +326,7 @@ def run_bold_merge(
 
     Args:
         bold_filter_df: DataFrame with deduplicated BOLD sequences
-            including 'scientificName', 'seq_id', 'dna_sequence'.
+            including 'scientificName' and PROXY_COLUMNS.
         geo_df: GEO DataFrame with 'scientificName', 'seq_id',
             'dna_sequence', and taxonomy columns.
         ncbi_search_df: NCBI BLAST search results, for the pairs that need a
@@ -317,46 +336,34 @@ def run_bold_merge(
         geo_params: Parameters from finalize_geo_results (for caching).
 
     Returns:
-        Merged DataFrame with GEO sequences joined to matching BOLD sequences.
-        Only rows with BOLD matches are kept, and only for the pairs that need
-        a proxy; taxonomy columns come from TAX.
+        Merged DataFrame with GEO sequences joined to matching BOLD sequences
+        (proxy_id, proxy_sequence, proxy_url). Only rows with BOLD
+        matches are kept, and only for the pairs that need a proxy; taxonomy
+        columns come from TAX.
     """
     if bold_filter_params is None:
         bold_filter_params = {}
     if geo_params is None:
         geo_params = {}
 
-    # Select only needed GEO columns
-    geo_cols = [
-        "seq_id",
-        "dna_sequence",
-        "kingdom",
-        "phylum",
-        "class",
-        "order",
-        "family",
-        "genus",
-        "specificEpithet",
-        "scientificName",
-        "scientificNameAuthorship",
-        "taxonRank",
-        "taxonID",
-        "taxonID_db",
-        "taxonURL",
-    ]
-    missing = [c for c in geo_cols if c not in geo_df.columns]
+    missing = [c for c in GEO_KEPT_COLUMNS if c not in geo_df.columns]
     if missing:
         raise KeyError(f"Missing columns in geo_df: {missing}")
 
     geo_df = geo_df[needs_proxy(geo_df, ncbi_search_df, name_table)]
 
-    # Merge GEO (left) with filtered BOLD on a normalized name key (case /
-    # whitespace insensitive) so spelling differences do not drop species.
-    geo_left = geo_df[geo_cols].assign(
+    # Join GEO and the filtered BOLD sequences on a normalized name key (case
+    # / whitespace insensitive) so spelling differences do not drop species.
+    # Of BOLD, only the proxy record joins, under its EXTRA names: the
+    # taxonomy comes from TAX.
+    geo_left = geo_df[GEO_KEPT_COLUMNS].assign(
         _join_key=geo_df["scientificName"].map(normalize_name)
     )
-    bold_right = bold_filter_df.assign(
-        _join_key=bold_filter_df["scientificName"].map(normalize_name)
+    bold_right = (
+        bold_filter_df[["scientificName", *PROXY_COLUMNS]]
+        .rename(columns=PROXY_COLUMNS)
+        .assign(_join_key=lambda df: df["scientificName"].map(normalize_name))
+        .drop(columns="scientificName")
     )
     bold_keys = set(bold_right["_join_key"].dropna())
     unmatched = sorted(
@@ -370,27 +377,11 @@ def run_bold_merge(
             f"without BOLD sequences ({name_list(unmatched)})"
         )
 
+    # Only the pairs with a BOLD sequence; many GEO rows and many BOLD
+    # records per species.
     merged_df = geo_left.merge(
-        bold_right,
-        on="_join_key",
-        how="left",
-        suffixes=("", "_bold"),
-        validate="m:m",  # many GEO per species, many BOLD per species allowed
+        bold_right, on="_join_key", how="inner", validate="m:m"
     ).drop(columns="_join_key")
-
-    # Keep only rows where a BOLD sequence was found
-    merged_df = merged_df.dropna(subset=["seq_id_bold"]).reset_index(drop=True)
-
-    # Standardize taxonomy column order
-    merged_df = reorder_taxonomy_columns(merged_df)
-
-    # Drop redundant columns
-    cols_to_drop = [
-        col
-        for col in merged_df.columns
-        if col.endswith("_bold") and col not in ["seq_id_bold", "dna_sequence_bold"]
-    ]
-    merged_df = merged_df.drop(columns=cols_to_drop)
     result_df = merged_df.drop_duplicates(keep="first").reset_index(drop=True)
 
     logger.debug(f"Completed BOLD merge: {len(result_df)} rows")
@@ -420,13 +411,8 @@ def finalize_extra_results(
     if bold_merge_params is None:
         bold_merge_params = {}
 
-    extra_df = bold_merge_df.rename(
-        columns={
-            "seq_id_bold": "seq_id_extra",
-            "dna_sequence_bold": "dna_sequence_extra",
-        }
-    )
-    n_bold = extra_df["seq_id_extra"].nunique() if "seq_id_extra" in extra_df else 0
+    extra_df = bold_merge_df.copy()
+    n_bold = extra_df["proxy_id"].nunique()
     logger.success(
         f"EXTRA list: {species_for_sequences(extra_df)} "
         f"({n_bold} BOLD {pluralize(n_bold, 'sequence')})"
@@ -457,13 +443,14 @@ def build_extra_summary(
         name_table: See build_name_table.
 
     Returns:
-        DataFrame with columns: seq_id, scientificName, total_records.
+        DataFrame with columns: seq_id, scientificName, n_bold_sequences (the
+        pair's BOLD sequences kept by the filter).
     """
     # Records per (seq_id, scientificName) pair from EXTRA results
     extra_stats = (
         extra_df.groupby(["seq_id", "scientificName"], observed=False)
         .size()
-        .reset_index(name="total_records")
+        .reset_index(name="n_bold_sequences")
     )
 
     # Full skeleton of queried (seq_id, species) pairs
@@ -473,7 +460,7 @@ def build_extra_summary(
 
     # Left-merge: 0 records for species not found in BOLD
     summary = all_pairs.merge(extra_stats, on=["seq_id", "scientificName"], how="left")
-    summary["total_records"] = summary["total_records"].fillna(0).astype(int)
+    summary["n_bold_sequences"] = summary["n_bold_sequences"].fillna(0).astype(int)
 
     return summary
 
@@ -483,19 +470,19 @@ def build_extra_seq_summary(pair_summary: pd.DataFrame) -> pd.DataFrame:
 
     Args:
         pair_summary: Output of build_extra_summary (seq_id, scientificName,
-            total_records).
+            n_bold_sequences).
 
     Returns:
-        DataFrame with columns: seq_id, total_records, species_found,
-        species_missing.
+        DataFrame with columns: seq_id, n_bold_sequences, n_species_queried,
+        n_species_found, n_species_missing.
     """
     return (
         pair_summary.groupby("seq_id", observed=False)
         .agg(
-            total_records=("total_records", "sum"),
-            species_queried=("total_records", "size"),
-            species_found=("total_records", lambda x: (x > 0).sum()),
-            species_missing=("total_records", lambda x: (x == 0).sum()),
+            n_bold_sequences=("n_bold_sequences", "sum"),
+            n_species_queried=("n_bold_sequences", "size"),
+            n_species_found=("n_bold_sequences", lambda x: (x > 0).sum()),
+            n_species_missing=("n_bold_sequences", lambda x: (x == 0).sum()),
         )
         .reset_index()
     )

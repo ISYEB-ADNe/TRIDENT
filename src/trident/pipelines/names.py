@@ -38,7 +38,7 @@ from trident.core.utils import (
 
 NAME_TABLE_COLUMNS = [
     "species",
-    "aphia_id",
+    "species_id",
     "name",
     "source",
     "source_id",
@@ -71,7 +71,7 @@ def build_name_table(
     Returns:
         DataFrame with NAME_TABLE_COLUMNS, source "ncbi", name_key and
         species_key the name and species as join keys (normalize_name). A name
-        WoRMS did not find is its own species, without aphia_id or matched_by.
+        WoRMS did not find is its own species, without species_id or matched_by.
     """
     if resolution_df is None or resolution_df.empty:
         return pd.DataFrame(columns=NAME_TABLE_COLUMNS)
@@ -92,7 +92,7 @@ def build_name_table(
     return pd.DataFrame(
         {
             "species": species.astype(str),
-            "aphia_id": as_ids(resolved["acceptedNameUsageID"]),
+            "species_id": as_ids(resolved["acceptedNameUsageID"]),
             "name": names.astype(str),
             "source": "ncbi",
             "source_id": as_ids(names.map(ncbi_taxids or {})),
@@ -138,7 +138,7 @@ def gbif_name_rows(gbif_search_df: pd.DataFrame) -> pd.DataFrame:
         "gbif",
         name_col="gbif_scientificName",
         matched_by_col="gbif_matched_by",
-        aphia_ids=as_ids(matched["aphia_id"]),
+        species_ids=as_ids(matched["aphia_id"]),
         notes=matched["gbif_note"],
         source_ids=matched["gbif_speciesID"]
         .astype("string")
@@ -178,7 +178,7 @@ def _source_rows(
     source: str,
     name_col: str,
     matched_by_col: str,
-    aphia_ids: pd.Series | None = None,
+    species_ids: pd.Series | None = None,
     notes: pd.Series | None = None,
     source_ids: pd.Series | None = None,
 ) -> pd.DataFrame:
@@ -187,14 +187,14 @@ def _source_rows(
     taxonID."""
     species = df["scientificName"].astype(str)
     names = df[name_col].astype(str)
-    if aphia_ids is None:
-        aphia_ids = pd.Series(pd.NA, index=df.index, dtype="Int64")
+    if species_ids is None:
+        species_ids = pd.Series(pd.NA, index=df.index, dtype="Int64")
     if notes is None:
         notes = pd.Series(pd.NA, index=df.index)
     return pd.DataFrame(
         {
             "species": species,
-            "aphia_id": aphia_ids,
+            "species_id": species_ids,
             "name": names,
             "source": source,
             "source_id": (df["taxonID"] if source_ids is None else source_ids).astype(
@@ -421,7 +421,7 @@ def ncbi_names(
     )
 
 
-SAME_SPECIES_COLUMNS = ["scientificName", "sameSpeciesAs", "group"]
+SAME_SPECIES_COLUMNS = ["scientificName", "same_species_as", "group"]
 
 
 def same_species_groups(
@@ -445,7 +445,7 @@ def same_species_groups(
 
     Returns:
         One row per linked species, sorted by group: scientificName,
-        sameSpeciesAs (the species a source links it to, each with its
+        same_species_as (the species a source links it to, each with its
         sources, e.g. "Larus saundersi (GBIF)"), group (a number). Empty when
         no species is linked.
     """

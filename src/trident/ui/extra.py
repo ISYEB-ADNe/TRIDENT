@@ -27,6 +27,8 @@ from trident.ui.ui import (
     show_filter_success,
     lazy_expander,
     COL,
+    column_config,
+    RANK_COLUMNS,
     get_recent_param_sets,
     param_preset_selector,
     persist_value,
@@ -186,40 +188,24 @@ def bold_search_workflow():
         ) as is_open:
             if is_open:
                 df = _with_bold_names(st.session_state.bold_search_df)
+                shown = [
+                    "scientificName",
+                    "bold_scientificName",
+                    "seq_url",
+                    *RANK_COLUMNS,
+                    "dna_sequence",
+                ]
                 st.dataframe(
                     df,
                     width="stretch",
                     hide_index=True,
-                    column_order=[
-                        "scientificName",
-                        "bold_scientificName",
-                        "seq_url",
-                        "genus",
-                        "specificEpithet",
-                        "family",
-                        "order",
-                        "class",
-                        "phylum",
-                        "kingdom",
-                        "dna_sequence",
-                    ],
-                    column_config={
-                        "seq_id": None,
-                        "scientificName": COL["scientificName"],
-                        "bold_scientificName": COL["bold_scientificName"],
-                        "seq_url": COL["bold_seq_url"],
-                        "genus": COL["genus"],
-                        "specificEpithet": COL["specificEpithet"],
-                        "family": COL["family"],
-                        "order": COL["order"],
-                        "class": COL["class"],
-                        "phylum": COL["phylum"],
-                        "kingdom": COL["kingdom"],
-                        "dna_sequence": COL["bold_dna_sequence"],
-                        "taxonRank": None,
-                        "taxonID": None,
-                        "taxonID_db": None,
-                    },
+                    column_order=shown,
+                    # The search's own names for the record's link and sequence.
+                    column_config=column_config(
+                        shown,
+                        seq_url=COL["proxy_url"],
+                        dna_sequence=COL["proxy_sequence"],
+                    ),
                 )
 
 
@@ -288,16 +274,13 @@ def show_why_no_sequence(names: list[str]) -> None:
             "GenBank sequences, already in NCBI; as proxies they would only "
             "confirm themselves in HYPO, so they are left out."
         )
+        shown = ["scientificName", "bold_scientificName", "bold_outcome", "bold_url"]
         st.dataframe(
             table,
             hide_index=True,
             width="stretch",
-            column_config={
-                "scientificName": COL["scientificName"],
-                "bold_scientificName": COL["bold_scientificName"],
-                "bold_outcome": "Why",
-                "bold_url": COL["bold_seq_url"],
-            },
+            column_order=shown,
+            column_config=column_config(shown),
         )
 
 
@@ -535,47 +518,13 @@ def display_bold_input_summary():
             "Species from the GEO list without a direct NCBI hit — to be searched in BOLD."
         )
 
-        priority = [
-            "seq_id",
-            "scientificName",
-            "taxonURL",
-            "genus",
-            "specificEpithet",
-            "family",
-            "order",
-            "class",
-            "phylum",
-            "kingdom",
-        ]
-        cols = non_mol_df.columns.tolist()
-        ordered = priority + [c for c in cols if c not in priority]
+        shown = ["seq_id", "scientificName", "taxonURL", *RANK_COLUMNS, "genusID"]
         st.dataframe(
             non_mol_df,
             hide_index=True,
             width="stretch",
-            column_order=ordered,
-            column_config={
-                "seq_id": COL["seq_id"],
-                "scientificName": COL["scientificName"],
-                "taxonURL": COL["taxonURL"],
-                "genus": COL["genus"],
-                "specificEpithet": COL["specificEpithet"],
-                "family": COL["family"],
-                "order": COL["order"],
-                "class": COL["class"],
-                "phylum": COL["phylum"],
-                "kingdom": COL["kingdom"],
-                "in_mol": None,
-                "mol_top_identity_percentage": None,
-                "mol_top_query_cover": None,
-                "gbif_occurrences": None,
-                "gbif_taxonURL": None,
-                "dna_sequence": None,
-                "scientificNameAuthorship": None,
-                "taxonRank": None,
-                "taxonID": None,
-                "taxonID_db": None,
-            },
+            column_order=shown,
+            column_config=column_config(shown),
         )
 
 
@@ -587,9 +536,9 @@ def render_bold_metrics():
 
     c1, c2, c3 = st.columns(3)
     c1.metric(
-        "Records Retrieved",
+        "BOLD Sequences Kept",
         f"{len(bold_filter_df):,}",
-        help="Number of sequences retrieved from BOLD.",
+        help="BOLD sequences kept by the filter, as proxies.",
     )
     c2.metric(
         "Species Found",
@@ -612,28 +561,28 @@ def display_extra_summary():
     tab_seq, tab_species = st.tabs(["per (M)OTU/ASV", "per species"])
     with tab_seq:
         seq_summary = pipe.build_extra_seq_summary(st.session_state.extra_summary_df)
+        shown = [
+            "seq_id",
+            "n_bold_sequences",
+            "n_species_queried",
+            "n_species_found",
+            "n_species_missing",
+        ]
         st.dataframe(
             seq_summary,
             width="stretch",
             hide_index=True,
-            column_config={
-                "seq_id": COL["seq_id"],
-                "total_records": COL["total_records"],
-                "species_queried": COL["species_queried"],
-                "species_found": COL["species_found"],
-                "species_missing": COL["species_missing"],
-            },
+            column_order=shown,
+            column_config=column_config(shown),
         )
     with tab_species:
+        shown = ["seq_id", "scientificName", "n_bold_sequences"]
         st.dataframe(
             st.session_state.extra_summary_df,
             width="stretch",
             hide_index=True,
-            column_config={
-                "seq_id": COL["seq_id"],
-                "scientificName": COL["scientificName"],
-                "total_records": COL["total_records"],
-            },
+            column_order=shown,
+            column_config=column_config(shown),
         )
 
 
@@ -652,9 +601,9 @@ def display_bold_sequence_metrics(seq_df, selected_seq):
 
     c1, c2, c3 = st.columns(3)
     c1.metric(
-        "Records Retrieved",
+        "BOLD Sequences Kept",
         len(seq_df),
-        help="Number of sequences retrieved from BOLD.",
+        help="BOLD sequences kept as proxies for this sequence.",
     )
     c2.metric(
         "Species Found",
@@ -671,19 +620,14 @@ def display_bold_sequence_metrics(seq_df, selected_seq):
 
 
 def display_bold_sequence_table(seq_df):
-    display_df = seq_df[["scientificName", "dna_sequence_extra", "seq_url"]].copy()
-    display_df["seq_length"] = display_df["dna_sequence_extra"].apply(len)
+    display_df = seq_df.assign(seq_length=seq_df["proxy_sequence"].str.len())
+    shown = ["scientificName", "proxy_url", "seq_length", "proxy_sequence"]
     st.dataframe(
         display_df,
         width="stretch",
         hide_index=True,
-        column_order=["scientificName", "seq_url", "seq_length", "dna_sequence_extra"],
-        column_config={
-            "scientificName": COL["scientificName"],
-            "seq_url": COL["bold_seq_url"],
-            "seq_length": st.column_config.NumberColumn("Sequence Length", format="%d"),
-            "dna_sequence_extra": COL["bold_dna_sequence"],
-        },
+        column_order=shown,
+        column_config=column_config(shown),
     )
 
 
@@ -707,14 +651,13 @@ def display_bold_sequence():
     with st.expander(
         f"Species breakdown ({len(seq_species)} species queried)", expanded=False
     ):
+        shown = ["scientificName", "n_bold_sequences"]
         st.dataframe(
             seq_species,
             width="stretch",
             hide_index=True,
-            column_config={
-                "scientificName": COL["scientificName"],
-                "total_records": COL["total_records"],
-            },
+            column_order=shown,
+            column_config=column_config(shown),
         )
 
     display_bold_sequence_table(seq_df)
@@ -742,45 +685,21 @@ def display_bold_results():
             key="extra_full_list",
         ) as is_open:
             if is_open:
+                shown = [
+                    "seq_id",
+                    "scientificName",
+                    "taxonURL",
+                    "proxy_url",
+                    *RANK_COLUMNS,
+                    "proxy_id",
+                    "proxy_sequence",
+                ]
                 st.dataframe(
                     extra_df,
                     width="stretch",
                     hide_index=True,
-                    column_order=[
-                        "seq_id",
-                        "scientificName",
-                        "taxonURL",
-                        "seq_url",
-                        "genus",
-                        "specificEpithet",
-                        "family",
-                        "order",
-                        "class",
-                        "phylum",
-                        "kingdom",
-                        "seq_id_extra",
-                        "dna_sequence_extra",
-                    ],
-                    column_config={
-                        "seq_id": COL["seq_id"],
-                        "scientificName": COL["scientificName"],
-                        "taxonURL": COL["taxonURL"],
-                        "seq_url": COL["bold_seq_url"],
-                        "genus": COL["genus"],
-                        "specificEpithet": COL["specificEpithet"],
-                        "family": COL["family"],
-                        "order": COL["order"],
-                        "class": COL["class"],
-                        "phylum": COL["phylum"],
-                        "kingdom": COL["kingdom"],
-                        "seq_id_extra": st.column_config.TextColumn("BOLD Process ID"),
-                        "dna_sequence_extra": COL["bold_dna_sequence"],
-                        "dna_sequence": None,
-                        "scientificNameAuthorship": None,
-                        "taxonRank": None,
-                        "taxonID": None,
-                        "taxonID_db": None,
-                    },
+                    column_order=shown,
+                    column_config=column_config(shown),
                 )
 
     with st.container(border=True):

@@ -84,7 +84,6 @@ from .results_pipeline import (
     build_gbif_export_df,
     add_check_hit,
     add_low_identity_warning,
-    RESULT_COLS,
     EXPORT_COLS,
     GBIF_EXPORT_COLS,
 )
@@ -157,7 +156,6 @@ __all__ = [
     "build_gbif_export_df",
     "add_check_hit",
     "add_low_identity_warning",
-    "RESULT_COLS",
     "EXPORT_COLS",
     "GBIF_EXPORT_COLS",
 ]

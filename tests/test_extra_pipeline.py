@@ -106,7 +106,12 @@ def test_proxy_only_where_ncbi_did_not_find_the_species():
         }
     )
     bold_filter_df = pd.DataFrame(
-        {"scientificName": ["A"], "seq_id": ["BOLD1"], "dna_sequence": ["ACGT"]}
+        {
+            "scientificName": ["A"],
+            "seq_id": ["BOLD1"],
+            "dna_sequence": ["ACGT"],
+            "seq_url": ["https://portal.boldsystems.org/record/BOLD1"],
+        }
     )
     ncbi_search_df = pd.DataFrame(
         {"seq_id": ["t1", "t3"], "scientificName": ["A syn", "A"]}
@@ -115,6 +120,6 @@ def test_proxy_only_where_ncbi_did_not_find_the_species():
         bold_filter_df, geo_df, ncbi_search_df, None, db_path=None
     )
     assert merged["seq_id"].tolist() == ["t2"]
-    assert merged["seq_id_bold"].tolist() == ["BOLD1"]
+    assert merged["proxy_id"].tolist() == ["BOLD1"]
     summary = build_extra_summary(merged, geo_df, ncbi_search_df, None)
     assert summary["seq_id"].tolist() == ["t2"]

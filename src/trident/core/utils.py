@@ -245,23 +245,6 @@ class StepLog:
             )
 
 
-_TAXON_ORDER = [
-    "kingdom",
-    "phylum",
-    "class",
-    "order",
-    "family",
-    "genus",
-    "scientificName",
-    "specificEpithet",
-    "scientificNameAuthorship",
-    "taxonRank",
-    "taxonID",
-    "taxonID_db",
-    "taxonURL",
-]
-
-
 def extract_specific_epithet(
     scientific_name: str | None, genus: str | None
 ) -> str | None:
@@ -282,32 +265,6 @@ def extract_specific_epithet(
     if len(name_parts) >= 2 and name_parts[0] == genus:
         return name_parts[1]
     return None
-
-
-def reorder_taxonomy_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Group taxonomy columns together at their first natural position.
-
-    Args:
-        df: DataFrame potentially containing taxonomy columns.
-
-    Returns:
-        DataFrame with taxonomy columns grouped and ordered canonically.
-        Returns the original DataFrame unchanged if no taxonomy columns are found.
-    """
-    first_taxon_idx = next(
-        (i for i, col in enumerate(df.columns) if col in _TAXON_ORDER), None
-    )
-
-    if first_taxon_idx is None:
-        return df
-
-    taxon_cols = [col for col in _TAXON_ORDER if col in df.columns]
-    before_taxon = list(df.columns[:first_taxon_idx])
-    after_taxon = [
-        col for col in df.columns[first_taxon_idx + 1 :] if col not in taxon_cols
-    ]
-
-    return df[before_taxon + taxon_cols + after_taxon]
 
 
 ##### DECORATORS #####

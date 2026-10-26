@@ -92,8 +92,11 @@ def geo_df():
             "seq_id": ["s1", "s1", "s2"],
             "scientificName": ["SpecA", "SpecB", "SpecC"],
             "in_mol": [True, True, True],
-            "gbif_occurrences": [100, 200, 50],
-            "gbif_taxonURL": ["gurl1", "gurl2", "gurl3"],
+            "mol_identity": [99.0, 97.0, 95.0],
+            "mol_query_cover": [100, 100, 98],
+            "mol_hit_url": ["url1", "url2", "url3"],
+            "geo_occurrences": [100, 200, 50],
+            "geo_url": ["gurl1", "gurl2", "gurl3"],
             "taxonURL": ["wurl1", "wurl2", "wurl3"],
         }
     )
@@ -105,11 +108,12 @@ def hypo_df():
         {
             "seq_id": ["s2"],
             "scientificName": ["SpecD"],
-            "identity_percentage": [88.0],
-            "query_cover": [95],
-            "seq_url": ["bold_url"],
-            "ncbi_top_identity_percentage": [92.0],
-            "ncbi_top_query_cover": [100],
+            "proxy_hit_species": ["SpecC"],
+            "proxy_identity": [88.0],
+            "proxy_query_cover": [95],
+            "proxy_url": ["bold_url"],
+            "hypo_check_identity": [92.0],
+            "hypo_check_query_cover": [100],
         }
     )
 
@@ -157,14 +161,14 @@ class TestBuildResultsDf:
         for col in EXPORT_COLS:
             assert col in result.columns, f"Missing column: {col}"
 
-    def test_hypo_renames_columns(self, sequences_df, geo_df, mol_df, hypo_df):
-        """HYPO columns renamed: identity_percentage → proxy_identity_percentage."""
+    def test_hypo_keeps_its_proxy_hit(self, sequences_df, geo_df, mol_df, hypo_df):
+        """HYPO rows keep their best proxy hit as proxy_identity."""
         result = build_results_df(
             sequences_df, geo_df, mol_df, hypo_df=hypo_df, name_table=None
         )
         hypo = result[result["validation_step"] == "HYPO"]
-        assert "proxy_identity_percentage" in result.columns
-        assert hypo.iloc[0]["proxy_identity_percentage"] == 88.0
+        assert "proxy_identity" in result.columns
+        assert hypo.iloc[0]["proxy_identity"] == 88.0
 
     def test_empty_hypo_df(self, sequences_df, geo_df, mol_df):
         """Empty hypo_df is treated like None."""
@@ -173,13 +177,13 @@ class TestBuildResultsDf:
         )
         assert (result["validation_step"].dropna() == "MOL+GEO").all()
 
-    def test_ncbi_identity_from_mol(self, sequences_df, geo_df, mol_df):
-        """MOL+GEO rows get best identity from mol_df."""
+    def test_ncbi_identity_from_the_geo_list(self, sequences_df, geo_df, mol_df):
+        """MOL+GEO rows keep the best MOL hit the GEO list carries from TAX."""
         result = build_results_df(sequences_df, geo_df, mol_df, name_table=None)
         s1_specA = result[
             (result["seq_id"] == "s1") & (result["scientificName"] == "SpecA")
         ]
-        assert s1_specA.iloc[0]["ncbi_top_identity_percentage"] == 99.0
+        assert s1_specA.iloc[0]["mol_identity"] == 99.0
 
     def test_hypo_species_carries_its_mol_link(self, sequences_df, geo_df, mol_df):
         """A HYPO species gets the MOL species its proxy matched and the
@@ -189,9 +193,9 @@ class TestBuildResultsDf:
             {
                 "seq_id": ["s1", "s2"],
                 "scientificName": ["SpecX", "SpecY"],
-                "scientificName_hit": ["SpecB", "SpecC accepted"],
-                "identity_percentage": [97.0, 96.0],
-                "query_cover": [90, 90],
+                "proxy_hit_species": ["SpecB", "SpecC accepted"],
+                "proxy_identity": [97.0, 96.0],
+                "proxy_query_cover": [90, 90],
             }
         )
         result = build_results_df(
@@ -202,13 +206,13 @@ class TestBuildResultsDf:
             name_table=_names({"SpecC": "SpecC accepted"}),
         )
         hypo = result[result["validation_step"] == "HYPO"]
-        assert hypo["via_mol_species"].tolist() == ["SpecB", "SpecC accepted"]
+        assert hypo["proxy_hit_species"].tolist() == ["SpecB", "SpecC accepted"]
         assert hypo["via_mol_identity"].tolist() == [97.0, 95.0]
 
 
-def test_species_mol_found_under_a_synonym_keeps_its_ncbi_hit(sequences_df):
-    """A MOL+GEO species that NCBI named by a synonym gets its best NCBI hit,
-    and the GBIF export gives the NCBI names as verbatimIdentification."""
+def test_export_names_a_species_by_the_ncbi_names_of_its_mol_hits(sequences_df):
+    """A MOL+GEO species that NCBI named by a synonym gets its NCBI names as
+    verbatimIdentification in the GBIF export."""
     mol_df = pd.DataFrame(
         {
             "seq_id": ["s1", "s1"],
@@ -227,11 +231,6 @@ def test_species_mol_found_under_a_synonym_keeps_its_ncbi_hit(sequences_df):
     )
     names = _names({"Gadus ogac": "Gadus macrocephalus"})
     results = build_results_df(sequences_df, geo_df, mol_df, name_table=names)
-    row = results[results["seq_id"] == "s1"].iloc[0]
-    assert (row["ncbi_top_identity_percentage"], row["ncbi_top_hit_url"]) == (
-        99.0,
-        "url1",
-    )
     export = build_gbif_export_df(results).set_index("seq_id")
     assert export.loc["s1", "verbatimIdentification"] == (
         "Gadus macrocephalus, Gadus ogac"
@@ -244,19 +243,20 @@ def test_species_mol_found_under_a_synonym_keeps_its_ncbi_hit(sequences_df):
 def test_any_hypo_check_hit_is_flagged(sequences_df, geo_df, mol_df):
     """A hypothetical species has no marker in GenBank, so any check hit flags
     it, whatever its identity or cover; MOL+GEO species and empty sequences
-    are never flagged, although they carry an NCBI identity."""
+    are never flagged."""
     hypo_df = pd.DataFrame(
         {
             "seq_id": ["s1", "s2", "s2"],
             "scientificName": ["SpecX", "SpecY", "SpecZ"],
-            "ncbi_top_identity_percentage": [80.0, None, 100.0],
-            "ncbi_top_query_cover": [60.0, None, 100.0],
+            "proxy_hit_species": ["SpecA", "SpecC", "SpecC"],
+            "hypo_check_identity": [80.0, None, 100.0],
+            "hypo_check_query_cover": [60.0, None, 100.0],
         }
     )
     result = build_results_df(
         sequences_df, geo_df, mol_df, hypo_df=hypo_df, name_table=None
     )
-    flagged = result.loc[result["check_hit"], "scientificName"].tolist()
+    flagged = result.loc[result["hypo_check_hit"], "scientificName"].tolist()
     assert sorted(flagged) == ["SpecX", "SpecZ"]
 
 

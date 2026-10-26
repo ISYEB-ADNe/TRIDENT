@@ -87,14 +87,14 @@ class TestBuildMolSummary:
         mol_df, _ = _finalize(ncbi_filter_df)
         summary = build_mol_summary(mol_df, sequences_df)
         s3 = summary[summary["seq_id"] == "s3"]
-        assert s3.iloc[0]["hits_count"] == 0
-        assert s3.iloc[0]["species_count"] == 0
+        assert s3.iloc[0]["n_hits"] == 0
+        assert s3.iloc[0]["n_species"] == 0
 
     def test_top_identity_uses_max(self, sequences_df, ncbi_filter_df):
         mol_df, _ = _finalize(ncbi_filter_df)
         summary = build_mol_summary(mol_df, sequences_df)
         s1 = summary[summary["seq_id"] == "s1"]
-        assert s1.iloc[0]["top_identity"] == "99.00"
+        assert s1.iloc[0]["top_identity"] == 99.0
 
     def test_filter_method_recovery(self, sequences_df, ncbi_filter_df):
         """When enforce_threshold removes all hits, filter_method is recovered."""
@@ -111,21 +111,22 @@ class TestBuildMolSummary:
         summary = build_mol_summary(mol_df, sequences_df)
         assert list(summary["seq_id"]) == ["s2", "s1"]
 
-    def test_low_identity_warning_any(self, sequences_df):
-        """low_identity_warning is True if any hit for that seq has it."""
+    def test_low_identity_warning_flags_a_species_below(self, sequences_df):
+        """A sequence is flagged when a species kept for it has its best hit
+        below the threshold, not when only a lower hit of a species is."""
         ncbi_df = pd.DataFrame(
             {
-                "seq_id": ["s1", "s1"],
-                "scientificName": ["A", "B"],
-                "identity_percentage": [99.0, 93.0],
-                "query_cover": [100, 100],
-                "filter_method": ["gap", "gap"],
+                "seq_id": ["s1", "s1", "s2", "s2"],
+                "scientificName": ["A", "B", "C", "C"],
+                "identity_percentage": [99.0, 93.0, 96.0, 94.0],
+                "query_cover": [100, 100, 100, 100],
+                "filter_method": ["similarity"] * 4,
             }
         )
         mol_df, _ = _finalize(ncbi_df)
-        summary = build_mol_summary(mol_df, sequences_df)
-        s1 = summary[summary["seq_id"] == "s1"]
-        assert s1.iloc[0]["low_identity_warning"] == True  # noqa: E712
+        summary = build_mol_summary(mol_df, sequences_df).set_index("seq_id")
+        assert summary.loc["s1", "low_identity_warning"]
+        assert not summary.loc["s2", "low_identity_warning"]
 
 
 def test_sequence_report_finds_the_gap_on_all_hits():

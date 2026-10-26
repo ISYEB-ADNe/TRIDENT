@@ -23,7 +23,7 @@ from trident.ui.ui import (
     show_filter_success,
     lazy_expander,
     styled_or_plain,
-    COL,
+    column_config,
     BLAST_HELP,
     get_recent_param_sets,
     param_preset_selector,
@@ -338,30 +338,21 @@ def hypo_search_workflow():
             key="hypo_search_results",
         ) as is_open:
             if is_open:
+                shown = [
+                    "seq_id",
+                    "scientificName",
+                    "proxy_hit_species",
+                    "proxy_identity",
+                    "proxy_query_cover",
+                    "proxy_hit_url",
+                    "proxy_hit_def",
+                ]
                 st.dataframe(
                     st.session_state.hypo_merge_df,
                     width="stretch",
                     hide_index=True,
-                    column_order=[
-                        "seq_id",
-                        "scientificName",
-                        "scientificName_hit",
-                        "identity_percentage",
-                        "query_cover",
-                        "hit_url",
-                        "hit_def",
-                    ],
-                    column_config={
-                        "seq_id": COL["seq_id"],
-                        "scientificName": COL["scientificName"],
-                        "scientificName_hit": st.column_config.TextColumn(
-                            "BLAST Hit Species"
-                        ),
-                        "identity_percentage": COL["identity_percentage"],
-                        "query_cover": COL["query_cover"],
-                        "hit_url": COL["hit_url"],
-                        "hit_def": COL["hit_def"],
-                    },
+                    column_order=shown,
+                    column_config=column_config(shown),
                 )
 
 
@@ -394,7 +385,7 @@ def hypo_filter_controls():
     with col1:
         persist_value("hypo_query_cover", def_qc)
         query_cover = st.slider(
-            "Query Coverage (%)",
+            "Query Cover (%)",
             min_value=0,
             max_value=100,
             help="Minimum query cover percentage to filter NCBI hits",
@@ -449,7 +440,7 @@ def _filter_success_message():
     if not hypo_filter_df.empty:
         n_species = hypo_filter_df["scientificName"].nunique()
         tail = f" ({n_species:,} unique species)."
-    show_filter_success(len(hypo_filter_df), total, "sequences", tail)
+    show_filter_success(len(hypo_filter_df), total, "hits", tail)
 
 
 def hypo_filter_workflow():
@@ -475,7 +466,7 @@ def hypo_filter_workflow():
             current_params=current_params,
             job_fn=hypo_filter_job,
             job_kwargs={"query_cover": qc, "identity": identity},
-            new_string=f"Ready to filter **{len(st.session_state.hypo_merge_df):,}** sequences.",
+            new_string=f"Ready to filter **{len(st.session_state.hypo_merge_df):,}** hits.",
             btn_key="hypo_filter_apply",
             status_label="🔬 Filtering HYPO results...",
             before_button=_filter_success_message,
@@ -488,30 +479,21 @@ def hypo_filter_workflow():
             key="hypo_filter_results",
         ) as is_open:
             if is_open:
+                shown = [
+                    "seq_id",
+                    "scientificName",
+                    "proxy_hit_species",
+                    "proxy_identity",
+                    "proxy_query_cover",
+                    "proxy_hit_url",
+                    "proxy_hit_def",
+                ]
                 st.dataframe(
                     st.session_state.hypo_filter_df,
                     width="stretch",
                     hide_index=True,
-                    column_order=[
-                        "seq_id",
-                        "scientificName",
-                        "scientificName_hit",
-                        "identity_percentage",
-                        "query_cover",
-                        "hit_url",
-                        "hit_def",
-                    ],
-                    column_config={
-                        "seq_id": COL["seq_id"],
-                        "scientificName": COL["scientificName"],
-                        "scientificName_hit": st.column_config.TextColumn(
-                            "BLAST Hit Species"
-                        ),
-                        "identity_percentage": COL["identity_percentage"],
-                        "query_cover": COL["query_cover"],
-                        "hit_url": COL["hit_url"],
-                        "hit_def": COL["hit_def"],
-                    },
+                    column_order=shown,
+                    column_config=column_config(shown),
                 )
 
 
@@ -640,8 +622,8 @@ def hypo_check_display():
         else:
             st.info("No check results to show.")
         return
-    n_found = res_df[res_df["hit_found"].astype(bool)]["scientificName"].nunique()
-    n_not_found = res_df[~res_df["hit_found"].astype(bool)]["scientificName"].nunique()
+    n_found = res_df[res_df["hit_found"]]["scientificName"].nunique()
+    n_not_found = res_df[~res_df["hit_found"]]["scientificName"].nunique()
 
     tab_summary, tab_no_hits, tab_full = st.tabs(
         [
@@ -651,64 +633,52 @@ def hypo_check_display():
         ]
     )
     with tab_summary:
-        found_df = summary_df[summary_df["hit_count"] > 0]
+        found_df = summary_df[summary_df["n_hits"] > 0]
 
         st.caption("Best hit matching in the NCBI database.")
+        shown = [
+            "seq_id",
+            "scientificName",
+            "n_hits",
+            "identity_percentage",
+            "query_cover",
+            "hit_url",
+        ]
         st.dataframe(
             found_df,
             width="stretch",
             hide_index=True,
-            column_config={
-                "seq_id": COL["seq_id"],
-                "scientificName": COL["scientificName"],
-                "hit_count": COL["hit_count"],
-                "identity_percentage": COL["identity_percentage"],
-                "query_cover": COL["query_cover"],
-                "hit_url": COL["hit_url"],
-            },
+            column_order=shown,
+            column_config=column_config(shown),
         )
 
     with tab_no_hits:
         st.caption("No NCBI matches were found for these species.")
+        shown = ["seq_id", "scientificName"]
         st.dataframe(
-            summary_df[summary_df["hit_count"] == 0],
+            summary_df[summary_df["n_hits"] == 0],
             width="stretch",
             hide_index=True,
-            column_config={
-                "seq_id": COL["seq_id"],
-                "scientificName": COL["scientificName"],
-                "hit_count": None,
-                "identity_percentage": None,
-                "query_cover": None,
-                "hit_url": None,
-            },
+            column_order=shown,
+            column_config=column_config(shown),
         )
     with tab_full:
+        shown = [
+            "seq_id",
+            "scientificName",
+            "hit_found",
+            "identity_percentage",
+            "query_cover",
+            "hit_url",
+            "hit_def",
+            "scientificName_NCBI",
+        ]
         st.dataframe(
             res_df,
             width="stretch",
             hide_index=True,
-            column_order=[
-                "seq_id",
-                "scientificName",
-                "hit_found",
-                "identity_percentage",
-                "query_cover",
-                "hit_url",
-                "hit_def",
-                "scientificName_NCBI",
-            ],
-            column_config={
-                "seq_id": COL["seq_id"],
-                "scientificName": COL["scientificName"],
-                "hit_found": st.column_config.CheckboxColumn("Hit Found"),
-                "identity_percentage": COL["identity_percentage"],
-                "query_cover": COL["query_cover"],
-                "hit_url": COL["hit_url"],
-                "hit_def": COL["hit_def"],
-                "scientificName_NCBI": st.column_config.TextColumn("NCBI Species"),
-                "dna_sequence": None,
-            },
+            column_order=shown,
+            column_config=column_config(shown),
         )
 
 
@@ -772,8 +742,8 @@ def hypo_final_check_workflow():
         if mode == "IDENTICAL":
             show_failed_items_banner(
                 st.session_state.hypo_check_failed,
-                "sequence",
-                "sequences",
+                "species check",
+                "species checks",
                 source="NCBI BLAST",
                 gives_up=True,
             )
@@ -793,9 +763,9 @@ def render_hypo_metrics():
 
     c1, c2, c3 = st.columns(3)
     c1.metric(
-        "Total Records",
+        "Candidates",
         len(df),
-        help="Total number of validated HYPO records",
+        help="Species confirmed by HYPO, counted once per sequence.",
     )
     c2.metric(
         "Confirmed Species",
@@ -810,13 +780,7 @@ def render_hypo_metrics():
 
 
 def display_hypo_sequence_metrics(seq_df):
-    c1, c2 = st.columns(2)
-    c1.metric(
-        "Number of Records",
-        len(seq_df),
-        help="Number of BOLD sequences validated via NCBI for this sequence ID",
-    )
-    c2.metric(
+    st.metric(
         "Confirmed Species",
         seq_df["scientificName"].nunique(),
         help="Unique species validated via the HYPO pipeline for this sequence ID",
@@ -825,40 +789,26 @@ def display_hypo_sequence_metrics(seq_df):
 
 def display_hypo_sequence_table(seq_df):
     display_df = add_check_hit(seq_df.copy())
-    if display_df["check_hit"].any():
+    if display_df["hypo_check_hit"].any():
         st.caption(CHECK_HIT_LEGEND)
+    shown = [
+        "scientificName",
+        "taxonURL",
+        "genus",
+        "specificEpithet",
+        "family",
+        "order",
+        "class",
+        "phylum",
+        "kingdom",
+        "scientificNameAuthorship",
+    ]
     st.dataframe(
         styled_or_plain(display_df, highlight_check_hit),
         width="stretch",
         hide_index=True,
-        column_order=[
-            "scientificName",
-            "taxonURL",
-            "genus",
-            "specificEpithet",
-            "family",
-            "order",
-            "class",
-            "phylum",
-            "kingdom",
-            "scientificNameAuthorship",
-        ],
-        column_config={
-            "seq_id": None,
-            "dna_sequence": None,
-            "scientificName": COL["scientificName"],
-            "taxonURL": COL["taxonURL"],
-            "family": COL["family"],
-            "genus": COL["genus"],
-            "specificEpithet": COL["specificEpithet"],
-            "scientificNameAuthorship": COL["scientificNameAuthorship"],
-            "taxonID": None,
-            "kingdom": COL["kingdom"],
-            "phylum": COL["phylum"],
-            "class": COL["class"],
-            "order": COL["order"],
-            "check_hit": None,
-        },
+        column_order=shown,
+        column_config=column_config(shown),
     )
 
 
@@ -884,14 +834,14 @@ def display_hypo_summary():
     # All unique proxy species per (seq_id, scientificName)
     proxies = (
         hypo_filter_df.groupby(["seq_id", "scientificName"], observed=False)[
-            "scientificName_hit"
+            "proxy_hit_species"
         ]
         .apply(lambda s: ", ".join(sorted(s.unique())))
-        .reset_index(name="validated_by")
+        .reset_index(name="proxy_hit_species")
     )
 
     # NCBI check marker status
-    check_cols = ["seq_id", "scientificName", "ncbi_top_identity_percentage"]
+    check_cols = ["seq_id", "scientificName", "hypo_check_identity"]
     check_status = hypo_df[[c for c in check_cols if c in hypo_df.columns]].copy()
     for col in check_cols[2:]:
         if col not in check_status.columns:
@@ -899,39 +849,24 @@ def display_hypo_summary():
     check_status = add_check_hit(check_status)
 
     summary = proxies.merge(check_status, on=["seq_id", "scientificName"], how="left")
-    summary["check_hit"] = summary["check_hit"].fillna(False)
+    summary["hypo_check_hit"] = summary["hypo_check_hit"].fillna(False)
 
-    if summary["check_hit"].any():
+    if summary["hypo_check_hit"].any():
         st.caption(CHECK_HIT_LEGEND)
 
+    shown = [
+        "seq_id",
+        "scientificName",
+        "proxy_hit_species",
+        "hypo_check_hit",
+        "hypo_check_identity",
+    ]
     st.dataframe(
         styled_or_plain(summary, highlight_check_hit),
         width="stretch",
         hide_index=True,
-        column_order=[
-            "seq_id",
-            "scientificName",
-            "validated_by",
-            "check_hit",
-            "ncbi_top_identity_percentage",
-        ],
-        column_config={
-            "seq_id": COL["seq_id"],
-            "scientificName": COL["scientificName"],
-            "validated_by": st.column_config.TextColumn(
-                "Validated By (CO1 proxy)",
-                help="BOLD proxy species whose CO1 sequence confirmed this candidate.",
-            ),
-            "check_hit": st.column_config.CheckboxColumn(
-                "In NCBI",
-                help="Whether the species was also found in the NCBI marker check.",
-            ),
-            "ncbi_top_identity_percentage": st.column_config.NumberColumn(
-                "NCBI Identity (%)",
-                format="%.2f",
-                help="Identity of the best NCBI hit for the target marker.",
-            ),
-        },
+        column_order=shown,
+        column_config=column_config(shown),
     )
 
 
@@ -948,56 +883,27 @@ def display_hypo_results():
             key="hypo_full_list",
         ) as is_open:
             if is_open:
+                shown = [
+                    "seq_id",
+                    "scientificName",
+                    "taxonURL",
+                    "proxy_hit_species",
+                    "proxy_identity",
+                    "proxy_query_cover",
+                    "hypo_check_identity",
+                    "hypo_check_query_cover",
+                    "family",
+                    "order",
+                    "class",
+                    "phylum",
+                    "kingdom",
+                ]
                 st.dataframe(
                     st.session_state.hypo_df,
                     width="stretch",
                     hide_index=True,
-                    column_order=[
-                        "seq_id",
-                        "scientificName",
-                        "taxonURL",
-                        "scientificName_hit",
-                        "identity_percentage",
-                        "query_cover",
-                        "ncbi_top_identity_percentage",
-                        "ncbi_top_query_cover",
-                        "family",
-                        "order",
-                        "class",
-                        "phylum",
-                        "kingdom",
-                    ],
-                    column_config={
-                        "seq_id": COL["seq_id"],
-                        "scientificName": COL["scientificName"],
-                        "taxonURL": COL["taxonURL"],
-                        "scientificName_hit": st.column_config.TextColumn(
-                            "Validated By (CO1 proxy)"
-                        ),
-                        "identity_percentage": st.column_config.NumberColumn(
-                            "Proxy Identity (%)",
-                            format="%.2f",
-                            help="BLAST identity of the CO1 proxy hit.",
-                        ),
-                        "query_cover": st.column_config.NumberColumn(
-                            "Proxy Query Cover (%)",
-                            format="%.2f",
-                            help="Query coverage of the CO1 proxy hit.",
-                        ),
-                        "ncbi_top_identity_percentage": st.column_config.NumberColumn(
-                            "NCBI Identity (%)",
-                            format="%.2f",
-                        ),
-                        "ncbi_top_query_cover": st.column_config.NumberColumn(
-                            "NCBI Query Cover (%)",
-                            format="%.2f",
-                        ),
-                        "family": COL["family"],
-                        "order": COL["order"],
-                        "class": COL["class"],
-                        "phylum": COL["phylum"],
-                        "kingdom": COL["kingdom"],
-                    },
+                    column_order=shown,
+                    column_config=column_config(shown),
                 )
 
     with st.container(border=True):

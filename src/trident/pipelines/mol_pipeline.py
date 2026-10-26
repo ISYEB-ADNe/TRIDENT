@@ -219,6 +219,10 @@ def run_ncbi_filter(
         gap_min_top=gap_min_top,
     )
 
+    # identity_drop serves the barcoding gap method only (absent with the
+    # similarity method): the MOL list does not keep it.
+    filtered_df = filtered_df.drop(columns="identity_drop", errors="ignore")
+
     n_seqs = filtered_df["seq_id"].nunique()
     logger.info(
         f"MOL filter: {len(filtered_df)} {pluralize(len(filtered_df), 'hit')} kept "
@@ -240,6 +244,7 @@ def run_ncbi_filter(
         inherit_from=["filter_params"],
     ),
     log_reuse_as="MOL list",
+    bool_columns=("low_identity_warning",),
 )
 @preserve_sequence_order("seq_id", "ncbi_filter_df")
 def finalize_mol_results(
@@ -319,7 +324,7 @@ def build_ncbi_search_overview(
             rows.append(
                 {
                     "seq_id": seq_id,
-                    "n_hits": 0,
+                    "n_blast_hits": 0,
                     "min_identity": None,
                     "max_identity": None,
                     "identity_range": None,
@@ -335,7 +340,7 @@ def build_ncbi_search_overview(
         rows.append(
             {
                 "seq_id": seq_id,
-                "n_hits": n_hits,
+                "n_blast_hits": n_hits,
                 "min_identity": round(min_id, 2),
                 "max_identity": round(max_id, 2),
                 "identity_range": round(identity_range, 2),
@@ -362,7 +367,9 @@ def build_mol_summary(
 
     Returns:
         DataFrame with one row per seq_id containing hit counts, species
-        counts, top identity, filter method, and low identity warning flag.
+        counts, top identity, filter method, and low_identity_warning: a
+        species kept for the sequence has its best hit below the MOL list's
+        low identity threshold.
     """
     present_ids = set(mol_df["seq_id"].unique())
     all_seq_ids = sequences_df["seq_id"].unique()
@@ -381,10 +388,14 @@ def build_mol_summary(
             {
                 "seq_id": seq_id,
                 "filter_method": query_data["filter_method"].iloc[0],
-                "hits_count": len(query_data),
-                "species_count": query_data["scientificName"].nunique(),
-                "top_identity": f"{query_data['identity_percentage'].max():.2f}",
-                "low_identity_warning": query_data["low_identity_warning"].any(),
+                "n_hits": len(query_data),
+                "n_species": query_data["scientificName"].nunique(),
+                "top_identity": round(query_data["identity_percentage"].max(), 2),
+                # A species whose best hit is low: all its hits are low.
+                "low_identity_warning": query_data["low_identity_warning"]
+                .groupby(query_data["scientificName"], dropna=False)
+                .all()
+                .any(),
             }
         )
 
@@ -395,8 +406,8 @@ def build_mol_summary(
                 {
                     "seq_id": seq_id,
                     "filter_method": filter_method_lookup.get(seq_id),
-                    "hits_count": 0,
-                    "species_count": 0,
+                    "n_hits": 0,
+                    "n_species": 0,
                     "top_identity": None,
                     "low_identity_warning": False,
                 }
@@ -429,7 +440,8 @@ def build_mol_sequence_report(
     Returns:
         Dict with keys:
         - 'seq_id': The sequence identifier.
-        - 'sequence_data': DataFrame of hits for this sequence (with hit_count column).
+        - 'sequence_data': DataFrame of hits for this sequence (with an n_hits column: hits of
+          its species).
         - 'search_hits': All BLAST hits of this sequence.
         - 'cut': The filter's gap or range, from mol_filter_cut(); its
           is_gap says which method the filter used for this sequence.
@@ -446,7 +458,7 @@ def build_mol_sequence_report(
     if sequence_data.empty:
         raise ValueError(f"Sequence {seq_id!r} not found in MOL results")
 
-    sequence_data["hit_count"] = sequence_data.groupby("scientificName")[
+    sequence_data["n_hits"] = sequence_data.groupby("scientificName")[
         "scientificName"
     ].transform("count")
 

@@ -48,30 +48,9 @@ from trident.pipelines.names import (
 )
 
 
-RESULT_COLS = [
-    "seq_id",
-    "validation_step",
-    "scientificName",
-    "taxonURL",
-    "gbif_taxonURL",
-    "kingdom",
-    "phylum",
-    "class",
-    "order",
-    "family",
-    "genus",
-    "specificEpithet",
-    "scientificNameAuthorship",
-    "ncbi_top_identity_percentage",
-    "ncbi_top_query_cover",
-    "ncbi_top_hit_url",
-    "bold_seq_url",
-    "gbif_occurrences",
-]
-
 # HYPO only, shown in the app but not exported: the MOL species a HYPO
-# species' CO1 proxy matched, and the sequence's NCBI identity to it.
-VIA_COLS = ["via_mol_species", "via_mol_identity"]
+# species' CO1 proxy matched, and the sequence's MOL identity to it.
+VIA_COLS = ["proxy_hit_species", "via_mol_identity"]
 
 # MOL+GEO only, for the GBIF export: the NCBI names of the species' MOL hits,
 # joined by ", " as the export writes them.
@@ -94,35 +73,35 @@ EXPORT_COLS = [
     "taxonID",
     "taxonID_db",
     "validation_step",
-    "ncbi_top_identity_percentage",
-    "ncbi_top_query_cover",
-    "gbif_occurrences",
-    "proxy_identity_percentage",
+    "mol_identity",
+    "mol_query_cover",
+    "geo_occurrences",
+    "proxy_identity",
     "proxy_query_cover",
+    "hypo_check_identity",
+    "hypo_check_query_cover",
     "taxonURL",
-    "gbif_taxonURL",
-    "ncbi_top_hit_url",
-    "bold_seq_url",
+    "geo_url",
+    "mol_hit_url",
+    "proxy_url",
+    "hypo_check_hit_url",
 ]
 
 
-def add_check_hit(df, identity_col="ncbi_top_identity_percentage"):
-    """Flag the HYPO species whose target marker the HYPO check found in NCBI.
+def add_check_hit(df):
+    """Flag (hypo_check_hit) the HYPO species whose target marker the HYPO
+    check found in NCBI: a hit in hypo_check_identity, empty otherwise.
 
     A hypothetical species is one whose marker is absent from GenBank, so any
     check hit puts it up for review, whatever its identity or cover.
-
-    Args:
-        df: Rows with identity_col, the identity of the species' check hit.
-        identity_col: Empty where the check found no hit.
     """
-    df["check_hit"] = pd.to_numeric(df[identity_col], errors="coerce").notna()
+    df["hypo_check_hit"] = pd.to_numeric(
+        df["hypo_check_identity"], errors="coerce"
+    ).notna()
     return df
 
 
-def add_low_identity_warning(
-    df, threshold, identity_col="ncbi_top_identity_percentage"
-):
+def add_low_identity_warning(df, threshold, identity_col="mol_identity"):
     """Flag rows where identity is present and below threshold."""
     df[identity_col] = pd.to_numeric(df[identity_col], errors="coerce")
     # `lt` returns False (not NA) for NaN, and `&` of two boolean Series is
@@ -134,38 +113,23 @@ def add_low_identity_warning(
 
 
 def _select_columns(df, extra=None):
-    """Keep only target columns that exist in df."""
-    target = list(EXPORT_COLS) + (extra or [])
-    return df[[c for c in target if c in df.columns]].copy()
+    """df with the export's columns (and *extra*), empty where df lacks one."""
+    return df.reindex(columns=[*EXPORT_COLS, *(extra or [])])
 
 
 def _build_mol_geo_part(geo_df, mol_df, name_table):
     """Build MOL+GEO rows: species confirmed via NCBI + geographically validated.
 
-    Each row gets the best MOL hit of its species for its sequence and the
-    NCBI names of its MOL hits, matched on their species (see species_of).
+    Each row keeps the best MOL hit of its species for its sequence (the
+    mol_* columns TAX gave it) and gets the NCBI names of its MOL hits,
+    matched on their species (see species_of).
     """
-    mol_geo = geo_df[geo_df["in_mol"].astype(bool)].copy()
+    mol_geo = geo_df[geo_df["in_mol"]].copy()
     mol_geo["validation_step"] = "MOL+GEO"
     mol_geo["verbatimIdentification"] = ncbi_names(
         mol_geo, mol_df, name_table
     ).str.join(", ")
-
-    hit_cols = ["identity_percentage", "query_cover"]
-    if "hit_url" in mol_df.columns:
-        hit_cols.append("hit_url")
-    best_mol = best_hits(mol_df, name_table, hit_cols).rename(
-        columns={
-            "identity_percentage": "ncbi_top_identity_percentage",
-            "query_cover": "ncbi_top_query_cover",
-            "hit_url": "ncbi_top_hit_url",
-        }
-    )
-    return (
-        mol_geo.assign(species_key=species_key(mol_geo["scientificName"], name_table))
-        .merge(best_mol, on=["seq_id", "species_key"], how="left")
-        .drop(columns="species_key")
-    )
+    return mol_geo
 
 
 def _build_hypo_part(hypo_df, geo_df, mol_df, name_table):
@@ -176,28 +140,17 @@ def _build_hypo_part(hypo_df, geo_df, mol_df, name_table):
     # The sequence's own evidence for a HYPO species: how well it matched the
     # MOL species the proxy links it to (its marker is not in GenBank). The
     # proxy hit and the MOL hits may name that species differently.
-    hypo["via_mol_species"] = hypo.get("scientificName_hit")
     via_identity = best_hits(mol_df, name_table, ["identity_percentage"]).rename(
         columns={"identity_percentage": "via_mol_identity"}
     )
     hypo = (
-        hypo.assign(species_key=species_key(hypo["via_mol_species"], name_table))
+        hypo.assign(species_key=species_key(hypo["proxy_hit_species"], name_table))
         .merge(via_identity, on=["seq_id", "species_key"], how="left")
         .drop(columns="species_key")
     )
 
-    hypo = hypo.rename(
-        columns={
-            "identity_percentage": "proxy_identity_percentage",
-            "query_cover": "proxy_query_cover",
-            "seq_url": "bold_seq_url",
-        }
-    )
-
-    # Fill gbif_occurrences and gbif_taxonURL from geo_df (HYPO doesn't carry them)
-    geo_fill_cols = [
-        c for c in ("gbif_occurrences", "gbif_taxonURL") if c in geo_df.columns
-    ]
+    # Fill geo_occurrences and geo_url from geo_df (HYPO doesn't carry them)
+    geo_fill_cols = [c for c in ("geo_occurrences", "geo_url") if c in geo_df.columns]
     if geo_fill_cols:
         geo_fill = geo_df[["seq_id", "scientificName"] + geo_fill_cols].drop_duplicates(
             subset=["seq_id", "scientificName"]
@@ -238,11 +191,13 @@ def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None, *, name_table):
 
     # Cast numeric columns that may be strings from DB cache
     for col in (
-        "ncbi_top_identity_percentage",
-        "ncbi_top_query_cover",
-        "proxy_identity_percentage",
+        "mol_identity",
+        "mol_query_cover",
+        "proxy_identity",
         "proxy_query_cover",
-        "gbif_occurrences",
+        "hypo_check_identity",
+        "hypo_check_query_cover",
+        "geo_occurrences",
         "via_mol_identity",
     ):
         if col in results.columns:
@@ -258,9 +213,7 @@ def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None, *, name_table):
         ].drop_duplicates(subset="seq_id")
         results = pd.concat([results, empty_rows], ignore_index=True)
 
-    add_check_hit(results)
-    results["check_hit"] &= results["validation_step"].eq("HYPO")
-    return results
+    return add_check_hit(results)
 
 
 # ---------------------------------------------------------------------------
@@ -628,7 +581,7 @@ def run_higher_taxa_lookup(
         f"{found}/{len(names)} {pluralize(len(names), 'taxon')} found",
         failed,
         "taxon",
-        retry="Click GBIF export again to retry them.",
+        retry="Build the one-row-per-sequence table again to retry them.",
     )
     return pd.DataFrame(rows, columns=HIGHER_TAXA_COLS)
 
@@ -735,7 +688,7 @@ def _names(df, seq_id, mask=None):
 
 def _in_mol(rows):
     """Rows of a species found by MOL itself."""
-    return rows["in_mol"].astype(bool)
+    return rows["in_mol"]
 
 
 def _added(rows):
