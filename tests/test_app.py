@@ -87,3 +87,76 @@ def test_changed_settings_rerun_a_step_from_its_cache_unless_erased():
     at.button[0].click().run()
     assert at.session_state["forced"] == [False, True]
     assert not at.exception
+
+
+def test_step_that_fails_shows_its_error_once_and_does_not_start_again():
+    def step_page():
+        import streamlit as st
+
+        from trident.ui.ui import run_step_workflow
+
+        def job(*, force_rerun, retry_empty):
+            st.session_state.calls = st.session_state.get("calls", 0) + 1
+            raise RuntimeError("step failed")
+
+        st.session_state.setdefault("step_df", None)
+        st.session_state.setdefault("step_params", {})
+        run_step_workflow(
+            df_key="step_df",
+            params_key="step_params",
+            flag_key="step_flag",
+            tab_id="geo",
+            compare_keys=[],
+            current_params={},
+            job_fn=job,
+            new_string="",
+            btn_key="step",
+        )
+
+    at = AppTest.from_function(step_page)
+    at.run()
+    at.button[0].click().run()
+    assert at.exception
+    at.run()
+    assert at.session_state["calls"] == 1
+
+
+def test_preset_applies_after_fields_prefilled_with_no_saved_set():
+    """Fields holding no saved set leave the selector empty: any set chosen,
+    the first one too, fills them."""
+
+    def page():
+        import streamlit as st
+
+        from trident.ui.ui import param_preset_selector
+
+        st.session_state.setdefault("_widget_overrides", {"t": "5"})
+        param_preset_selector([{"t": 1}, {"t": 2}], lambda p: f"t={p['t']}", key="sel")
+
+    at = AppTest.from_function(page)
+    at.run()
+    assert at.selectbox[0].value is None
+    at.selectbox[0].select("t=1").run()
+    assert at.session_state["_widget_overrides"]["t"] == 1
+
+
+def test_bold_names_go_with_the_extra_search_they_come_from():
+    """A reset of the EXTRA search (here by a new GEO list) drops the names
+    its BOLD search added, and keeps the others."""
+
+    def page():
+        import pandas as pd
+        import streamlit as st
+
+        from trident.pipelines.names import NAME_TABLE_COLUMNS
+        from trident.ui.ui import reset_state_after
+
+        table = pd.DataFrame(columns=NAME_TABLE_COLUMNS)
+        table["source"] = ["gbif", "bold"]
+        st.session_state.name_table = table
+        reset_state_after("geo_df")
+
+    at = AppTest.from_function(page)
+    at.run()
+    assert not at.exception
+    assert at.session_state["name_table"]["source"].tolist() == ["gbif"]

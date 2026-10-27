@@ -24,7 +24,7 @@ from trident.clients.ncbi import BLAST_SLOW_THREADS
 from trident.core.utils import pluralize
 from trident.core import stop
 from trident.core.database import get_connection
-from trident.pipelines.names import same_species_groups
+from trident.pipelines.names import replace_source_rows, same_species_groups
 from trident.logging import get_log_level
 from trident.ui.defaults import (
     NCBI_GAP_MIN_TOP_DEFAULT,
@@ -400,9 +400,14 @@ class AppState:
     bold_search_flag: bool = False
     bold_search_params: dict[str, Any] = field(default_factory=dict)
     bold_input_species: list[str] = field(default_factory=list)
+    # pipe.needs_proxy of the GEO list (see proxy_mask in extra.py).
+    bold_proxy_mask: "pd.Series | None" = None
     bold_missing_species: list[str] = field(default_factory=list)
     bold_search_failed: list[str] = field(default_factory=list)
-    bold_search_df: "pd.DataFrame | None" = None
+    # names_source: the name_table rows of this search go with it on a reset.
+    bold_search_df: "pd.DataFrame | None" = field(
+        default=None, metadata={"names_source": "bold"}
+    )
     bold_filter_logs: list[str] = field(default_factory=list)
     bold_filter_flag: bool = False
     bold_filter_df: "pd.DataFrame | None" = None
@@ -530,6 +535,14 @@ def reset_state_after(key_name: str):
         st.session_state[name] = default[name]
         if name.endswith("_flag"):
             drop_jobs(name)
+    for f in flds[start_idx:]:
+        source = f.metadata.get("names_source")
+        if source and st.session_state.get("name_table") is not None:
+            st.session_state.name_table = replace_source_rows(
+                st.session_state.name_table,
+                st.session_state.name_table.iloc[:0],
+                source,
+            )
 
 
 # --------------------------------------------------------------------
@@ -691,6 +704,10 @@ def run_step_workflow(
                     )
         except stop.StepStopped:
             pass
+        except Exception:
+            # Shown once: the step does not start again on the next rerun.
+            st.session_state[flag_key] = False
+            raise
         else:
             # A stop clicked once the jobs had all finished came too late.
             st.session_state.get(STOPPED_STEPS, set()).discard(flag_key)
@@ -739,6 +756,11 @@ def reset_for_new_analysis(key_name: str):
     sequence) carries over to the new one.
     """
     reset_state_after(key_name)
+    # The jobs still running belong to the previous analysis: stopped, so the
+    # next run of their step does not wait for them.
+    for job in st.session_state.get(RUNNING_JOBS, {}).values():
+        if not job["future"].done():
+            job["stop"].set()
     st.session_state._widget_overrides = {}
     # Forget which preset each selector last applied, or a preset equal to the
     # last one would not be applied again to the now empty settings.
@@ -947,6 +969,8 @@ class StreamlitLogSink:
         repeat steps the job already logged), then this sink receives the job's
         next lines in place of *old*, which is closed.
         """
+        if self._tag == old._tag:
+            return  # already taken over, by an earlier job of the same step
         # Accept the job's records before closing old, so none falls between.
         self._tag = old._tag
         self._allowed_threads |= old._allowed_threads
@@ -1437,19 +1461,27 @@ def param_preset_selector(presets, format_fn, key):
         current = {
             col: str(st.session_state._widget_overrides.get(col, "")) for col in cols
         }
-        selected_idx = 0
-        for i, p in enumerate(presets):
-            if all(str(p.get(k, "")) == v for k, v in current.items()):
-                selected_idx = i
-                break
+        # None when the fields hold no saved set: any set chosen then applies.
+        selected_idx = next(
+            (
+                i
+                for i, p in enumerate(presets)
+                if all(str(p.get(k, "")) == v for k, v in current.items())
+            ),
+            None,
+        )
 
         choice = st.selectbox(
             "Previously used settings",
             labels,
             index=selected_idx,
             key=key,
+            placeholder="Current settings (not a saved set)",
             help="Pre-fill the fields below with a previously used parameter set.",
         )
+        if choice is None:
+            st.session_state[f"{PRESET_MARKER}{key}"] = None
+            return
         preset = presets[labels.index(choice)]
 
     # Only apply preset when the selection actually changed

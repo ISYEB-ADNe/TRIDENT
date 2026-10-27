@@ -507,11 +507,7 @@ def display_bold_input_summary():
     if not bold_input:
         return
 
-    non_mol_df = geo_df[
-        pipe.needs_proxy(
-            geo_df, st.session_state.ncbi_search_df, st.session_state.name_table
-        )
-    ]
+    non_mol_df = geo_df[proxy_mask()]
     n_to_query = len(bold_input)
 
     with st.container(border=True):
@@ -589,15 +585,23 @@ def display_extra_summary():
         )
 
 
+def proxy_mask() -> pd.Series:
+    """Which rows of the GEO list need a BOLD proxy (pipe.needs_proxy), kept
+    until the GEO list changes: the rule reads every BLAST hit, too slow for
+    each rerun of the tab."""
+    if st.session_state.bold_proxy_mask is None:
+        st.session_state.bold_proxy_mask = pipe.needs_proxy(
+            st.session_state.geo_df,
+            st.session_state.ncbi_search_df,
+            st.session_state.name_table,
+        )
+    return st.session_state.bold_proxy_mask
+
+
 def display_bold_sequence_metrics(seq_df, selected_seq):
     # Species queried for this seq_id but not found in BOLD
     geo_df = st.session_state.geo_df
-    seq_geo = geo_df[geo_df["seq_id"] == selected_seq]
-    queried = seq_geo[
-        pipe.needs_proxy(
-            seq_geo, st.session_state.ncbi_search_df, st.session_state.name_table
-        )
-    ]
+    queried = geo_df[proxy_mask() & (geo_df["seq_id"] == selected_seq)]
     queried_for_seq = set(queried["scientificName"])
     found_for_seq = set(seq_df["scientificName"].unique())
     missing_for_seq = sorted(queried_for_seq - found_for_seq)

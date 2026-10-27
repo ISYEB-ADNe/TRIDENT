@@ -12,6 +12,7 @@ import trident.pipelines as pipe
 from trident.pipelines.results_pipeline import add_check_hit
 
 from trident.ui.ui import (
+    RANK_COLUMNS,
     coerce_stored_value,
     record_empty_step,
     failed_items,
@@ -612,6 +613,7 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
     )
     st.session_state.hypo_df = hypo_df
     st.session_state.hypo_params = hypo_params
+    reset_state_after("hypo_df")
 
     progress_bar.empty()
     logsink.close()
@@ -727,6 +729,14 @@ def hypo_final_check_workflow():
         hypo_filter_df = st.session_state.hypo_filter_df
         if hypo_filter_df.empty:
             st.info("No HYPO species to check.")
+            # The step ran and found no hypothetical species.
+            record_empty_step(
+                "hypo_df",
+                "hypo_params",
+                lambda: pipe.empty_hypo_results(st.session_state.extra_df),
+                failed_key="hypo_search_failed",
+                params=st.session_state.hypo_filter_params,
+            )
             return
         unique_species = hypo_filter_df["scientificName"].nunique()
 
@@ -799,18 +809,7 @@ def display_hypo_sequence_table(seq_df):
     display_df = add_check_hit(seq_df.copy())
     if display_df["hypo_check_hit"].any():
         st.caption(CHECK_HIT_LEGEND)
-    shown = [
-        "scientificName",
-        "taxonURL",
-        "genus",
-        "specificEpithet",
-        "family",
-        "order",
-        "class",
-        "phylum",
-        "kingdom",
-        "scientificNameAuthorship",
-    ]
+    shown = ["scientificName", "taxonURL", *RANK_COLUMNS, "scientificNameAuthorship"]
     st.dataframe(
         styled_or_plain(display_df, highlight_check_hit),
         width="stretch",
