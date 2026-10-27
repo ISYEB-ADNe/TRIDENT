@@ -383,9 +383,7 @@ def _progress(outcome: str) -> int:
 
 def under_other_name(bold_search_df: pd.DataFrame) -> pd.Series:
     """Which rows of the search come from another name of their species than
-    its own (all False in a search saved before BOLD names were kept)."""
-    if "bold_matched_by" not in bold_search_df.columns:
-        return pd.Series(False, index=bold_search_df.index)
+    its own."""
     matched_by = bold_search_df["bold_matched_by"]
     return matched_by.notna() & (matched_by != SPECIES_NAME)
 
@@ -418,28 +416,18 @@ SEARCH_ONLY_COLUMNS = ["bold_scientificName", "bold_matched_by", "bold_outcome"]
 
 def with_sequences(bold_search_df: pd.DataFrame) -> pd.DataFrame:
     """The rows of the BOLD search that hold a sequence, without
-    SEARCH_ONLY_COLUMNS. A search saved with no column at all (no species had
-    records) gives an empty frame."""
-    if "dna_sequence" not in bold_search_df.columns:
-        return pd.DataFrame(columns=BOLD_RECORD_COLUMNS)
+    SEARCH_ONLY_COLUMNS."""
     return bold_search_df.dropna(subset=["dna_sequence"]).drop(
         columns=SEARCH_ONLY_COLUMNS, errors="ignore"
     )
 
 
 def outcomes_by_species(bold_search_df: pd.DataFrame) -> pd.Series:
-    """bold_outcome of each queried species, indexed by scientificName. A
-    search saved before outcomes were recorded only has species with
-    sequences."""
-    if "scientificName" not in bold_search_df.columns:
-        return pd.Series(dtype=object, name="bold_outcome")
-    if "bold_outcome" not in bold_search_df.columns:
-        bold_search_df = bold_search_df.assign(bold_outcome=SEQUENCES)
+    """bold_outcome of each queried species, indexed by scientificName."""
     return (
         bold_search_df.dropna(subset=["scientificName"])
         .drop_duplicates("scientificName")
         .set_index("scientificName")["bold_outcome"]
-        .fillna(SEQUENCES)
     )
 
 

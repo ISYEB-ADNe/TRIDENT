@@ -172,10 +172,6 @@ def display_hypo_parameters():
             save_widget("hypo_batch_size")
         with tcol2:
             persist_value("hypo_num_threads", HYPO_NUM_THREADS_DEFAULT)
-            # A value saved before the cap would be out of the widget's range.
-            st.session_state.hypo_num_threads = min(
-                st.session_state.hypo_num_threads, BLAST_MAX_THREADS
-            )
             threads = st.number_input(
                 "Parallel threads",
                 1,

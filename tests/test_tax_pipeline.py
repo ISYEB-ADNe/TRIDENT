@@ -83,6 +83,7 @@ def test_gbif_names_are_recorded_but_never_merge_two_worms_species():
             "scientificName": ["Larus saundersi"],
             "gbif_scientificName": ["Chroicocephalus saundersi"],
             "taxonID": ["5YGFL"],
+            "gbif_speciesID": ["5YGFL"],
             "gbif_matched_by": ["WoRMS ID"],
             "aphia_id": [343919],
         }

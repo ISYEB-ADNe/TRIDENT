@@ -819,14 +819,13 @@ def search_taxon_occurrences(
     return df, failed_keys
 
 
-def area_label(extent: int | float | str, area: str | None) -> str:
+def area_label(extent: int | str, area: str) -> str:
     """A search area as the log names it: "within 250 km", "in the box around
     250 km" or "worldwide".
 
     Args:
         extent: Search radius in km, or ``"global"``.
-        area: ``"circle"`` or ``"box"``; None for an analysis saved before the
-            area setting, which searched in boxes.
+        area: ``"circle"`` or ``"box"``.
     """
     name = get_extent_column_name(extent)
     if name == "global":

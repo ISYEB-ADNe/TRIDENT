@@ -467,7 +467,7 @@ def run_worms_merge(
     # 2. Merge on the genus of the species, case / whitespace insensitive. No
     # column clashes (mol_subset carries no genus or scientificName), so no
     # _mol suffixes are produced.
-    # The search's own columns, also for a search saved before one existed.
+    # The search's own columns, also for an empty search.
     worms_search_df = worms_search_df.reindex(columns=WORMS_TAXON_COLUMNS).assign(
         _join_key=name_keys(worms_search_df["genus"])
     )

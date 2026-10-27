@@ -1143,9 +1143,7 @@ def _empty_run_ids(
         return []
     columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})")}
     if columns:
-        # A table without result_col (saved before the step had one): any row
-        # counts as a result.
-        filled = f" AND r.{result_col} IS NOT NULL" if result_col in columns else ""
+        filled = f" AND r.{result_col} IS NOT NULL" if result_col else ""
         cursor = conn.execute(
             f"SELECT i.run_id FROM {inputs_table} i "
             f"LEFT JOIN {table_name} r ON i.run_id = r.run_id{filled} "

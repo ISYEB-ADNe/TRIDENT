@@ -113,8 +113,7 @@ def gbif_name_rows(gbif_search_df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         DataFrame with NAME_TABLE_COLUMNS, source "gbif", one row per species
         GBIF matched (a subspecies name when GBIF holds it as one), source_id
-        GBIF's species for it (the counted key in a search saved before it
-        was kept), note saying how a synonym or subspecies in GBIF is
+        GBIF's species for it, note saying how a synonym or subspecies in GBIF is
         counted.
     """
     matched = (
@@ -138,9 +137,7 @@ def gbif_name_rows(gbif_search_df: pd.DataFrame) -> pd.DataFrame:
         matched_by_col="gbif_matched_by",
         species_ids=as_ids(matched["aphia_id"]),
         notes=matched["gbif_note"],
-        source_ids=matched["gbif_speciesID"]
-        .astype("string")
-        .fillna(matched["taxonID"].astype("string")),
+        source_ids=matched["gbif_speciesID"].astype("string"),
     )
 
 
@@ -155,8 +152,7 @@ def bold_name_rows(bold_search_df: pd.DataFrame) -> pd.DataFrame:
 
     Returns:
         DataFrame with NAME_TABLE_COLUMNS, source "bold", one row per species
-        and BOLD name with sequences (a species BOLD splits has several);
-        empty for a search saved before BOLD names were kept.
+        and BOLD name with sequences (a species BOLD splits has several).
     """
     found = (
         ensure_columns(

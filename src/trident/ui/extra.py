@@ -210,9 +210,7 @@ def bold_search_workflow():
 
 
 QUERY_FAILED = "query failed"
-# A species without rows in a search saved before reasons were recorded.
-REASON_NOT_SAVED = "no usable sequence (reason not saved)"
-REASONS = [*OUTCOMES_WITHOUT_SEQUENCES, REASON_NOT_SAVED, QUERY_FAILED, SEQUENCES]
+REASONS = [*OUTCOMES_WITHOUT_SEQUENCES, QUERY_FAILED, SEQUENCES]
 
 
 def _with_bold_names(bold_search_df: pd.DataFrame) -> pd.DataFrame:
@@ -226,8 +224,6 @@ def _with_bold_names(bold_search_df: pd.DataFrame) -> pd.DataFrame:
 
 def _bold_name_by_species(bold_search_df: pd.DataFrame) -> pd.Series:
     """names_in_bold of each queried species, indexed by scientificName."""
-    if "scientificName" not in bold_search_df.columns:
-        return pd.Series(dtype=object)
     names = pd.Series(
         names_in_bold(bold_search_df).to_numpy(), index=bold_search_df["scientificName"]
     )
@@ -241,9 +237,7 @@ def _species_outcomes() -> pd.Series:
     outcomes = outcomes_by_species(st.session_state.bold_search_df).reindex(
         st.session_state.bold_input_species
     )
-    return outcomes.fillna(REASON_NOT_SAVED).where(
-        ~outcomes.index.isin(failed), QUERY_FAILED
-    )
+    return outcomes.where(~outcomes.index.isin(failed), QUERY_FAILED)
 
 
 def show_why_no_sequence(names: list[str]) -> None:

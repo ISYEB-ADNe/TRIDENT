@@ -165,10 +165,6 @@ def display_ncbi_parameters():
             save_widget("ncbi_batch_size")
         with tcol2:
             persist_value("ncbi_num_threads", NCBI_NUM_THREADS_DEFAULT)
-            # A value saved before the cap would be out of the widget's range.
-            st.session_state.ncbi_num_threads = min(
-                st.session_state.ncbi_num_threads, BLAST_MAX_THREADS
-            )
             threads = st.number_input(
                 "Parallel threads",
                 1,
