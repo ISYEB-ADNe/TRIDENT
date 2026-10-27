@@ -751,11 +751,26 @@ def show_filter_success(kept: int, total: int, noun: str, tail: str = "") -> Non
     st.success(f"✅ Filtering complete: {kept:,}/{total:,} {noun} kept{tail}")
 
 
+# Green, the colour of a step done: a next-step button shows once its step has
+# a result. Streamlit gives a keyed widget the class st-key-<key>.
+NEXT_STEP_STYLE = """<style>
+[class*="st-key-next_step_"] button {
+    background-color: #1e8e3e; border-color: #1e8e3e; color: white;
+}
+[class*="st-key-next_step_"] button:hover,
+[class*="st-key-next_step_"] button:focus,
+[class*="st-key-next_step_"] button:active {
+    background-color: #176f30; border-color: #176f30; color: white;
+}
+</style>"""
+
+
 def next_step_button(label: str, tab_id: str):
-    """Render a right-aligned navigation button."""
+    """Render a right-aligned navigation button, green: its step is done."""
+    st.html(NEXT_STEP_STYLE)
     cols = st.columns([5, 1])
     with cols[1]:
-        if st.button(label, type="secondary", width="stretch"):
+        if st.button(label, key=f"next_step_{tab_id}", width="stretch"):
             st.session_state["requested_tab"] = tab_id
             st.rerun()
 

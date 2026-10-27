@@ -779,8 +779,8 @@ def display_ncbi_sequence_plots(
             title="",
             bin_width=bin_width,
         )
-        # Bars are centred on their identity: half a bin more keeps 100% whole
-        y_axis_range = [y_range[0] - bin_width / 2, y_range[1] + bin_width / 2]
+        # Bars are centred on their identity, half a bin each side
+        half_mark = bin_width / 2
     else:
         fig_identity = ncbi.plot_identity_percentage(
             shown_hits,
@@ -789,7 +789,11 @@ def display_ncbi_sequence_plots(
             title="",
             marker_size=marker_size,
         )
-        y_axis_range = list(y_range)
+        half_mark = 0
+    # A margin beyond the range keeps the marks at its ends whole (a hit at
+    # 100% would show half a point, or a bar without its outline)
+    margin = max(half_mark, 0.03 * (y_range[1] - y_range[0]))
+    y_axis_range = [y_range[0] - margin, y_range[1] + margin]
     fig_identity.update_layout(
         margin=dict(t=20),
         height=plot_height,
