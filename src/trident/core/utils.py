@@ -2,6 +2,7 @@ import contextlib
 from collections.abc import Sequence
 from functools import wraps
 import inspect
+import re
 import threading
 import time
 from typing import Callable
@@ -30,6 +31,13 @@ def normalize_name(name):
 _SPECIES_QUALIFIERS = {"cf.", "aff."}
 
 
+def drop_subgenus(name: str) -> str:
+    """The name without its parts in parentheses (a subgenus, or an NCBI
+    qualifier such as '(in: foraminifera)'), as GBIF and BOLD write it:
+    'Phascolosoma (Phascolosoma) arcuatum' -> 'Phascolosoma arcuatum'."""
+    return " ".join(re.sub(r"\([^)]*\)", " ", name).split())
+
+
 def to_binomial(name) -> str:
     """Genus and species epithet of a taxon name (its first two words).
 
@@ -40,8 +48,7 @@ def to_binomial(name) -> str:
     'Genus sp.'. A one-word name is returned as is; an empty or missing name
     (None, NaN) gives ''.
     """
-    words = name.split() if isinstance(name, str) else []
-    words = [w for w in words if not w.startswith("(")]
+    words = drop_subgenus(name).split() if isinstance(name, str) else []
     n_words = 3 if len(words) > 2 and words[1] in _SPECIES_QUALIFIERS else 2
     return " ".join(words[:n_words])
 

@@ -11,6 +11,7 @@ from trident.core import stop
 from trident.core.http import create_session, with_optional_session
 from trident.core.utils import (
     StepLog,
+    drop_subgenus,
     pluralize,
     extract_specific_epithet,
     normalize_name,
@@ -164,6 +165,19 @@ def get_aphia_record_by_ncbi_taxid(
     return _get_json(session, url, {"type": "ncbi"}) or None
 
 
+# Ranks between genus and species: WoRMS files the species of a genus split
+# into them under their records, not under the genus.
+INFRAGENERIC_RANKS = {"Subgenus", "Section", "Subsection", "Series", "Subseries"}
+
+
+def _without_subgenus(name: str) -> str:
+    """A WoRMS name without its subgenus, as GBIF and BOLD write it. The name
+    of a subgenus itself ('Phascolosoma (Fisherana)') is kept: the part in
+    parentheses is the taxon."""
+    dropped = drop_subgenus(name)
+    return dropped if len(dropped.split()) > 1 else name
+
+
 # Ranks below species: a record of these ranks is resolved to its species.
 INFRASPECIFIC_RANKS = {"Subspecies", "Variety", "Forma", "Natio"}
 
@@ -178,9 +192,9 @@ def _species_of(record: dict) -> tuple[str, int] | None:
     valid_name = record.get("valid_name") or ""
     if record.get("status") != "accepted":
         # The accepted name is a species when it has two words besides a subgenus.
-        words = [w for w in valid_name.split() if not w.startswith("(")]
-        if record.get("valid_AphiaID") and len(words) == 2:
-            return " ".join(words), int(record["valid_AphiaID"])
+        name = drop_subgenus(valid_name)
+        if record.get("valid_AphiaID") and len(name.split()) == 2:
+            return name, int(record["valid_AphiaID"])
         return None
     if not record.get("parentNameUsageID"):
         return None
@@ -261,6 +275,7 @@ def resolve_accepted_name(
         if species is None:
             return {**not_found, "note": note}
         accepted, aphia_id = species
+    accepted = _without_subgenus(accepted)  # as the WoRMS search names its taxa
     return {
         "input": taxon_name,
         "accepted_name": accepted,
@@ -414,6 +429,9 @@ def _build_taxonomy_dataframe(
     skipped = 0
 
     for sp in raw_records:
+        if sp.get("valid_name"):
+            # Without the subgenus, as GBIF and BOLD name the species.
+            sp = {**sp, "valid_name": _without_subgenus(sp["valid_name"])}
         if not sp.get("valid_name") or (
             accepted_only
             and (sp.get("status") != "accepted" or sp.get("rank") != "Species")
@@ -440,12 +458,11 @@ def _build_taxonomy_dataframe(
                 ]
                 if key in sp
             }
-            if sp.get("rank") == "Species":
-                specific_epithet = extract_specific_epithet(
-                    sp.get("valid_name"), sp.get("genus")
-                )
-                if specific_epithet:
-                    record["specificEpithet"] = specific_epithet
+            specific_epithet = extract_specific_epithet(
+                sp["valid_name"], sp.get("genus")
+            )
+            if specific_epithet:
+                record["specificEpithet"] = specific_epithet
         else:
             record = sp
 
@@ -495,7 +512,8 @@ def get_species_from_genus_list(
 
     For each genus, resolves the AphiaIDs to expand (every accepted homonym,
     see get_genus_aphia_ids) then fetches all their child taxa with
-    pagination; each species records its genus record as genusID. Results
+    pagination, and those of their accepted subgenera; each species records
+    its genus record as genusID and is named without its subgenus. Results
     are filtered to accepted species by default and normalised into a
     standardised taxonomy DataFrame.
 
@@ -537,18 +555,27 @@ def get_species_from_genus_list(
                     result_sink(pd.DataFrame(), [genus])
                 continue
 
-            # 2. Retrieve all children with internal pagination. An error on
-            # any homonym fails the whole genus, so no partial list is cached.
+            # 2. Retrieve all children with internal pagination, and those of
+            # each accepted subgenus or section, level by level, where the
+            # species of a split genus are (Phascolosoma (Phascolosoma)
+            # arcuatum). An error on any homonym or subgenus fails the whole
+            # genus, so no partial list is cached.
             children = []
             for aphia_id in aphia_ids:
-                with log.query(genus):
-                    children += [
-                        {**child, "genusID": aphia_id}
-                        for child in get_children_by_aphia_id(
-                            aphia_id, session=session, marine_only=marine_only
+                to_expand = [aphia_id]
+                while to_expand:
+                    with log.query(genus):
+                        records = get_children_by_aphia_id(
+                            to_expand.pop(0), session=session, marine_only=marine_only
                         )
-                    ]
-                stop.wait(delay)
+                    stop.wait(delay)
+                    children.extend({**r, "genusID": aphia_id} for r in records)
+                    to_expand.extend(
+                        r["AphiaID"]
+                        for r in records
+                        if r.get("rank") in INFRAGENERIC_RANKS
+                        and r.get("status") == "accepted"
+                    )
 
             # 3. Filter and build the genus's taxonomy DataFrame
             df, n_kept, n_skipped = _build_taxonomy_dataframe(children, accepted_only)
@@ -558,7 +585,11 @@ def get_species_from_genus_list(
             if result_sink is not None:
                 result_sink(df, [genus])
             if children:
-                log.item(genus, f"{len(children)} {pluralize(len(children), 'record')}")
+                log.item(
+                    genus,
+                    f"{len(df)} species ({len(children)} WoRMS "
+                    f"{pluralize(len(children), 'record')})",
+                )
             else:
                 marine = "marine " if marine_only else ""
                 log.item(

@@ -31,7 +31,7 @@ repos:
         entry: uv run codespell
         language: system
         types_or: [markdown, python, text]
-        exclude: ^data/
+        exclude: ^(data|tests/fixtures)/
 
       - id: ruff-check
         name: ruff fix

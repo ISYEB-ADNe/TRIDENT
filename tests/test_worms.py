@@ -1,6 +1,9 @@
 """Tests for the WoRMS client: failures, name resolution and genus
 expansion, without network (real answers as fixtures)."""
 
+import json
+from pathlib import Path
+
 import pytest
 
 from trident.clients import worms
@@ -277,6 +280,65 @@ def test_failed_page_fails_the_genus_instead_of_a_partial_list(monkeypatch):
     df, failed = get_species_from_genus_list(["Gadus"], delay=0)
     assert failed == ["Gadus"]
     assert df.empty
+
+
+class _Answers(_Session):
+    """Answers each request from saved WoRMS answers, keyed on the path after
+    the API base, children in pages of 50 from the requested offset."""
+
+    def __init__(self, answers):
+        self.answers = answers
+        self.asked = set()
+
+    def get(self, url, params=None, **k):
+        path = url.removeprefix(worms.WORMS_API_BASE + "/")
+        self.asked.add(path)
+        records = self.answers.get(path)
+        if "offset" in (params or {}):
+            start = params["offset"] - 1
+            records = (records or [])[start : start + 50]
+        return _Page(200 if records else 204, records)
+
+
+def test_genus_with_subgenera_expands_to_their_species(monkeypatch):
+    """The species of a genus split into subgenera are in its list, named
+    without the subgenus and with their genus record (Phascolosoma: most of its
+    species are in the subgenera Phascolosoma and Fisherana). Only accepted
+    subgenera are expanded, and the WoRMS name check gives the same name, so a
+    MOL species in a subgenus matches its row."""
+    session = _Answers(
+        json.loads(
+            (Path(__file__).parent / "fixtures" / "worms_phascolosoma.json").read_text()
+        )
+    )
+    monkeypatch.setattr(worms, "create_session", lambda **k: session)
+    df, failed = get_species_from_genus_list(["Phascolosoma"], delay=0)
+    assert failed == []
+    assert len(df) == 23
+    row = df.set_index("scientificName").loc["Phascolosoma arcuatum"]
+    assert row["specificEpithet"] == "arcuatum"
+    assert row["genusID"] == 136029
+    assert not df["scientificName"].str.contains("(", regex=False).any()
+    unaccepted = {
+        f"AphiaChildrenByAphiaID/{r['AphiaID']}"
+        for r in session.answers["AphiaChildrenByAphiaID/136029"]
+        if r["rank"] == "Subgenus" and r["status"] != "accepted"
+    }
+    assert len(unaccepted) == 4 and not unaccepted & session.asked
+
+    # WoRMS's record of the name as NCBI writes it, without the subgenus.
+    (record,) = [
+        r
+        for r in session.answers["AphiaChildrenByAphiaID/136029"]
+        if r["AphiaID"] == 424763
+    ]
+    session.answers["AphiaRecordsByName/Phascolosoma arcuatum"] = [record]
+    resolved = worms.resolve_accepted_name("Phascolosoma arcuatum", session=session)
+    assert (resolved["accepted_name"], str(resolved["aphia_id"])) == (
+        "Phascolosoma arcuatum",
+        row["taxonID"],
+    )
+    assert not resolved["is_synonym"]
 
 
 def test_name_whose_records_lead_to_several_species_stays_as_ncbi_names_it(
