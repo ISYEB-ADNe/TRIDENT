@@ -250,12 +250,6 @@ def run_bold_filter(
         Filtered DataFrame with representative sequences per species.
     """
 
-    kept = f"the {longest_n} longest" if longest_n is not None else "all"
-    logger.info(
-        f"BOLD filter: per species, {kept} BOLD sequences less than {similarity}% "
-        "identical to a longer one"
-    )
-
     bold_search_df = with_sequences(bold_search_df)
     filtered_dfs = []
     total_original = len(bold_search_df)

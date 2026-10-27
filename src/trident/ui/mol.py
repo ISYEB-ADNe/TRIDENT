@@ -5,7 +5,12 @@ import math
 import streamlit as st
 
 
-from trident.core.utils import pluralize, species_for_sequences
+from trident.core.utils import (
+    FILTER_METHOD_LABELS,
+    SETTING_LABELS,
+    pluralize,
+    species_for_sequences,
+)
 from trident.clients import ncbi
 from trident.clients.fasta import dataframe_to_records, records_to_fasta_string
 from trident.clients.ncbi import set_ncbi_email
@@ -19,7 +24,6 @@ import trident.pipelines as pipe
 
 
 from trident.ui.ui import (
-    SETTING_LABELS,
     failed_items,
     show_failed_items_banner,
     show_filter_success,
@@ -59,11 +63,6 @@ from trident.ui.defaults import (
     NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT,
     NCBI_ENFORCE_LOW_IDENTITY_DEFAULT,
 )
-
-FILTER_METHOD_LABELS = {
-    "barcoding_gap": "Barcoding gap",
-    "similarity": "Similarity range",
-}
 
 # The columns of a BLAST hit the MOL tables show, after the sequence.
 HIT_COLUMNS = [

@@ -310,44 +310,6 @@ def column_config(columns, **overrides) -> dict:
     return {col: overrides[col] if col in overrides else COL[col] for col in columns}
 
 
-# The label of each setting: its widget shows it, and so does the Parameters
-# tab (ordered there by section).
-SETTING_LABELS: dict[str, str] = {
-    # MOL (NCBI BLAST)
-    "blast_database": "BLAST database",
-    "ncbi_max_hits": "Max hits per query",
-    "ncbi_ev_exponent": "E-value exponent",
-    "ncbi_query_cover": "Query cover (%)",
-    "ncbi_method": "Filtering method",
-    "ncbi_gap_size": "Gap size (%)",
-    "ncbi_gap_min_top": "Gap min top (%)",
-    "ncbi_low_identity_threshold": "Low identity warning (%)",
-    "ncbi_enforce_low_identity": "Enforce as hard filter",
-    # TAX (WoRMS)
-    "worms_marine_only": "Marine species only",
-    "tax_drop_mol_rejected": "Exclude species already rejected by MOL",
-    # GEO (GBIF)
-    "gbif_latitude": "Latitude",
-    "gbif_longitude": "Longitude",
-    "gbif_extents": "Search extents (km)",
-    "gbif_area": "Search area",
-    "gbif_filter_extent": "Filtering area",
-    "gbif_min_occurrences": "Minimum occurrences",
-    # EXTRA (BOLD)
-    "bold_keep_only_COI5P": "COI-5P records only",
-    "bold_keep_ncbi": "Include records mined from GenBank",
-    "bold_longest_n": "Max sequences per species",
-    "bold_similarity": "Redundancy identity (%)",
-    # HYPO (BOLD + NCBI)
-    "hypo_max_hits": "Max hits per query",
-    "hypo_ev_exponent": "E-value exponent",
-    "hypo_identity_cutoff": "Min hit identity (%)",
-    "hypo_ntop": "Top hits kept",
-    "hypo_query_cover": "Query cover (%)",
-    "hypo_identity": "Proxy identity (%)",
-    "hypo_check_ev_exponent": "HYPO check E-value exponent",
-}
-
 # The names the Settings panel gives the log levels.
 LOG_LEVEL_LABELS = {"INFO": "Standard", "DEBUG": "Verbose"}
 

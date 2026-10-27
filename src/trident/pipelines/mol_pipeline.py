@@ -209,15 +209,6 @@ def run_ncbi_filter(
     if search_params is None:
         search_params = {}
 
-    if method == "barcoding_gap":
-        rule = (
-            f"hits above a barcoding gap of at least {gap_size}% (gap top ≥ "
-            f"{gap_min_top}%), else hits within {gap_size}% of the best"
-        )
-    else:
-        rule = f"hits within {gap_size}% of the best"
-    logger.info(f"MOL filter: query cover ≥ {query_cover}%, {rule}")
-
     filtered_df = filter_blast_results(
         ncbi_search_df,
         query_cover=query_cover,

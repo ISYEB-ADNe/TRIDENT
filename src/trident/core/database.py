@@ -16,7 +16,12 @@ import pandas as pd
 from loguru import logger
 
 from trident.core import config
-from trident.core.utils import ensure_columns, pluralize, set_progress_total
+from trident.core.utils import (
+    describe_settings,
+    ensure_columns,
+    pluralize,
+    set_progress_total,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -910,8 +915,26 @@ def save_to_db(
     *log_reuse_as* is the name a step that only processes previous results
     gives its summary line, e.g. ``"GEO filter"``: when its whole result is
     reused, the step does not run, so it logs that instead of its summary.
+
+    A step named by *log_as* or *log_reuse_as* lists its own settings at
+    INFO after its first line, whether it runs or its result is reused, so a
+    kept log says which settings produced the result: the keys of its params
+    that have a label (SETTING_LABELS), except those it inherits (found in a
+    dict argument, the params of an earlier step).
     """
     match_map = cache.match_map
+    step = log_as[0] if log_as else log_reuse_as
+
+    def log_step_settings(params: dict, bound_kwargs: dict) -> None:
+        if not step:
+            return
+        inherited = set().union(
+            *(v.keys() for v in bound_kwargs.values() if isinstance(v, dict))
+        )
+        own = {k: v for k, v in params.items() if k not in inherited}
+        settings = describe_settings(own)
+        if settings:
+            logger.info(f"{step} settings: {settings}")
 
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
@@ -940,6 +963,7 @@ def save_to_db(
             if db_path is None or not cache_items:
                 if cache_items:
                     _log_cache_use(func.__name__, log_as, 0, len(cache_items))
+                    log_step_settings(params, bound_kwargs)
                 sink = bound_kwargs.get("failure_sink")
                 if sink is None and "failure_sink" in sig.parameters:
                     sink = kwargs["failure_sink"] = []
@@ -987,6 +1011,7 @@ def save_to_db(
                 _log_cache_use(
                     func.__name__, log_as, len(cached_ids), len(uncached_items)
                 )
+                log_step_settings(params, bound_kwargs)
                 if log_reuse_as and not uncached_items:
                     logger.info(f"{log_reuse_as}: saved result reused (same settings)")
                 # A progress tracker counts items as they are executed, so its

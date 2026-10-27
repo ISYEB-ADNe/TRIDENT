@@ -16,9 +16,8 @@ from trident.clients.bold import (
 )
 import trident.pipelines as pipe
 
-from trident.core.utils import count_phrase, species_for_sequences
+from trident.core.utils import SETTING_LABELS, count_phrase, species_for_sequences
 from trident.ui.ui import (
-    SETTING_LABELS,
     RETRY_EMPTY,
     record_empty_step,
     failed_items,

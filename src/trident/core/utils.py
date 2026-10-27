@@ -179,6 +179,88 @@ def count_phrase(
     return ", ".join(f"{counts[o]}{noun} {o}" for o in order)
 
 
+# The label of each setting: its widget shows it, and so do the Parameters
+# tab (ordered there by section) and the settings line of each step's log.
+SETTING_LABELS: dict[str, str] = {
+    # MOL (NCBI BLAST)
+    "blast_database": "BLAST database",
+    "ncbi_max_hits": "Max hits per query",
+    "ncbi_ev_exponent": "E-value exponent",
+    "ncbi_query_cover": "Query cover (%)",
+    "ncbi_method": "Filtering method",
+    "ncbi_gap_size": "Gap size (%)",
+    "ncbi_gap_min_top": "Gap min top (%)",
+    "ncbi_low_identity_threshold": "Low identity warning (%)",
+    "ncbi_enforce_low_identity": "Enforce as hard filter",
+    # TAX (WoRMS)
+    "worms_marine_only": "Marine species only",
+    "tax_drop_mol_rejected": "Exclude species already rejected by MOL",
+    # GEO (GBIF)
+    "gbif_latitude": "Latitude",
+    "gbif_longitude": "Longitude",
+    "gbif_extents": "Search extents (km)",
+    "gbif_area": "Search area",
+    "gbif_filter_extent": "Filtering area",
+    "gbif_min_occurrences": "Minimum occurrences",
+    # EXTRA (BOLD)
+    "bold_keep_only_COI5P": "COI-5P records only",
+    "bold_keep_ncbi": "Include records mined from GenBank",
+    "bold_longest_n": "Max sequences per species",
+    "bold_similarity": "Redundancy identity (%)",
+    # HYPO (BOLD + NCBI)
+    "hypo_max_hits": "Max hits per query",
+    "hypo_ev_exponent": "E-value exponent",
+    "hypo_identity_cutoff": "Min hit identity (%)",
+    "hypo_ntop": "Top hits kept",
+    "hypo_query_cover": "Query cover (%)",
+    "hypo_identity": "Proxy identity (%)",
+    "hypo_check_ev_exponent": "HYPO check E-value exponent",
+}
+
+FILTER_METHOD_LABELS = {
+    "barcoding_gap": "Barcoding gap",
+    "similarity": "Similarity range",
+}
+
+AREA_LABELS = {"circle": "Circle", "box": "Bounding box"}
+
+# Settings whose values the tabs show under another name.
+VALUE_LABELS = {
+    "ncbi_method": FILTER_METHOD_LABELS,
+    "gbif_area": AREA_LABELS,
+    "bold_longest_n": {None: "No limit"},
+}
+
+
+def format_setting(value, key: str = "") -> str:
+    """A setting's value as the tabs show it (*key*: the setting)."""
+    labels = VALUE_LABELS.get(key, {})
+    if not isinstance(value, list) and value in labels:
+        return labels[value]
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value)
+    return str(value)
+
+
+def describe_settings(params: dict) -> str:
+    """The settings among *params* (those with a label) as the log lists them,
+    in the order of the Parameters tab: "BLAST database: core_nt; Max hits per
+    query: 500". The gap top is left out with the similarity range, which does
+    not use it."""
+    unused = (
+        {"ncbi_gap_min_top"} if params.get("ncbi_method") == "similarity" else set()
+    )
+    return "; ".join(
+        f"{label}: {format_setting(params[key], key)}"
+        for key, label in SETTING_LABELS.items()
+        if key in params and key not in unused
+    )
+
+
 class StepLog:
     """Log lines of one search step, the same for every source: a line per
     item it queries ("BOLD search 12/33: Gadus morhua, 45 BOLD sequences") and

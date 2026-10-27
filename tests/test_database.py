@@ -103,14 +103,19 @@ def test_full_cache_whole_float_and_int_share_the_cache(db_path):
     assert call_count == 2
 
 
-def test_reused_step_logs_in_place_of_its_summary(db_path):
-    """A step that only processes previous results does not run when its
-    result is reused, so it logs that it was reused instead of its summary."""
+def test_step_logs_its_settings_and_whether_its_result_was_reused(db_path):
+    """A step lists its own settings in the log (not those of the earlier step
+    it inherits), whether it runs or its result is reused; a reused step does
+    not run, so it logs that it was reused instead of its summary."""
 
     @save_to_db(
-        "test_reuse", cache=FullCache(local={"t": "t"}), log_reuse_as="GEO filter"
+        "test_reuse",
+        cache=FullCache(
+            local={"gbif_min_occurrences": "t"}, inherit_from=["merge_params"]
+        ),
+        log_reuse_as="GEO filter",
     )
-    def my_step(t=90):
+    def my_step(t=3, merge_params=None):
         logger.info("GEO filter: 3 species kept")
         return pd.DataFrame({"val": [t]})
 
@@ -118,15 +123,19 @@ def test_reused_step_logs_in_place_of_its_summary(db_path):
     sink = logger.add(lambda m: lines.append(m.record["message"]), level="INFO")
     logger.enable("trident")  # as the app does (the package disables it)
     try:
-        my_step(t=90, db_path=db_path)
-        my_step(t=90, db_path=db_path)
-        my_step(t=95, db_path=db_path)
+        merge_params = {"gbif_area": "circle"}
+        my_step(t=3, merge_params=merge_params, db_path=db_path)
+        my_step(t=3, merge_params=merge_params, db_path=db_path)
+        my_step(t=5, merge_params=merge_params, db_path=db_path)
     finally:
         logger.disable("trident")
         logger.remove(sink)
     assert lines == [
+        "GEO filter settings: Minimum occurrences: 3",
         "GEO filter: 3 species kept",
+        "GEO filter settings: Minimum occurrences: 3",
         "GEO filter: saved result reused (same settings)",
+        "GEO filter settings: Minimum occurrences: 5",
         "GEO filter: 3 species kept",
     ]
 

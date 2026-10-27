@@ -9,8 +9,8 @@ import streamlit as st
 
 from trident.core import config
 from trident.logging import get_log_level
-from trident.ui.mol import FILTER_METHOD_LABELS
-from trident.ui.ui import LOG_LEVEL_LABELS, SETTING_LABELS
+from trident.core.utils import SETTING_LABELS, format_setting
+from trident.ui.ui import LOG_LEVEL_LABELS
 
 
 # --------------------------------------------------------------------
@@ -86,23 +86,6 @@ SECTIONS = [
 # -------------------------------------------------------------------
 
 
-# Settings whose values the tabs show under another name.
-VALUE_LABELS = {"ncbi_method": FILTER_METHOD_LABELS}
-
-
-def _format_value(value, key: str = "") -> str:
-    """Format a parameter value for display, as its tab names it."""
-    if key in VALUE_LABELS:
-        return VALUE_LABELS[key].get(value, str(value))
-    if isinstance(value, bool):
-        return "Yes" if value else "No"
-    if isinstance(value, float) and value == int(value):
-        return str(int(value))
-    if isinstance(value, list):
-        return ", ".join(str(v) for v in value)
-    return str(value)
-
-
 def _build_params_text() -> str:
     """Build a plain-text parameter report."""
     analysis_name = st.session_state.get("analysis_name", "analysis")
@@ -118,7 +101,7 @@ def _build_params_text() -> str:
         for key in param_keys:
             if key in params:
                 label = SETTING_LABELS.get(key, key)
-                lines.append(f"  {label}: {_format_value(params[key], key)}")
+                lines.append(f"  {label}: {format_setting(params[key], key)}")
         lines.append("")
 
     return "\n".join(lines)
@@ -141,7 +124,7 @@ def _show_params_section(title: str, params_key: str, param_keys: list[str]):
             rows.append(
                 {
                     "Parameter": SETTING_LABELS.get(key, key),
-                    "Value": _format_value(params[key], key),
+                    "Value": format_setting(params[key], key),
                 }
             )
 

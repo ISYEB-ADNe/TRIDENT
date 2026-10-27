@@ -4,7 +4,12 @@ list."""
 import pandas as pd
 import streamlit as st
 
-from trident.core.utils import pluralize, species_for_sequences
+from trident.core.utils import (
+    AREA_LABELS,
+    SETTING_LABELS,
+    pluralize,
+    species_for_sequences,
+)
 from trident.core import config, stop
 import trident.pipelines as pipe
 from trident.clients.gbif import (
@@ -16,7 +21,6 @@ from trident.clients.gbif import (
 )
 
 from trident.ui.ui import (
-    SETTING_LABELS,
     record_empty_step,
     failed_items,
     show_failed_items_banner,
@@ -51,8 +55,6 @@ from trident.ui.defaults import (
 # --------------------------------------------------------------------
 # SEARCH FUNCTIONS
 # -------------------------------------------------------------------
-
-AREA_LABELS = {"circle": "Circle", "box": "Bounding box"}
 
 
 def display_gbif_parameters():

@@ -492,6 +492,7 @@ def run_hypo_merge(
         },
         inherit_from=["hypo_merge_params"],
     ),
+    log_reuse_as="HYPO filter",
 )
 @preserve_sequence_order("seq_id", "hypo_merge_df")
 def run_hypo_filter(
@@ -515,10 +516,16 @@ def run_hypo_filter(
     if hypo_merge_params is None:
         hypo_merge_params = {}
 
-    return hypo_merge_df[
+    filtered_df = hypo_merge_df[
         (hypo_merge_df["proxy_query_cover"] >= query_cover)
         & (hypo_merge_df["proxy_identity"] >= identity)
     ].copy()
+    total = len(hypo_merge_df)
+    logger.info(
+        f"HYPO filter: {len(filtered_df)}/{total} {pluralize(total, 'hit')} kept, "
+        f"{species_for_sequences(filtered_df)}"
+    )
+    return filtered_df
 
 
 ### FILTER SUMMARY ###
