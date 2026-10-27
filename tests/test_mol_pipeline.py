@@ -7,6 +7,7 @@ from trident.clients.ncbi import filter_blast_results
 from trident.pipelines.mol_pipeline import (
     build_mol_sequence_report,
     build_mol_summary,
+    build_ncbi_search_overview,
     finalize_mol_results,
 )
 
@@ -119,4 +120,25 @@ def test_sequence_report_finds_the_gap_on_all_hits():
     assert (report["cut"].top, report["cut"].bottom) == (99.5, 96.0)
     assert report["species_across_gap"] == {
         "SpecA": {"before_gap": [100.0, 99.5], "after_gap": [96.0]}
+    }
+
+
+def test_overview_flags_a_search_cut_among_hits_close_to_its_top():
+    """At the hit limit, a sequence whose hits all lie within 3% of a top hit
+    at 97% or more is flagged; one whose top hit is lower is not, nor one
+    below the limit."""
+    hits = pd.DataFrame(
+        {
+            "seq_id": ["near"] * 4 + ["low"] * 4 + ["few"] * 2,
+            "identity_percentage": [100, 99, 98, 97.5, 95, 94, 93, 92.5, 100, 99],
+        }
+    )
+    sequences = pd.DataFrame({"seq_id": ["near", "low", "few"]})
+
+    overview = build_ncbi_search_overview(hits, sequences, max_hits=4)
+
+    assert overview.set_index("seq_id")["close_hits_cut"].to_dict() == {
+        "near": True,
+        "low": False,
+        "few": False,
     }

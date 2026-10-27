@@ -22,6 +22,7 @@ from .fasta import records_to_fasta_string
 from trident.core import config, stop
 from trident.core.http import retry_call
 from trident.core.constants import (
+    BLAST_DATABASE,
     NCBI_GAP_SIZE,
     NCBI_GAP_MIN_TOP,
     NCBI_QUERY_COVER,
@@ -164,8 +165,11 @@ BLAST_RAW_COLUMNS = [
 
 
 def parse_blast_records(records: list) -> pd.DataFrame:
-    """Parse Bio.Blast records (XML2) into a flat DataFrame, one row per HSP.
+    """Parse Bio.Blast records (XML2) into a flat DataFrame, one row per hit.
 
+    A hit is one database record; when the query aligns to it in several
+    pieces (HSPs), the row describes the best one (highest score, then bit
+    score), so the record counts once.
     A hit that merges several identical database records is described by its
     first record: its title (hit_def), accession, NCBI taxid and the scientific
     name NCBI's taxonomy gives that taxid (sciname). Records with no hits
@@ -186,29 +190,33 @@ def parse_blast_records(records: list) -> pd.DataFrame:
 
         for hit in record:
             target = hit.target
-            for hsp in hit:
-                # Bio.Blast coordinates are 0-based and end-exclusive; BLAST
-                # positions are 1-based and inclusive.
-                query_coords = hsp.coordinates[1]
-                rows.append(
-                    {
-                        "seq_id": seq_id,
-                        "query_length": query_length,
-                        "hit_def": target.description,
-                        "hit_id": target.id,
-                        "hit_accession": target.name,
-                        "score": hsp.score,
-                        "bits": hsp.annotations["bit score"],
-                        "evalue": hsp.annotations["evalue"],
-                        "align_length": hsp.shape[1],
-                        "identities": hsp.annotations["identity"],
-                        "gaps": hsp.annotations.get("gaps", 0),
-                        "query_start": int(min(query_coords[0], query_coords[-1])) + 1,
-                        "query_end": int(max(query_coords[0], query_coords[-1])),
-                        "ncbi_taxid": target.annotations.get("taxid"),
-                        "sciname": target.annotations.get("sciname"),
-                    }
-                )
+            hsp = max(
+                hit, key=lambda h: (h.score, h.annotations["bit score"]), default=None
+            )
+            if hsp is None:
+                continue
+            # Bio.Blast coordinates are 0-based and end-exclusive; BLAST
+            # positions are 1-based and inclusive.
+            query_coords = hsp.coordinates[1]
+            rows.append(
+                {
+                    "seq_id": seq_id,
+                    "query_length": query_length,
+                    "hit_def": target.description,
+                    "hit_id": target.id,
+                    "hit_accession": target.name,
+                    "score": hsp.score,
+                    "bits": hsp.annotations["bit score"],
+                    "evalue": hsp.annotations["evalue"],
+                    "align_length": hsp.shape[1],
+                    "identities": hsp.annotations["identity"],
+                    "gaps": hsp.annotations.get("gaps", 0),
+                    "query_start": int(min(query_coords[0], query_coords[-1])) + 1,
+                    "query_end": int(max(query_coords[0], query_coords[-1])),
+                    "ncbi_taxid": target.annotations.get("taxid"),
+                    "sciname": target.annotations.get("sciname"),
+                }
+            )
 
     return pd.DataFrame(rows, columns=BLAST_RAW_COLUMNS)
 
@@ -456,7 +464,7 @@ def _run_qblast_once(
     polls on its own, so a slow job neither makes way nor is given up."""
     with Blast.qblast(
         program="blastn",
-        database="nt",
+        database=BLAST_DATABASE,
         sequence=multi_fasta,
         expect=evalue,
         hitlist_size=hitlist_size,
@@ -558,11 +566,12 @@ def _blast_request(**params) -> requests.Response:
 def _submit_blast_job(
     multi_fasta: str, evalue: float, hitlist_size: int, entrez_query: str | None
 ) -> tuple[str, int | None]:
-    """Submit a BLASTn search of ``nt``; return its RID and RTOE (seconds)."""
+    """Submit a BLASTn search of BLAST_DATABASE; return its RID and RTOE
+    (seconds)."""
     params = {
         "CMD": "Put",
         "PROGRAM": "blastn",
-        "DATABASE": "nt",
+        "DATABASE": BLAST_DATABASE,
         "QUERY": multi_fasta,
         "EXPECT": evalue,
         "HITLIST_SIZE": hitlist_size,

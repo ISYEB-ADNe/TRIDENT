@@ -24,6 +24,7 @@ SECTIONS = [
         "MOL: NCBI BLAST",
         "mol_params",
         [
+            "blast_database",
             "ncbi_max_hits",
             "ncbi_ev_exponent",
             "ncbi_query_cover",

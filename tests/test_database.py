@@ -207,6 +207,31 @@ def test_partial_cache_caches_per_item(db_path):
     assert executed_items == ["d"]
 
 
+def test_partial_cache_reuses_items_only_under_the_same_constants(db_path):
+    """Items saved without a constant (an older analysis) or under another
+    value of it (another BLAST database) are searched again."""
+    executed = []
+
+    def step(constants):
+        @save_to_db(
+            "test_constants",
+            cache=PartialCache(
+                items_kwarg="items", item_key="name", constants=constants
+            ),
+        )
+        def my_step(items):
+            executed.extend(items)
+            return pd.DataFrame({"name": items})
+
+        return my_step
+
+    step(None)(["a"], db_path=db_path)
+    step({"blast_database": "core_nt"})(["a"], db_path=db_path)
+    step({"blast_database": "nt"})(["a"], db_path=db_path)
+    step({"blast_database": "core_nt"})(["a"], db_path=db_path)
+    assert executed == ["a", "a", "a"]
+
+
 def test_progress_total_counts_only_the_items_executed(db_path):
     """A resumed run's progress bar ends full: its total is the items this
     call executes, not the cached ones."""

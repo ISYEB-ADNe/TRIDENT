@@ -110,10 +110,13 @@ COL = {
     ),
     # BLAST hits (MOL search and list, HYPO check)
     "identity_percentage": _percent(
-        "Identity (%)", "Percentage of matching bases in the alignment."
+        "Identity (%)",
+        "Percentage of matching bases in the best alignment with the GenBank record.",
     ),
     "query_cover": _percent(
-        "Query Cover (%)", "Percentage of the query sequence covered by the hit."
+        "Query Cover (%)",
+        "Percentage of the query sequence covered by the best alignment with the "
+        "GenBank record.",
     ),
     "hit_url": _link("NCBI Link"),
     "hit_def": _Text("Hit Definition", help="Title of the GenBank record."),
@@ -311,6 +314,7 @@ def column_config(columns, **overrides) -> dict:
 # tab (ordered there by section).
 SETTING_LABELS: dict[str, str] = {
     # MOL (NCBI BLAST)
+    "blast_database": "BLAST database",
     "ncbi_max_hits": "Max hits per query",
     "ncbi_ev_exponent": "E-value exponent",
     "ncbi_query_cover": "Query cover (%)",
@@ -1378,11 +1382,13 @@ def highlight_in_mol(row):
     return [style] * len(row)
 
 
-def get_recent_param_sets(db_path, table_name, columns, limit=5):
+def get_recent_param_sets(db_path, table_name, columns, limit=5, only=None):
     """Return distinct recent parameter combinations from cache history.
 
-    *limit* None returns them all.
+    *limit* None returns them all. *only*: values the rows must hold (e.g. the
+    BLAST database), so a preset never names results the step cannot reuse.
     """
+    only = only or {}
     if not os.path.exists(db_path):
         return []
     try:
@@ -1390,7 +1396,7 @@ def get_recent_param_sets(db_path, table_name, columns, limit=5):
             # A table without one of these columns predates that setting: no preset
             info = conn.execute(f"PRAGMA table_info({table_name})")
             stored = {row[1] for row in info}
-            if stored and not set(columns) <= stored:
+            if stored and not set(columns) | set(only) <= stored:
                 logger.debug(f"No presets from {table_name}: written before {columns}")
                 return []
             cols_sql = ", ".join(columns)
@@ -1398,12 +1404,16 @@ def get_recent_param_sets(db_path, table_name, columns, limit=5):
                 f"{col} IS NOT NULL AND {col} <> 'None' AND {col} <> ''"
                 for col in columns
             )
+            for col in only:
+                where_clauses += f" AND {col} = ?"
             query = f"""
                 SELECT {cols_sql} FROM {table_name}
                 WHERE {where_clauses}
                 GROUP BY {cols_sql} ORDER BY MAX(run_id) DESC LIMIT ?
             """
-            rows = conn.execute(query, (-1 if limit is None else limit,)).fetchall()
+            rows = conn.execute(
+                query, (*only.values(), -1 if limit is None else limit)
+            ).fetchall()
         return [dict(zip(columns, row)) for row in rows]
     except sqlite3.OperationalError as exc:
         # A missing table is normal before its step has run for the first time,

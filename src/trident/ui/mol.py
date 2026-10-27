@@ -7,8 +7,14 @@ import streamlit as st
 
 from trident.core.utils import pluralize, species_for_sequences
 from trident.clients import ncbi
+from trident.clients.fasta import dataframe_to_records, records_to_fasta_string
 from trident.clients.ncbi import set_ncbi_email
 from trident.core import config
+from trident.core.constants import (
+    BLAST_DATABASE,
+    NCBI_CUT_RANGE,
+    NCBI_CUT_TOP_IDENTITY,
+)
 import trident.pipelines as pipe
 
 
@@ -42,6 +48,7 @@ from trident.ui.defaults import (
     BLAST_GIVE_UP_MINUTES_MIN,
     BLAST_MAX_THREADS,
     NCBI_MAX_HITS_DEFAULT,
+    NCBI_MAX_HITS_LIMIT,
     NCBI_EV_EXPONENT_DEFAULT,
     NCBI_NUM_THREADS_DEFAULT,
     NCBI_BATCH_SIZE_DEFAULT,
@@ -86,7 +93,12 @@ def display_ncbi_parameters():
     db_path = st.session_state.db_path
     db_cols = ["ncbi_max_hits", "ncbi_ev_exponent"]
 
-    presets = get_recent_param_sets(db_path, "ncbi_search_inputs", db_cols)
+    presets = get_recent_param_sets(
+        db_path,
+        "ncbi_search_inputs",
+        db_cols,
+        only={"blast_database": BLAST_DATABASE},
+    )
     param_preset_selector(
         presets,
         format_fn=lambda p: (
@@ -108,7 +120,7 @@ def display_ncbi_parameters():
         max_hits = st.number_input(
             SETTING_LABELS["ncbi_max_hits"],
             1,
-            1000,
+            NCBI_MAX_HITS_LIMIT,
             help=BLAST_HELP["max_hits"],
             key="ncbi_max_hits",
         )
@@ -558,17 +570,39 @@ def display_ncbi_search_overview():
     with st.container(border=True):
         st.markdown("### Search Overview")
 
-        saturated = overview_df[overview_df["max_hits_reached"]]
-        if not saturated.empty:
-            NARROW_RANGE_THRESHOLD = 5
-            narrow = saturated[saturated["identity_range"] <= NARROW_RANGE_THRESHOLD]
-            if not narrow.empty:
-                seq_list = ", ".join(f"**{s}**" for s in narrow["seq_id"])
-                st.warning(
-                    f"The maximum number of hits ({max_hits}) was reached for {seq_list} "
-                    f"within a narrow identity range ({NARROW_RANGE_THRESHOLD}%). Raise "
-                    "**Max hits per query** to get lower-identity hits."
-                )
+        cut = overview_df.loc[overview_df["close_hits_cut"], "seq_id"].tolist()
+        if cut:
+            n = len(cut)
+            them = pluralize(n, "it", "them")
+            rerun = (
+                f"run {them} separately with a higher "
+                f"**{SETTING_LABELS['ncbi_max_hits']}**."
+                if max_hits < NCBI_MAX_HITS_LIMIT
+                else f"search {them} on the NCBI BLAST website, which can return "
+                "more hits."
+            )
+            st.warning(
+                f"{n} {pluralize(n, 'sequence')} reached the maximum number of "
+                f"hits ({max_hits}) with every hit within {NCBI_CUT_RANGE}% identity "
+                f"of a top hit at {NCBI_CUT_TOP_IDENTITY}% identity or more: "
+                f"{', '.join(f'**{s}**' for s in cut)}. Other species with a high "
+                "identity may have been missed. If you want to look further, you "
+                f"can download {pluralize(n, 'this sequence', 'these sequences')} "
+                f"(FASTA) and {rerun}"
+            )
+            sequences_df = st.session_state.sequences_df
+            st.download_button(
+                label="⬇️ Download (FASTA)",
+                data=lambda: records_to_fasta_string(
+                    dataframe_to_records(sequences_df[sequences_df["seq_id"].isin(cut)])
+                ),
+                file_name=(
+                    f"{st.session_state.get('analysis_name', 'analysis')}"
+                    "_hit_limit.fasta"
+                ),
+                mime="text/plain",
+                key="close_hits_cut_download",
+            )
 
         shown = [
             "seq_id",

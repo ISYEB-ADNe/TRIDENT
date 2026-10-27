@@ -7,6 +7,11 @@ Performance-only knobs (thread counts, batch sizes) live in the UI layer, not
 here.
 """
 
+# --- NCBI BLAST (MOL search, HYPO search, HYPO check) ---
+# core_nt: nt without most eukaryotic chromosome sequences; it keeps the
+# mitochondrial records and is the default database of NCBI's BLAST website.
+BLAST_DATABASE = "core_nt"
+
 # --- MOL (NCBI BLAST + barcoding-gap filter) ---
 NCBI_MAX_HITS = 500
 NCBI_EV_EXPONENT = 20
@@ -16,6 +21,10 @@ NCBI_GAP_SIZE = 2
 NCBI_GAP_MIN_TOP = 97
 NCBI_LOW_IDENTITY_THRESHOLD = 95
 NCBI_ENFORCE_LOW_IDENTITY = False
+# A search that reached its hit limit with every hit within this range (%) of a
+# top hit at or above this identity may have left close species out.
+NCBI_CUT_TOP_IDENTITY = 97
+NCBI_CUT_RANGE = 3
 
 # --- GEO (GBIF) ---
 GBIF_CONFIDENCE = 95

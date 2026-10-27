@@ -932,6 +932,7 @@ _SOURCE_STEPS = [
     ("gbif_search", "GBIF", "GEO"),
     ("bold_search", "BOLD", "EXTRA"),
     ("hypo_search", "NCBI", "HYPO"),
+    ("hypo_check", "NCBI", "HYPO check"),
     ("worms_higher_taxa", "WoRMS", "One row per sequence table"),
 ]
 

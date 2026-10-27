@@ -29,6 +29,8 @@ from trident.core.constants import (
 
 ### NCBI/BLAST ###
 NCBI_MAX_HITS_DEFAULT = NCBI_MAX_HITS
+# Highest "Max hits per query" the MOL search accepts.
+NCBI_MAX_HITS_LIMIT = 1000
 NCBI_EV_EXPONENT_DEFAULT = NCBI_EV_EXPONENT
 NCBI_NUM_THREADS_DEFAULT = 4
 # NCBI takes one request every 10 s and each running job is polled once a

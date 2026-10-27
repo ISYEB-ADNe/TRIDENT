@@ -32,6 +32,9 @@ from trident.clients.ncbi import (
     species_across_gap,
 )
 from trident.core.constants import (
+    BLAST_DATABASE,
+    NCBI_CUT_RANGE,
+    NCBI_CUT_TOP_IDENTITY,
     NCBI_EV_EXPONENT,
     NCBI_MAX_HITS,
     NCBI_QUERY_COVER,
@@ -77,6 +80,7 @@ def prepare_ncbi_input(sequences_df: pd.DataFrame) -> list[SeqRecord]:
             "ncbi_ev_exponent": "ev_exponent",
             "ncbi_max_hits": "max_hits",
         },
+        constants={"blast_database": BLAST_DATABASE},
     ),
     log_as=("NCBI BLAST", "sequence"),
 )
@@ -91,7 +95,7 @@ def run_ncbi_search(
     failure_sink: list | None = None,
     result_sink: Callable | None = None,
 ) -> pd.DataFrame:
-    """Run BLASTn against the NCBI nt database and return processed hits.
+    """Run BLASTn against NCBI core_nt (BLAST_DATABASE) and return processed hits.
 
     Splits sequences into batches and submits them in parallel. Results are
     enriched with identity metrics and standardized taxonomy before returning.
@@ -305,8 +309,9 @@ def build_ncbi_search_overview(
 ) -> pd.DataFrame:
     """Build a per-sequence overview of raw BLAST search results (before filtering).
 
-    Flags the sequences whose hits reached max_hits: BLAST may have cut off
-    lower-identity hits.
+    Flags the sequences whose hits reached max_hits and all lie within
+    NCBI_CUT_RANGE of a top hit at or above NCBI_CUT_TOP_IDENTITY
+    (close_hits_cut): species as close as these hits may lie past the limit.
 
     Args:
         ncbi_search_df: Raw BLAST DataFrame from run_ncbi_search().
@@ -314,8 +319,8 @@ def build_ncbi_search_overview(
         max_hits: The max_hits parameter used in the search.
 
     Returns:
-        DataFrame with one row per seq_id: hit count, identity range, and
-        max_hits_reached.
+        DataFrame with one row per seq_id: hit count, identity range and
+        close_hits_cut.
     """
     all_seq_ids = sequences_df["seq_id"].unique()
     identities = ncbi_search_df.groupby("seq_id")["identity_percentage"]
@@ -331,7 +336,7 @@ def build_ncbi_search_overview(
                     "min_identity": None,
                     "max_identity": None,
                     "identity_range": None,
-                    "max_hits_reached": False,
+                    "close_hits_cut": False,
                 }
             )
             continue
@@ -347,7 +352,11 @@ def build_ncbi_search_overview(
                 "min_identity": round(min_id, 2),
                 "max_identity": round(max_id, 2),
                 "identity_range": round(identity_range, 2),
-                "max_hits_reached": n_hits >= max_hits,
+                "close_hits_cut": bool(
+                    n_hits >= max_hits
+                    and max_id >= NCBI_CUT_TOP_IDENTITY
+                    and identity_range <= NCBI_CUT_RANGE
+                ),
             }
         )
 

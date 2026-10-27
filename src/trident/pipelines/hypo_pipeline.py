@@ -28,6 +28,7 @@ from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
 from trident.core.constants import (
+    BLAST_DATABASE,
     HYPO_EV_EXPONENT,
     HYPO_MAX_HITS,
     HYPO_IDENTITY_CUTOFF,
@@ -182,6 +183,7 @@ def _hypo_search_params(
         "hypo_max_hits": max_hits,
         "hypo_identity_cutoff": identity_cutoff,
         "hypo_ntop": ntop,
+        "blast_database": BLAST_DATABASE,
     }
     inputs = [
         {"seq_id": s.id, "entrez_query": v["entrez_query"], **params}
@@ -621,6 +623,7 @@ def _hypo_check_params(
     sequences_df = hypo_filter_df[["seq_id", "scientificName"]].drop_duplicates()
     params = {
         "hypo_check_ev_exponent": ev_exponent,
+        "blast_database": BLAST_DATABASE,
     }
     # The query is part of each item, so a species checks again when it gets
     # another name.

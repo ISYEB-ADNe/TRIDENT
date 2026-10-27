@@ -6,6 +6,7 @@ import streamlit as st
 
 from trident.clients.ncbi import set_ncbi_email
 from trident.core import config
+from trident.core.constants import BLAST_DATABASE
 from trident.core.utils import pluralize, species_for_sequences
 import trident.pipelines as pipe
 from trident.pipelines.results_pipeline import add_check_hit
@@ -69,7 +70,10 @@ def display_hypo_parameters():
     ]
 
     presets = get_recent_param_sets(
-        st.session_state.db_path, "hypo_search_inputs", db_cols
+        st.session_state.db_path,
+        "hypo_search_inputs",
+        db_cols,
+        only={"blast_database": BLAST_DATABASE},
     )
     param_preset_selector(
         presets,
@@ -506,7 +510,10 @@ def display_hypo_check_controls():
     db_cols = ["hypo_check_ev_exponent"]
 
     presets = get_recent_param_sets(
-        st.session_state.db_path, "hypo_check_inputs", db_cols
+        st.session_state.db_path,
+        "hypo_check_inputs",
+        db_cols,
+        only={"blast_database": BLAST_DATABASE},
     )
     param_preset_selector(
         presets,

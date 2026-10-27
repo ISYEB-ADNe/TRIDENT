@@ -117,7 +117,7 @@ def check_schema_version(db_path: str | Path) -> tuple[bool, str]:
 #
 # Each cached run_id records the UTC date it was queried from the external
 # database and the trident version that produced it. The date is the
-# de-facto version of the live source (NCBI nt, GBIF, BOLD, WoRMS): the
+# de-facto version of the live source (NCBI core_nt, GBIF, BOLD, WoRMS): the
 # version a methods section can cite.
 # ---------------------------------------------------------------------------
 
@@ -733,6 +733,9 @@ class PartialCache(CacheStrategy):
     result (e.g. a species without a BOLD sequence), the column only real
     results fill; an item with no row filling it counts as empty, so "Ask again
     for empty results" queries it again.
+
+    *constants*: cache-key values that are not arguments (e.g. the BLAST
+    database), so results saved under another value are not reused.
     """
 
     def __init__(
@@ -743,19 +746,24 @@ class PartialCache(CacheStrategy):
         params: dict[str, str] | None = None,
         output_col: str | None = None,
         result_col: str | None = None,
+        constants: dict | None = None,
     ):
         self.result_col = result_col
         self.items_kwarg = items_kwarg
         self.item_key = item_key
         self.extract = extract
         self.params = params or {}
+        self.constants = constants or {}
         self.output_col = output_col
 
     def prepare(self, **kwargs) -> tuple[list[dict], dict]:
         items = kwargs[self.items_kwarg]
         global_params = {
-            cache_key: kwargs[kwarg_name]
-            for cache_key, kwarg_name in self.params.items()
+            **{
+                cache_key: kwargs[kwarg_name]
+                for cache_key, kwarg_name in self.params.items()
+            },
+            **self.constants,
         }
         cache_items = [
             {

@@ -225,7 +225,7 @@ BOLD proxy sequences are BLASTed against NCBI constrained to MOL-validated speci
 <details>
 <summary><strong>Reproducibility</strong></summary>
 
-Each cached run records the UTC date it queried each live database (NCBI nt, GBIF, BOLD, WoRMS) and the TRIDENT version, shown in the Results "Data sources" panel. These databases change over time, so the query date identifies which version of the source data an analysis used.
+Each cached run records the UTC date it queried each live database (NCBI core_nt, GBIF, BOLD, WoRMS) and the TRIDENT version, shown in the Results "Data sources" panel. These databases change over time, so the query date identifies which version of the source data an analysis used.
 
 </details>
 
