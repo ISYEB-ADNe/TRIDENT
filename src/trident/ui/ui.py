@@ -321,7 +321,6 @@ SETTING_LABELS: dict[str, str] = {
     "ncbi_enforce_low_identity": "Enforce as hard filter",
     # TAX (WoRMS)
     "worms_marine_only": "Marine species only",
-    "worms_resolve_names": "Use WoRMS accepted names",
     "tax_drop_mol_rejected": "Exclude species already rejected by MOL",
     # GEO (GBIF)
     "gbif_latitude": "Latitude",
@@ -1332,10 +1331,12 @@ def highlight_empty_sequence(row):
     return [style] * len(row)
 
 
-def same_species_as(names: pd.Series) -> pd.Series:
+def same_species_as(names: pd.Series, groups: pd.DataFrame | None = None) -> pd.Series:
     """The species each of *names* is possibly the same as, indexed by name;
-    only the linked ones (see same_species_groups)."""
-    groups = same_species_groups(names, st.session_state.name_table)
+    only the linked ones. *groups*: same_species_groups of *names*, when
+    already computed."""
+    if groups is None:
+        groups = same_species_groups(names, st.session_state.name_table)
     return groups.set_index("scientificName")["same_species_as"]
 
 
@@ -1345,11 +1346,12 @@ def with_same_species(df: pd.DataFrame) -> pd.DataFrame:
     return df.assign(same_species_as=names.map(same_species_as(names)))
 
 
-def display_same_species(df: pd.DataFrame) -> None:
-    """List the species of df another source counts as one species."""
+def display_same_species(df: pd.DataFrame) -> pd.DataFrame:
+    """List the species of df another source counts as one species; returns
+    their same_species_groups."""
     groups = same_species_groups(df["scientificName"], st.session_state.name_table)
     if groups.empty:
-        return
+        return groups
     n_groups = groups["group"].nunique()
     with st.expander(
         f"⚠️ {n_groups} species possibly listed under several names",
@@ -1367,6 +1369,7 @@ def display_same_species(df: pd.DataFrame) -> None:
             column_order=["scientificName", "same_species_as"],
             column_config=column_config(["scientificName", "same_species_as"]),
         )
+    return groups
 
 
 def highlight_in_mol(row):

@@ -425,7 +425,6 @@ TAX_COLUMNS = [
     table_name="worms_merge",
     cache=FullCache(
         inherit_from=["mol_params", "worms_search_params"],
-        local={"worms_resolve_names": "resolve_names"},
         fingerprint_on=["worms_search_df", "name_table"],
     ),
     bool_columns=("in_mol",),
@@ -437,7 +436,6 @@ def run_worms_merge(
     name_table: pd.DataFrame | None,
     mol_params: dict | None = None,
     worms_search_params: dict | None = None,
-    resolve_names: bool = True,
 ) -> pd.DataFrame:
     """Pair each sequence's MOL species with the WoRMS species of their genera.
 
@@ -454,8 +452,6 @@ def run_worms_merge(
             so synonyms (e.g. Gadus ogac) credit the accepted species.
         mol_params: Params of finalize_mol_results, for the cache key only.
         worms_search_params: Params of run_worms_search, for the cache key only.
-        resolve_names: Whether name resolution ran; recorded in the cache key
-            so toggling it re-runs the merge.
 
     Returns:
         Merged DataFrame with WoRMS taxonomy and MOL scores where applicable.

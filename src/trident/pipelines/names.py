@@ -6,8 +6,7 @@ WoRMS check of the MOL (NCBI) names, and GEO adds the name GBIF counts each
 species under, and EXTRA the name BOLD files its sequences under. Every step
 that compares names from two sources goes through
 species_of, so a synonym counts as its species; names match ignoring case and
-spacing. A name_table of None (names not checked in WoRMS) matches names as
-they are.
+spacing. A name_table of None (before TAX) matches names as they are.
 
     build_name_table(resolution_df, ncbi_taxids) → DataFrame
     gbif_name_rows(gbif_search_df) → DataFrame
@@ -57,14 +56,13 @@ SYNONYM_SOURCES = ["ncbi"]
 
 
 def build_name_table(
-    resolution_df: pd.DataFrame | None,
+    resolution_df: pd.DataFrame,
     ncbi_taxids: dict[str, int] | None = None,
 ) -> pd.DataFrame:
     """Name table of the MOL names, from run_name_resolution.
 
     Args:
-        resolution_df: Output of run_name_resolution, or None when names were
-            not checked in WoRMS (the table is then empty).
+        resolution_df: Output of run_name_resolution.
         ncbi_taxids: NCBI taxid of each name (prepare_resolution_taxids), kept
             as the row's source_id.
 
@@ -73,7 +71,7 @@ def build_name_table(
         species_key the name and species as join keys (normalize_name). A name
         WoRMS did not find is its own species, without species_id or matched_by.
     """
-    if resolution_df is None or resolution_df.empty:
+    if resolution_df.empty:
         return pd.DataFrame(columns=NAME_TABLE_COLUMNS)
     # Rows cached before matchedBy or note existed lack those columns.
     resolved = resolution_df.reindex(

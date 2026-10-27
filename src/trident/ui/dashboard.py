@@ -39,7 +39,6 @@ SECTIONS = [
         "tax_params",
         [
             "worms_marine_only",
-            "worms_resolve_names",
             "tax_drop_mol_rejected",
         ],
     ),

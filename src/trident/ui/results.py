@@ -1097,7 +1097,7 @@ def results_main():
         threshold = _threshold_slider()
         assignments = _assignments(curated_df, threshold)
         show_summary(assignments, curated_df, results_df, threshold)
-        display_same_species(curated_df)
+        same_species = display_same_species(curated_df)
 
     show_assignments(assignments, curated_df, threshold)
     show_sequence_detail(results_df, assignments, threshold)
@@ -1106,6 +1106,6 @@ def results_main():
         results_df,
         assignments,
         threshold,
-        same_species_as(curated_df["scientificName"]),
+        same_species_as(curated_df["scientificName"], same_species),
     )
     show_exports(curated_df)
