@@ -14,6 +14,7 @@ Exploration:
 """
 
 from collections.abc import Callable
+from numbers import Integral
 
 import pandas as pd
 
@@ -89,17 +90,19 @@ def _gbif_search_params(
     """Extract parameters for GBIF search step.
 
     Extents are whole km (or "global"): an extent is a key of the saved
-    search, and 500.0 read back as text would no longer match 500.
+    search, and 500.0 read back as text would no longer match 500. A numpy
+    integer is keyed as a plain int, which is saved as a number.
     """
     not_whole = [
         e
         for e in extents
-        if e != "global" and (isinstance(e, bool) or not isinstance(e, int))
+        if e != "global" and (isinstance(e, bool) or not isinstance(e, Integral))
     ]
     if not_whole:
         raise ValueError(
             f"Search extents must be whole km or 'global', not {not_whole}"
         )
+    extents = [e if e == "global" else int(e) for e in extents]
     params = {
         "gbif_latitude": latitude,
         "gbif_longitude": longitude,

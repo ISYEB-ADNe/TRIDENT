@@ -121,19 +121,24 @@ def test_step_that_fails_shows_its_error_once_and_does_not_start_again():
     assert at.session_state["calls"] == 1
 
 
-def test_preset_applies_after_fields_prefilled_with_no_saved_set():
-    """Fields holding no saved set leave the selector empty: any set chosen,
-    the first one too, fills them."""
+def test_preset_fills_empty_fields_and_any_set_replaces_other_values():
+    """Empty fields get the latest saved set. Fields holding values of no saved
+    set keep them, the selector empty: any set chosen, the first one too,
+    fills them."""
 
-    def page():
+    def page(overrides):
         import streamlit as st
 
         from trident.ui.ui import param_preset_selector
 
-        st.session_state.setdefault("_widget_overrides", {"t": "5"})
+        st.session_state.setdefault("_widget_overrides", dict(overrides))
         param_preset_selector([{"t": 1}, {"t": 2}], lambda p: f"t={p['t']}", key="sel")
 
-    at = AppTest.from_function(page)
+    at = AppTest.from_function(page, args=({},))
+    at.run()
+    assert at.session_state["_widget_overrides"]["t"] == 1
+
+    at = AppTest.from_function(page, args=({"t": "5"},))
     at.run()
     assert at.selectbox[0].value is None
     at.selectbox[0].select("t=1").run()

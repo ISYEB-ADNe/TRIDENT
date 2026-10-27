@@ -65,10 +65,18 @@ def records_to_fasta_string(sequences: list[SeqRecord]) -> str:
         return output.getvalue()
 
 
+def blast_record(seq_id, dna_sequence: str) -> SeqRecord:
+    """A sequence as BLAST is sent it: gaps ('-') replaced with 'N', and no
+    description, so the FASTA header is the id alone."""
+    return SeqRecord(
+        Seq(dna_sequence.replace("-", "N")), id=str(seq_id), description=""
+    )
+
+
 def dataframe_to_records(sequences_df: pd.DataFrame) -> list[SeqRecord]:
     """Convert a sequences DataFrame back to SeqRecord objects.
 
-    Gaps ('-') in sequences are replaced with 'N' before conversion.
+    Each sequence is made a BLAST record (see blast_record).
 
     Args:
         sequences_df: DataFrame with seq_id and dna_sequence columns,
@@ -79,7 +87,7 @@ def dataframe_to_records(sequences_df: pd.DataFrame) -> list[SeqRecord]:
     """
     logger.debug(f"Converting DataFrame to SeqRecord list ({len(sequences_df)} rows)")
     return [
-        SeqRecord(Seq(dna_sequence.replace("-", "N")), id=str(seq_id), description="")
+        blast_record(seq_id, dna_sequence)
         for seq_id, dna_sequence in zip(
             sequences_df["seq_id"], sequences_df["dna_sequence"]
         )

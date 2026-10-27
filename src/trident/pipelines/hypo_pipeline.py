@@ -24,7 +24,6 @@ import pandas as pd
 
 from loguru import logger
 
-from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
 from trident.core.constants import (
@@ -49,6 +48,7 @@ from trident.core.utils import (
     ensure_columns,
     top_hit_per_group,
 )
+from trident.clients.fasta import blast_record
 from trident.clients.ncbi import (
     BLAST_GIVE_UP,
     BlastCircuit,
@@ -153,7 +153,7 @@ def prepare_hypo_input(extra_df, queries_df):
         if seq_id not in queries:
             continue
         seq_records = [
-            SeqRecord(Seq(seq.replace("-", "N")), id=process_id, description="")
+            blast_record(process_id, seq)
             for seq, process_id in zip(group["proxy_sequence"], group["proxy_id"])
         ]
         input_data[seq_id] = {
@@ -719,7 +719,7 @@ def run_hypo_check(
     circuit = BlastCircuit()  # one check per sequence: stop retrying if NCBI is down
 
     def check(index, seq_id, sci_name, seq_dna) -> pd.DataFrame | None:
-        sequence = SeqRecord(Seq(seq_dna), id=seq_id, description="")
+        sequence = blast_record(seq_id, seq_dna)
         try:
             blast_res = submit_blast_batch(
                 [sequence],

@@ -96,6 +96,7 @@ def bold_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     st.session_state.name_table = pipe.replace_source_rows(
         st.session_state.name_table, pipe.bold_name_rows(bold_search_df), "bold"
     )
+    st.session_state.bold_proxy_mask = None  # computed with the new BOLD names
 
     # Cleanup
     logsink.close()
@@ -581,8 +582,8 @@ def display_extra_summary():
 
 def proxy_mask() -> pd.Series:
     """Which rows of the GEO list need a BOLD proxy (pipe.needs_proxy), kept
-    until the GEO list changes: the rule reads every BLAST hit, too slow for
-    each rerun of the tab."""
+    until the GEO list or the BOLD names change: the rule reads every BLAST
+    hit, too slow for each rerun of the tab."""
     if st.session_state.bold_proxy_mask is None:
         st.session_state.bold_proxy_mask = pipe.needs_proxy(
             st.session_state.geo_df,

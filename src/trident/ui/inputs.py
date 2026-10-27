@@ -107,11 +107,20 @@ def _start_fasta_analysis(file_name: str, data: bytes, settings: dict | None = N
     if _is_active(name):
         _clear_upload(f"ℹ️ {name} already active.")
     db_path = _db_path(name)
-    logger.info(f"Analysis saved in {db_path}")
-    with st.spinner(f"Processing {file_name}...", show_time=True):
-        seqs_df, _ = pipe.run_fasta_workflow(
-            _fasta_handle(file_name, data), db_path=db_path
-        )
+    # An analysis with these sequences is opened as it is: they are saved by
+    # filename, so saving them from a file named otherwise would add a copy.
+    if Path(db_path).exists():
+        compatible, message = check_schema_version(db_path)
+        if not compatible:
+            st.error(message)
+            return
+        logger.info(f"Analysis opened from {db_path}")
+    else:
+        logger.info(f"Analysis saved in {db_path}")
+        with st.spinner(f"Processing {file_name}...", show_time=True):
+            seqs_df, _ = pipe.run_fasta_workflow(
+                _fasta_handle(file_name, data), db_path=db_path
+            )
 
     st.session_state.sequences_df = seqs_df
     st.session_state.sequences_id = seqs_df["seq_id"].unique().tolist()
@@ -136,11 +145,7 @@ def _fasta_analysis_name(name: str, seqs_df: pd.DataFrame) -> str:
     sequences: the sequences are saved by filename, so an edited file under the
     same name would otherwise reopen the old analysis. The first analysis with
     these sequences is reused."""
-    candidate, n = name, 1
-    while not _holds_sequences(Path(_db_path(candidate)), seqs_df):
-        n += 1
-        candidate = f"{name} ({n})"
-    return candidate
+    return _free_name(name, lambda path: _holds_sequences(path, seqs_df))
 
 
 def _holds_sequences(db_path: Path, seqs_df: pd.DataFrame) -> bool:
@@ -150,16 +155,20 @@ def _holds_sequences(db_path: Path, seqs_df: pd.DataFrame) -> bool:
         return True
     if not _has_sequences(db_path):
         return False
-    with get_connection(db_path) as conn:
-        saved = pd.read_sql("SELECT seq_id, dna_sequence FROM sequences", conn)
+    try:
+        with get_connection(db_path) as conn:
+            saved = pd.read_sql("SELECT seq_id, dna_sequence FROM sequences", conn)
+    except (sqlite3.DatabaseError, pd.errors.DatabaseError):
+        return False  # not a TRIDENT sequences table
     columns = ["seq_id", "dna_sequence"]
     return saved[columns].values.tolist() == seqs_df[columns].values.tolist()
 
 
-def _free_name(name: str) -> str:
-    """*name*, or "name (2)", "name (3)"... when that analysis already exists."""
+def _free_name(name: str, usable=lambda path: not path.exists()) -> str:
+    """*name*, or the first of "name (2)", "name (3)"... whose analysis file is
+    *usable* (by default: not there yet)."""
     candidate, n = name, 1
-    while Path(_db_path(candidate)).exists():
+    while not usable(Path(_db_path(candidate))):
         n += 1
         candidate = f"{name} ({n})"
     return candidate

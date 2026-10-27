@@ -41,6 +41,8 @@ def _get_json(session: requests.Session, url: str, params: dict, timeout: int = 
     if response.status_code in (204, 404):
         return None
     response.raise_for_status()
+    if not response.text.strip():
+        return None  # no content, as a 204
     return response.json()
 
 

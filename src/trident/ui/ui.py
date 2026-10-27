@@ -1461,14 +1461,16 @@ def param_preset_selector(presets, format_fn, key):
         current = {
             col: str(st.session_state._widget_overrides.get(col, "")) for col in cols
         }
-        # None when the fields hold no saved set: any set chosen then applies.
+        # The latest set for empty fields (it is applied below). None when the
+        # fields hold values of no saved set: any set chosen then applies.
+        filled = any(c in st.session_state._widget_overrides for c in cols)
         selected_idx = next(
             (
                 i
                 for i, p in enumerate(presets)
                 if all(str(p.get(k, "")) == v for k, v in current.items())
             ),
-            None,
+            None if filled else 0,
         )
 
         choice = st.selectbox(

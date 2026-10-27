@@ -99,3 +99,25 @@ def test_unreadable_fasta_is_reported_and_saves_nothing(tmp_path, monkeypatch):
         assert not at.exception, data
         assert len(at.error) == 1, data
     assert list(tmp_path.iterdir()) == []
+
+
+def test_same_sequences_under_another_filename_open_the_analysis_unchanged(
+    tmp_path, monkeypatch
+):
+    """x.fa with the sequences of the analysis x (made from x.fasta) opens it
+    without adding them a second time."""
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path))
+    text = ">m1\nACGT\n>m2\nGGG\n"
+    run_fasta_workflow(_upload(text, "x.fasta"), db_path=str(tmp_path / "x.db"))
+
+    def page():
+        from trident.ui.inputs import _start_fasta_analysis
+
+        _start_fasta_analysis("x.fa", b">m1\nACGT\n>m2\nGGG\n")
+
+    at = AppTest.from_function(page)
+    at.run()
+    assert at.session_state["analysis_name"] == "x"
+    with sqlite3.connect(tmp_path / "x.db") as conn:
+        assert conn.execute("SELECT COUNT(*) FROM sequences").fetchone()[0] == 2
+    conn.close()
