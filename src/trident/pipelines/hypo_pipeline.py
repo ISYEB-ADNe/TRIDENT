@@ -44,7 +44,6 @@ from trident.core.utils import (
     pluralize,
     species_for_sequences,
     preserve_sequence_order,
-    notify_progress,
     ensure_columns,
     top_hit_per_group,
 )
@@ -52,13 +51,10 @@ from trident.clients.fasta import blast_record
 from trident.clients.ncbi import (
     BLAST_GIVE_UP,
     BlastCircuit,
-    BlastCpuLimit,
-    BlastGaveUp,
     blast_batch,
     create_sequence_batches,
     run_blast_pool,
     process_blast_results,
-    submit_blast_batch,
 )
 from trident.pipelines.extra_pipeline import EXTRA_COLUMNS
 from trident.pipelines.names import ncbi_names, other_names
@@ -676,6 +672,7 @@ def run_hypo_check(
     hypo_filter_df: pd.DataFrame,
     check_queries: dict[str, str] | None = None,
     ev_exponent: int = HYPO_CHECK_EV_EXPONENT,
+    batch_size: int = 50,
     num_threads: int = 4,
     give_up_minutes: float = BLAST_GIVE_UP / 60,
     progress_handler: dict | None = None,
@@ -685,15 +682,18 @@ def run_hypo_check(
     """HYPO check: BLAST each sequence against GenBank restricted to its
     hypothetical species, under all their names; any hit (hit_found) means
     GenBank holds the target marker for that species.
-    The checks are independent jobs, run as one parallel BLAST run
-    (``run_blast_pool``).
+    The sequences of one species share its Entrez query, so they are sent
+    together, in batches of *batch_size*: NCBI returns the hits of each
+    sequence apart, *hitlist_size* hits per sequence. All batches run as one
+    parallel BLAST run (``run_blast_pool``).
 
     Args:
         hypo_filter_df: Filtered DataFrame from run_hypo_filter.
         check_queries: Entrez query of each species (see hypo_check_queries);
             a species without one is checked under its own name only.
         ev_exponent: Negative exponent for E-value threshold.
-        num_threads: Checks run at once at normal pace, plus
+        batch_size: Sequences per NCBI batch.
+        num_threads: Batches run at once at normal pace, plus
             BLAST_SLOW_THREADS while jobs are slow (NCBI's request spacing
             makes more than about 6 useless).
         give_up_minutes: Minutes a BLAST job may wait at NCBI before it is
@@ -703,8 +703,8 @@ def run_hypo_check(
         failure_sink: If provided, the (seq_id, scientificName) of each check
             whose BLAST errored is appended here, so the cache layer retries it
             instead of caching it as a (false) no-hit.
-        result_sink: Given by save_to_db, which saves each check as soon as
-            its BLAST is done.
+        result_sink: Given by save_to_db, which saves the checks of each batch
+            as soon as its BLAST is done.
 
     Returns:
         DataFrame with NCBI check results per species.
@@ -716,73 +716,84 @@ def run_hypo_check(
     )
     log = StepLog("HYPO check")
 
-    circuit = BlastCircuit()  # one check per sequence: stop retrying if NCBI is down
-
-    def check(index, seq_id, sci_name, seq_dna) -> pd.DataFrame | None:
-        sequence = blast_record(seq_id, seq_dna)
-        try:
-            blast_res = submit_blast_batch(
-                [sequence],
-                entrez_query=_check_query(sci_name, check_queries),
-                evalue=10 ** (-ev_exponent),
-                batch_id=f"{index + 1}/{len(sequences_df)} ({seq_id}: {sci_name})",
-                job_name="Check",
-                hitlist_size=10,
-                circuit=circuit,
-            )
-        except (BlastCpuLimit, BlastGaveUp):  # failed: retried on the next run
-            blast_res = None
-        notify_progress(progress_handler)
-        if blast_res is None:
-            return None
-        if blast_res.empty:
-            result = pd.DataFrame(
-                {
-                    "seq_id": [seq_id],
-                    "scientificName": [sci_name],
-                    "dna_sequence": [seq_dna],
-                    "hit_found": [False],
-                }
-            )
-        else:
-            ncbi_data = process_blast_results(blast_res, fasta_sequences=[sequence])
-            result = pd.DataFrame(
-                {
-                    "seq_id": seq_id,
-                    "scientificName": sci_name,
-                    "dna_sequence": seq_dna,
-                    "scientificName_NCBI": ncbi_data["scientificName"],
-                    "query_cover": ncbi_data["query_cover"],
-                    "identity_percentage": ncbi_data["identity_percentage"],
-                    "hit_found": True,
-                    "hit_def": ncbi_data["hit_def"],
-                    "hit_url": ncbi_data["hit_url"],
-                }
-            )
-        if result_sink is not None:
-            result_sink(result, [(seq_id, sci_name)])
-        return result
-
-    calls = list(
-        zip(
-            sequences_df.index,
-            sequences_df["seq_id"],
-            sequences_df["scientificName"],
-            sequences_df["dna_sequence"],
+    # The rows themselves are kept with each batch: BLAST gets a copy of each
+    # sequence (see blast_record), but the checks are saved under the input's
+    # seq_id and dna_sequence.
+    batches = [
+        (sci_name, group.iloc[i : i + batch_size])
+        for sci_name, group in sequences_df.groupby(
+            "scientificName", sort=False, dropna=False
         )
-    )
-    outcomes = run_blast_pool(check, calls, num_threads, give_up_minutes * 60)
+        for i in range(0, len(group), batch_size)
+    ]
+    circuit = BlastCircuit()  # shared by every job of this run
+    blast_kwargs = {
+        "evalue": 10 ** (-ev_exponent),
+        "hitlist_size": 10,
+        "job_name": "Check",
+    }
+    hit_columns = {
+        "seq_id": "blast_id",
+        "scientificName": "scientificName_NCBI",
+        "query_cover": "query_cover",
+        "identity_percentage": "identity_percentage",
+        "hit_def": "hit_def",
+        "hit_url": "hit_url",
+    }
+
+    def job(k, sci_name, rows) -> tuple[pd.DataFrame | None, list]:
+        batch = [
+            blast_record(s, d) for s, d in zip(rows["seq_id"], rows["dna_sequence"])
+        ]
+        n = len(batch)
+        label = f"{k}/{len(batches)} ({sci_name}, {n} {pluralize(n, 'sequence')})"
+        dfs, failed_ids = blast_batch(
+            batch,
+            label,
+            circuit,
+            progress_handler,
+            entrez_query=_check_query(sci_name, check_queries),
+            **blast_kwargs,
+        )
+        blast_ids = rows["seq_id"].astype(str)
+        failed = rows.loc[blast_ids.isin(failed_ids), "seq_id"].tolist()
+        checked = rows[~blast_ids.isin(failed_ids)].assign(blast_id=blast_ids)
+        if checked.empty:
+            return None, failed
+        found = [
+            process_blast_results(df, fasta_sequences=batch)
+            for df in dfs
+            if not df.empty
+        ]
+        hits = (
+            pd.concat(found, ignore_index=True)[list(hit_columns)].rename(
+                columns=hit_columns
+            )
+            if found
+            else pd.DataFrame(columns=list(hit_columns.values()))
+        )
+        # NCBI returns each sequence's hits under its own id; one without any
+        # gets a single no-hit row.
+        result = checked.merge(hits, on="blast_id", how="left", indicator=True)
+        result = result.assign(hit_found=result.pop("_merge") == "both").drop(
+            columns="blast_id"
+        )
+        if result_sink is not None:
+            done = list(zip(checked["seq_id"], checked["scientificName"]))
+            result_sink(result, done)
+        return result, failed
+
+    jobs = [(k, sci_name, batch) for k, (sci_name, batch) in enumerate(batches, 1)]
+    outcomes = run_blast_pool(job, jobs, num_threads, give_up_minutes * 60)
     all_results = []
     failed = []
-    for (_, seq_id, sci_name, _), result in zip(calls, outcomes):
-        if result is None:
-            failed.append(f"{seq_id}: {sci_name}")
-            # BLAST errored: report this (seq_id, species) so it is retried, not
-            # recorded as a (false) no-hit. The other species of the seq_id
-            # stay cached.
-            if failure_sink is not None:
-                failure_sink.append((seq_id, sci_name))
-        else:
+    for (_, sci_name, _), (result, failed_ids) in zip(jobs, outcomes):
+        # BLAST errored: report these (seq_id, species) so they are retried,
+        # not recorded as (false) no-hits. The other checks stay cached.
+        failed.extend(f"{seq_id}: {sci_name}" for seq_id in failed_ids)
+        if failure_sink is not None:
+            failure_sink.extend((seq_id, sci_name) for seq_id in failed_ids)
+        if result is not None:
             all_results.append(result)
 
     # Every sequence may have errored (all reported to failure_sink).

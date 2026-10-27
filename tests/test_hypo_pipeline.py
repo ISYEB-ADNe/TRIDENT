@@ -18,6 +18,7 @@ import pytest
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
+import trident.clients.ncbi as ncbi
 import trident.pipelines.hypo_pipeline as hypo_pipeline
 from trident.core.database import get_connection
 from trident.pipelines.names import build_name_table, gbif_name_rows
@@ -227,6 +228,7 @@ def test_check_hits_stay_numeric_after_a_first_check_without_hit(tmp_path, monke
     read back as numbers (the database must not type the columns as text)."""
     hit = pd.DataFrame(
         {
+            "seq_id": ["t1"],
             "scientificName": ["Gadus morhua"],
             "query_cover": [100.0],
             "identity_percentage": [99.5],
@@ -239,7 +241,7 @@ def test_check_hits_stay_numeric_after_a_first_check_without_hit(tmp_path, monke
         found = "Gadus" in entrez_query
         return pd.DataFrame({"seq_id": [batch[0].id]}) if found else pd.DataFrame()
 
-    monkeypatch.setattr(hypo_pipeline, "submit_blast_batch", blast)
+    monkeypatch.setattr(ncbi, "submit_blast_batch", blast)
     monkeypatch.setattr(hypo_pipeline, "process_blast_results", lambda df, **k: hit)
     db_path = str(tmp_path / "check.db")
 
@@ -260,9 +262,7 @@ def test_finalize_after_a_check_that_found_nothing(monkeypatch):
     """When the check finds none of the species, their rows have no hit stats
     but every column is present, so finalize keeps the species without check
     stats."""
-    monkeypatch.setattr(
-        hypo_pipeline, "submit_blast_batch", lambda *a, **k: pd.DataFrame()
-    )
+    monkeypatch.setattr(ncbi, "submit_blast_batch", lambda *a, **k: pd.DataFrame())
     hypo_filter_df = pd.DataFrame(
         {
             "seq_id": ["t1"],
@@ -392,7 +392,7 @@ def test_hypo_check_searches_every_name_of_the_species(tmp_path, monkeypatch):
         queries.append(entrez_query)
         return pd.DataFrame()
 
-    monkeypatch.setattr(hypo_pipeline, "submit_blast_batch", blast)
+    monkeypatch.setattr(ncbi, "submit_blast_batch", blast)
     species = "Phalacrocorax pygmaeus"
     filter_df = pd.DataFrame(
         {"seq_id": ["t1"], "scientificName": [species], "dna_sequence": ["ACGT"]}
@@ -420,6 +420,54 @@ def test_hypo_check_searches_every_name_of_the_species(tmp_path, monkeypatch):
     ]
 
 
+def test_hypo_check_sends_the_sequences_of_a_species_together(tmp_path, monkeypatch):
+    """The sequences of one species share its query and go to NCBI in one
+    search; each still gets its own result, from its own hits, saved with the
+    sequence as it was given (BLAST gets gaps as N)."""
+    sent = []
+
+    def blast(batch, entrez_query=None, **kwargs):
+        sent.append((entrez_query, [r.id for r in batch]))
+        return (
+            pd.DataFrame({"seq_id": ["t2"]})
+            if "Gadus morhua" in entrez_query
+            else pd.DataFrame()
+        )
+
+    def process(df, **kwargs):
+        return df.assign(
+            scientificName="Gadus morhua",
+            query_cover=100.0,
+            identity_percentage=99.0,
+            hit_def="Gadus morhua 12S",
+            hit_url="https://www.ncbi.nlm.nih.gov/nucleotide/X1",
+        )
+
+    monkeypatch.setattr(ncbi, "submit_blast_batch", blast)
+    monkeypatch.setattr(hypo_pipeline, "process_blast_results", process)
+    filter_df = pd.DataFrame(
+        {
+            "seq_id": ["t1", "t2", "t1"],
+            "scientificName": ["Gadus morhua", "Gadus morhua", "Gadus ogac"],
+            "dna_sequence": ["AC-GT", "TTGG", "AC-GT"],
+        }
+    )
+
+    df, _ = run_hypo_check(filter_df, db_path=str(tmp_path / "hypo.db"))
+
+    assert sorted(sent) == [
+        ('("Gadus morhua"[orgn])', ["t1", "t2"]),
+        ('("Gadus ogac"[orgn])', ["t1"]),
+    ]
+    found = df.set_index(["seq_id", "scientificName"])["hit_found"].to_dict()
+    assert found == {
+        ("t1", "Gadus morhua"): False,
+        ("t2", "Gadus morhua"): True,
+        ("t1", "Gadus ogac"): False,
+    }
+    assert set(df.loc[df["seq_id"] == "t1", "dna_sequence"]) == {"AC-GT"}
+
+
 def test_hypo_check_failed_species_does_not_evict_its_siblings(tmp_path, monkeypatch):
     """A check whose BLAST errored is retried; the other species checked for
     the same sequence stay cached."""
@@ -427,7 +475,7 @@ def test_hypo_check_failed_species_does_not_evict_its_siblings(tmp_path, monkeyp
     def blast(batch, entrez_query=None, **kwargs):
         return None if "Gadus ogac" in entrez_query else pd.DataFrame()
 
-    monkeypatch.setattr(hypo_pipeline, "submit_blast_batch", blast)
+    monkeypatch.setattr(ncbi, "submit_blast_batch", blast)
     filter_df = pd.DataFrame(
         {
             "seq_id": ["t1", "t1"],
@@ -459,7 +507,7 @@ def test_hypo_check_runs_checks_in_parallel(tmp_path, monkeypatch):
             other_done.set()
         return pd.DataFrame()
 
-    monkeypatch.setattr(hypo_pipeline, "submit_blast_batch", blast)
+    monkeypatch.setattr(ncbi, "submit_blast_batch", blast)
     filter_df = pd.DataFrame(
         {
             "seq_id": ["t1", "t2"],
@@ -486,7 +534,7 @@ def test_hypo_check_keeps_each_finished_species_when_the_step_crashes(
             raise RuntimeError("process killed")
         return pd.DataFrame()
 
-    monkeypatch.setattr(hypo_pipeline, "submit_blast_batch", blast)
+    monkeypatch.setattr(ncbi, "submit_blast_batch", blast)
     filter_df = pd.DataFrame(
         {
             "seq_id": ["t1", "t1"],
