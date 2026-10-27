@@ -1074,12 +1074,12 @@ def styled_or_plain(df, *row_style_fns, max_cells: int = STYLER_MAX_CELLS):
 
 
 @contextlib.contextmanager
-def lazy_expander(label: str, key: str):
+def lazy_expander(label: str, key: str, icon: str | None = None):
     """A closed expander that yields whether it is open, for content drawn only
     then (``if is_open:``). Streamlit otherwise runs the content of a closed
     expander on every rerun, and a large table costs seconds to draw and send.
     Opening or closing it reruns the app."""
-    section = st.expander(label, key=key, on_change="rerun")
+    section = st.expander(label, key=key, icon=icon, on_change="rerun")
     with section:
         yield section.open
 

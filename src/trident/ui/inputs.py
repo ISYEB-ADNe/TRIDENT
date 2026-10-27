@@ -10,17 +10,22 @@ import streamlit as st
 from loguru import logger
 
 import trident.pipelines as pipe
-from trident.core.config import is_streamlit_cloud, results_dir
-from trident.core.database import check_schema_version, get_connection
+from trident.core.config import is_streamlit_cloud, results_dir, source_root
+from trident.core.database import table_exists, check_schema_version, get_connection
 from trident.core.utils import pluralize
-from trident.ui.ui import column_config, prefill_settings, reset_for_new_analysis
+from trident.ui.ui import (
+    column_config,
+    lazy_expander,
+    prefill_settings,
+    reset_for_new_analysis,
+)
 
 FASTA_EXTENSIONS = {"fasta", "fa", "txt", "fas"}
 DB_EXTENSIONS = {"db", "sqlite", "sqlite3"}
 
 # The example ships at the repository root (example/), next to src/, in every
-# documented install (git clone or downloaded archive).
-EXAMPLE_FASTA = Path(__file__).resolve().parents[3] / "example" / "example.fasta"
+# documented install (git clone or downloaded archive); None when installed.
+EXAMPLE_FASTA = root / "example" / "example.fasta" if (root := source_root()) else None
 # The example's sequences come from Svalbard: pre-fill the GEO area of the
 # paper's worked example (kept on the counts within 250 km), or GBIF would be
 # searched around 0°, 0°.
@@ -67,8 +72,9 @@ def _fasta_handle(file_name: str, data: bytes) -> io.StringIO:
     r"""An uploaded FASTA as a named text handle, parsed from memory: a shared
     temp file would race between sessions on Cloud. The cache keys the FASTA
     by this name; newline=None translates \r and \r\n line endings, as
-    open() does."""
-    handle = io.StringIO(data.decode(), newline=None)
+    open() does. A UTF-8 byte order mark is dropped, or the first header would
+    not start with ">"; a file that is not UTF-8 raises UnicodeDecodeError."""
+    handle = io.StringIO(data.decode("utf-8-sig"), newline=None)
     handle.name = file_name
     return handle
 
@@ -77,30 +83,77 @@ def _start_fasta_analysis(file_name: str, data: bytes, settings: dict | None = N
     """Load a FASTA as the active analysis, named after the file.
 
     *settings* pre-fill widgets of the later steps (widget key -> value).
+    The file is read before anything is saved: a file without sequences
+    leaves no analysis behind.
     """
-    base_name = Path(file_name).stem
-    handle = _fasta_handle(file_name, data)
-
-    db_path = _db_path(base_name)
-    logger.info(f"Analysis saved in {db_path}")
-    with st.spinner(f"Processing {file_name}...", show_time=True):
-        seqs_df, _ = pipe.run_fasta_workflow(handle, db_path=db_path)
-
-    if seqs_df.empty:
+    try:
+        seqs_df, _ = pipe.run_fasta_workflow(_fasta_handle(file_name, data))
+    except UnicodeDecodeError:
+        st.error(
+            f"❌ {file_name} is not UTF-8 text: save it as UTF-8 and upload it again."
+        )
+        return
+    except ValueError as e:
+        st.error(
+            f"❌ {file_name} is not a FASTA file TRIDENT can read: {str(e).splitlines()[0]}"
+        )
+        return
+    if seqs_df is None or seqs_df.empty:
         st.error("❌ No valid sequences found.")
         return
 
+    base_name = Path(file_name).stem
+    name = _fasta_analysis_name(base_name, seqs_df)
+    if _is_active(name):
+        _clear_upload(f"ℹ️ {name} already active.")
+    db_path = _db_path(name)
+    logger.info(f"Analysis saved in {db_path}")
+    with st.spinner(f"Processing {file_name}...", show_time=True):
+        seqs_df, _ = pipe.run_fasta_workflow(
+            _fasta_handle(file_name, data), db_path=db_path
+        )
+
     st.session_state.sequences_df = seqs_df
     st.session_state.sequences_id = seqs_df["seq_id"].unique().tolist()
-    st.session_state.analysis_name = base_name
+    st.session_state.analysis_name = name
     st.session_state.db_path = db_path
 
     reset_for_new_analysis("sequences_df")
     if settings:
         prefill_settings(settings)
+    if name != base_name:
+        st.session_state._upload_notice = (
+            f"ℹ️ An analysis named {base_name} already holds other sequences: "
+            f"this file is saved as **{name}**."
+        )
     st.session_state.fasta_uploader_key += 1
     st.session_state.requested_tab = "start"
     st.rerun()
+
+
+def _fasta_analysis_name(name: str, seqs_df: pd.DataFrame) -> str:
+    """*name*, or "name (2)", "name (3)"... while that analysis holds other
+    sequences: the sequences are saved by filename, so an edited file under the
+    same name would otherwise reopen the old analysis. The first analysis with
+    these sequences is reused."""
+    candidate, n = name, 1
+    while not _holds_sequences(Path(_db_path(candidate)), seqs_df):
+        n += 1
+        candidate = f"{name} ({n})"
+    return candidate
+
+
+def _holds_sequences(db_path: Path, seqs_df: pd.DataFrame) -> bool:
+    """Whether the analysis at *db_path* is free (no file) or holds exactly
+    these sequences."""
+    if not db_path.exists():
+        return True
+    if not _has_sequences(db_path):
+        return False
+    with get_connection(db_path) as conn:
+        saved = pd.read_sql("SELECT seq_id, dna_sequence FROM sequences", conn)
+    columns = ["seq_id", "dna_sequence"]
+    return saved[columns].values.tolist() == seqs_df[columns].values.tolist()
 
 
 def _free_name(name: str) -> str:
@@ -143,12 +196,7 @@ def _has_sequences(db_path: Path) -> bool:
     does not)."""
     try:
         with get_connection(db_path) as conn:
-            return bool(
-                conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
-                    "AND name = 'sequences'"
-                ).fetchone()
-            )
+            return table_exists(conn, "sequences")
     except sqlite3.DatabaseError:
         return False
 
@@ -375,9 +423,6 @@ def handle_file_upload():
             _restore_db(uploaded_file, restore_name)
 
     elif ext in FASTA_EXTENSIONS:
-        if _is_active(name):
-            _clear_upload(f"ℹ️ {name} already active.")
-
         if st.button(
             "Process FASTA",
             icon=":material/play_arrow:",
@@ -389,13 +434,10 @@ def handle_file_upload():
 
 def load_example_button():
     """Offer the bundled example FASTA, for users without a file at hand."""
-    if not EXAMPLE_FASTA.exists():
+    if EXAMPLE_FASTA is None or not EXAMPLE_FASTA.exists():
         return
 
-    active = (
-        st.session_state.get("sequences_df") is not None
-        and st.session_state.get("analysis_name") == EXAMPLE_FASTA.stem
-    )
+    active = _is_active(EXAMPLE_FASTA.stem)
     if st.button(
         f"Try the example ({EXAMPLE_FASTA.name})",
         icon=":material/science:",
@@ -454,14 +496,16 @@ def upload_and_start_analysis():
         return
 
     display_analysis_status()
-    # Folded while working, so the example is not one click away. Keyed by the
+    # Folded while working, so the example is not one click away, and drawn
+    # only when open: the saved analyses are read from disk. Keyed by the
     # uploader key, which every switch changes: it opens folded again after one.
-    with st.expander(
+    with lazy_expander(
         "Start or open another analysis",
-        icon=":material/swap_horiz:",
         key=f"switch_analysis_{st.session_state.fasta_uploader_key}",
-    ):
-        _analysis_choices()
+        icon=":material/swap_horiz:",
+    ) as is_open:
+        if is_open:
+            _analysis_choices()
 
 
 def _analysis_choices():

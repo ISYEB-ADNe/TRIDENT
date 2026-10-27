@@ -5,8 +5,10 @@ import sqlite3
 
 import pandas as pd
 
+from streamlit.testing.v1 import AppTest
+
 from trident.pipelines.fasta_pipeline import run_fasta_workflow
-from trident.ui.inputs import _fasta_handle, _saved_copy
+from trident.ui.inputs import _fasta_analysis_name, _fasta_handle, _saved_copy
 
 
 def _analysis_file(path, seq_id="s1", with_sequences=True):
@@ -43,9 +45,9 @@ def _upload(text, name):
 
 def test_fasta_file_gives_one_row_per_record_saved_by_filename(tmp_path):
     """Each record becomes a row with its id, length and sequence (Windows line
-    endings too), read back the same from the analysis; a file without
-    records gives none."""
-    text = ">m1 first\r\nACGT\r\nAC\r\n>m2\r\nGGG\r\n>m3\r\nT\r\n"
+    endings and a UTF-8 byte order mark too), read back the same from the
+    analysis; a file without records gives none."""
+    text = "\ufeff>m1 first\r\nACGT\r\nAC\r\n>m2\r\nGGG\r\n>m3\r\nT\r\n"
     db_path = str(tmp_path / "analysis.db")
 
     live, _ = run_fasta_workflow(_upload(text, "motus.fasta"), db_path=db_path)
@@ -57,3 +59,43 @@ def test_fasta_file_gives_one_row_per_record_saved_by_filename(tmp_path):
     }
     pd.testing.assert_frame_equal(live, cached)
     assert run_fasta_workflow(_upload("", "empty.fasta"), db_path=db_path)[0].empty
+
+
+def test_edited_fasta_under_a_saved_name_starts_a_new_analysis(tmp_path, monkeypatch):
+    """The sequences are saved by filename: a file whose sequences changed
+    since gets "name (2)" instead of the old analysis, and reopens it later."""
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path))
+    first = ">m1\nACGT\n>m2\nGGG\n"
+    edited = ">m1\nACGT\n>m3\nTTT\n"
+    run_fasta_workflow(_upload(first, "demo.fasta"), db_path=str(tmp_path / "demo.db"))
+
+    def name(text):
+        return _fasta_analysis_name(
+            "demo", run_fasta_workflow(_upload(text, "demo.fasta"))[0]
+        )
+
+    assert name(first) == "demo"
+    assert name(edited) == "demo (2)"
+    run_fasta_workflow(
+        _upload(edited, "demo.fasta"), db_path=str(tmp_path / "demo (2).db")
+    )
+    assert name(edited) == "demo (2)"
+    assert name(">m4\nCCC\n") == "demo (3)"
+
+
+def test_unreadable_fasta_is_reported_and_saves_nothing(tmp_path, monkeypatch):
+    """A file that is not UTF-8, not FASTA or without sequences shows an error
+    instead of a traceback, and leaves no analysis behind."""
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path))
+
+    def page(data):
+        from trident.ui.inputs import _start_fasta_analysis
+
+        _start_fasta_analysis("bad.fasta", data)
+
+    for data in [b">m1 \xe9t\xe9\nACGT\n", b"notes\n>m1\nACGT\n", b""]:
+        at = AppTest.from_function(page, args=(data,))
+        at.run()
+        assert not at.exception, data
+        assert len(at.error) == 1, data
+    assert list(tmp_path.iterdir()) == []

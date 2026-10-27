@@ -46,7 +46,7 @@ def _in_streamlit_run() -> bool:
         return False
 
 
-def _source_root() -> Path | None:
+def source_root() -> Path | None:
     """The repository root in a source checkout (git clone or downloaded
     archive, as documented), None for an installed package (this file then
     sits in site-packages)."""
@@ -61,7 +61,7 @@ def _repo_secrets() -> dict:
     Streamlit reads it only from the folder the app starts in, and not at all
     in notebooks or scripts: this makes the same file work for both.
     """
-    root = _source_root()
+    root = source_root()
     path = root / ".streamlit" / "secrets.toml" if root else None
     if not path or not path.exists():
         return {}
@@ -78,8 +78,13 @@ def get(key: str, default: str | None = None) -> str | None:
 
             from streamlit.runtime.scriptrunner import get_script_run_ctx
 
-            if key in st.secrets:
-                return st.secrets[key]
+            # st.secrets raises without a secrets file: checked on its own, or
+            # the session state below would be skipped too.
+            try:
+                if key in st.secrets:
+                    return st.secrets[key]
+            except Exception:
+                pass
             # Session state belongs to a script run: worker threads (step jobs,
             # BLAST batches) have none, and reading it there only logs warnings.
             if get_script_run_ctx(suppress_warning=True) is not None:
@@ -120,7 +125,7 @@ def results_dir() -> Path:
     configured = get(RESULTS_DIR)
     if configured:
         return Path(configured).expanduser()
-    root = _source_root()
+    root = source_root()
     return root / "results" if root else Path.home() / "TRIDENT" / "results"
 
 

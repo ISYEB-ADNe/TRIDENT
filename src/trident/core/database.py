@@ -171,7 +171,7 @@ def _write_provenance(
 
 def _delete_provenance(conn: sqlite3.Connection, step: str, run_ids: list[int]) -> None:
     """Drop the provenance rows of *run_ids* for *step*."""
-    if not _table_exists(conn, _PROVENANCE_TABLE):
+    if not table_exists(conn, _PROVENANCE_TABLE):
         return
     if run_ids:
         placeholders = ",".join("?" * len(run_ids))
@@ -190,7 +190,7 @@ def load_provenance(db_path: str | Path, table_name: str | None = None) -> pd.Da
     """
     cols = ["step", "run_id", "queried_on", "trident_version"]
     with get_connection(db_path) as conn:
-        if not _table_exists(conn, _PROVENANCE_TABLE):
+        if not table_exists(conn, _PROVENANCE_TABLE):
             return pd.DataFrame(columns=cols)
         if table_name is not None:
             return pd.read_sql_query(
@@ -220,7 +220,7 @@ _COLUMNS_TABLE = "step_columns"
 
 def _load_step_columns(conn: sqlite3.Connection, step: str) -> list[str]:
     """Return the columns recorded for *step*, or [] (older databases)."""
-    if not _table_exists(conn, _COLUMNS_TABLE):
+    if not table_exists(conn, _COLUMNS_TABLE):
         return []
     row = conn.execute(
         f"SELECT columns FROM {_COLUMNS_TABLE} WHERE step = ?", (step,)
@@ -375,7 +375,7 @@ def _stored_key(value):
     return str(_normalize_number(value))
 
 
-def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+def table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     """Whether *table_name* exists.
 
     Results tables are created lazily by ``to_sql`` on the first run that
@@ -391,7 +391,7 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
 def _index_run_id(conn: sqlite3.Connection, table_name: str) -> None:
     """Index the run_id of *table_name*, if it exists: each cached item is
     read by its run_id, which would otherwise scan the whole table."""
-    if _table_exists(conn, table_name):
+    if table_exists(conn, table_name):
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS {table_name}_run_id ON {table_name} (run_id)"
         )
@@ -410,7 +410,7 @@ def _load_cached_items(
     columns hold the same SQLite kinds (``typeof``) are read together, then
     joined.
     """
-    if not run_ids or not _table_exists(conn, table_name):
+    if not run_ids or not table_exists(conn, table_name):
         return pd.DataFrame()
     in_ids = "run_id IN (SELECT value FROM json_each(?))"
     columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table_name})")]
@@ -441,7 +441,7 @@ def _load_cached_items(
 
 def _delete_run(conn: sqlite3.Connection, table_name: str, run_id: int) -> None:
     """Delete all rows for *run_id* from *table_name*."""
-    if not _table_exists(conn, table_name):
+    if not table_exists(conn, table_name):
         return
     conn.execute(f"DELETE FROM {table_name} WHERE run_id = ?", (run_id,))
     conn.commit()
@@ -480,7 +480,7 @@ def _delete_orphan_rows(conn: sqlite3.Connection, table_name: str) -> None:
     """Delete the result rows without an inputs row, left by a process killed
     while saving (see ``_save_items``): their run_id may be given again."""
     inputs_table = f"{table_name}_inputs"
-    if not (_table_exists(conn, table_name) and _table_exists(conn, inputs_table)):
+    if not (table_exists(conn, table_name) and table_exists(conn, inputs_table)):
         return
     cursor = conn.execute(
         f"DELETE FROM {table_name} "
@@ -500,7 +500,7 @@ def _append_rows(conn: sqlite3.Connection, table_name: str, df: pd.DataFrame) ->
     store its later values as text or floats (an id 126160 as '126160' or
     126160.0).
     """
-    if _table_exists(conn, table_name):
+    if table_exists(conn, table_name):
         _add_missing_columns(conn, table_name, df)
         df.to_sql(name=table_name, con=conn, if_exists="append", index=False)
     else:
@@ -1128,7 +1128,7 @@ def _empty_run_ids(
     """run_ids cached as input rows but with no matching results rows (no row
     filling *result_col*, when given)."""
     inputs_table = f"{table_name}_inputs"
-    if not _table_exists(conn, inputs_table):
+    if not table_exists(conn, inputs_table):
         return []
     columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})")}
     if columns:
@@ -1169,7 +1169,7 @@ def clear_empty_cache(
     inputs_table = f"{table_name}_inputs"
     with get_connection(db_path) as conn:
         empty_ids = _empty_run_ids(conn, table_name, result_col)
-        if empty_ids and result_col and _table_exists(conn, table_name):
+        if empty_ids and result_col and table_exists(conn, table_name):
             # Their explanation rows go too, or the re-query would add to them.
             placeholders = ",".join("?" * len(empty_ids))
             conn.execute(
