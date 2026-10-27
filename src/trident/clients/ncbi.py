@@ -775,9 +775,18 @@ def submit_blast_batch(
             records = runner(multi_fasta, evalue, hitlist_size, entrez_query)
         except BlastGaveUp as e:
             logger.warning(f"{label} given up: {e}; resubmitting it")
-            records = _blast_runner(retry=False)(
-                multi_fasta, evalue, hitlist_size, entrez_query
-            )
+            try:
+                records = _blast_runner(retry=False)(
+                    multi_fasta, evalue, hitlist_size, entrez_query
+                )
+            except (BlastCpuLimit, BlastGaveUp, stop.StepStopped):
+                raise
+            except Exception as resubmit_error:
+                # Failed as a given-up job: no retry, no split, and nothing
+                # said about NCBI being down.
+                raise BlastGaveUp(
+                    f"its resubmission failed ({resubmit_error})"
+                ) from resubmit_error
         df = parse_blast_records(records)
 
         logger.info(

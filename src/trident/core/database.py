@@ -478,14 +478,17 @@ def _next_run_id(conn: sqlite3.Connection, table_name: str) -> int:
 
 def _delete_orphan_rows(conn: sqlite3.Connection, table_name: str) -> None:
     """Delete the result rows without an inputs row, left by a process killed
-    while saving (see ``_save_items``): their run_id may be given again."""
+    while saving (see ``_save_items``): their run_id may be given again. With
+    no inputs table yet (killed during the first save), every row is one."""
     inputs_table = f"{table_name}_inputs"
-    if not (table_exists(conn, table_name) and table_exists(conn, inputs_table)):
+    if not table_exists(conn, table_name):
         return
-    cursor = conn.execute(
-        f"DELETE FROM {table_name} "
-        f"WHERE run_id NOT IN (SELECT run_id FROM {inputs_table})"
+    where = (
+        f" WHERE run_id NOT IN (SELECT run_id FROM {inputs_table})"
+        if table_exists(conn, inputs_table)
+        else ""
     )
+    cursor = conn.execute(f"DELETE FROM {table_name}{where}")
     conn.commit()
     if cursor.rowcount:
         logger.debug(f"{table_name}: deleted {cursor.rowcount} rows of no item")
@@ -683,11 +686,12 @@ class CacheStrategy(ABC):
         return None
 
 
-# Version of the results of the steps cached whole (FullCache). Their key is
-# made of settings and data, not code: bump it when a step's output columns
-# change, so each step computes its result again (locally) instead of
-# returning one saved with the old columns. It is part of the step's params,
-# so the later steps' keys follow.
+# Version of the results of the steps computed locally (FullCache, and
+# CustomCache with versioned=True). Their key is made of settings and data, not
+# code: bump it when a step's output columns change, so each step computes its
+# result again (locally) instead of returning one saved with the old columns.
+# It is part of the step's params, so the later steps' keys follow. Searches
+# are not versioned: a bump never sends their requests again.
 RESULTS_VERSION = 1
 
 
@@ -796,7 +800,8 @@ class PartialCache(CacheStrategy):
 
 class CustomCache(CacheStrategy):
     """Delegate to raw callables for patterns too complex for
-    FullCache/PartialCache."""
+    FullCache/PartialCache. *versioned* adds RESULTS_VERSION to the key, for a
+    step computed locally."""
 
     def __init__(
         self,
@@ -805,15 +810,21 @@ class CustomCache(CacheStrategy):
         match_map_dict: dict[str, str] | None = None,
         fingerprint_on: list[str] | None = None,
         whole_result: bool = False,
+        versioned: bool = False,
     ):
         self.whole_result = whole_result
         self._prepare_fn = prepare_fn
         self._rebuild_fn = rebuild_fn
         self._match_map = match_map_dict
         self.fingerprint_on = fingerprint_on or []
+        self.versioned = versioned
 
     def prepare(self, **kwargs) -> tuple[list[dict], dict]:
         inputs, params = self._prepare_fn(**kwargs)
+        if self.versioned:
+            version = {"_results_version": RESULTS_VERSION}
+            params = {**params, **version}
+            inputs = [{**item, **version} for item in inputs]
         fp = _fingerprint_params(kwargs, self.fingerprint_on)
         if fp:
             # Add the upstream-data fingerprint to the shared params and to each

@@ -82,11 +82,24 @@ def _gbif_search_params(
     species_list: list[str],
     latitude: float | None,
     longitude: float | None,
-    extents: list[float | None],
+    extents: list[int | str],
     area: str,
     **kwargs,
 ):
-    """Extract parameters for GBIF search step."""
+    """Extract parameters for GBIF search step.
+
+    Extents are whole km (or "global"): an extent is a key of the saved
+    search, and 500.0 read back as text would no longer match 500.
+    """
+    not_whole = [
+        e
+        for e in extents
+        if e != "global" and (isinstance(e, bool) or not isinstance(e, int))
+    ]
+    if not_whole:
+        raise ValueError(
+            f"Search extents must be whole km or 'global', not {not_whole}"
+        )
     params = {
         "gbif_latitude": latitude,
         "gbif_longitude": longitude,
@@ -140,12 +153,12 @@ def run_gbif_search(
     species_list: list[str],
     latitude: float | None = None,
     longitude: float | None = None,
-    extents: list[float | str] | None = None,
+    extents: list[int | str] | None = None,
     area: str = "circle",
     worms_ids: dict[str, str] | None = None,
     progress_handler: Callable[[float, str], None] | None = None,
     user_agent: str | None = None,
-    _species_by_extent: dict[float | str, list[str]] | None = None,
+    _species_by_extent: dict[int | str, list[str]] | None = None,
     failure_sink: list | None = None,
     result_sink: Callable | None = None,
 ) -> pd.DataFrame:
@@ -155,7 +168,7 @@ def run_gbif_search(
         species_list: Scientific names to match in GBIF.
         latitude: Center latitude of the search areas.
         longitude: Center longitude of the search areas.
-        extents: List of distances (km) from center, or "global".
+        extents: Distances (whole km) from the center, or "global".
         area: "circle" (within each distance of the center) or "box" (the
             bounding box of that circle).
         worms_ids: WoRMS AphiaID of each name, matched first (see
@@ -320,6 +333,7 @@ def _gbif_merge_params(
         fingerprint_on=["gbif_search_df"],
         # Every extent's rows have the same columns, from this merge.
         whole_result=True,
+        versioned=True,
     ),
     log_reuse_as="GEO list",
     bool_columns=("in_mol",),
@@ -537,7 +551,7 @@ IDENTITY_COL = "mol_identity"
 def classify_gbif_extents(
     seq_df: pd.DataFrame,
     min_occurrences: int,
-    extents: list[float],
+    extents: list[int | str],
     priority_extent: float | str | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     """Pivot one sequence's GBIF occurrences to wide form and bucket species by
@@ -550,7 +564,7 @@ def classify_gbif_extents(
         seq_df: Long-form rows for a single seq_id (scientificName, in_mol,
             geo_url, geo_extent, geo_occurrences, optionally mol_identity).
         min_occurrences: Records within an extent needed to keep a species.
-        extents: Search extents (km floats and/or "global").
+        extents: Search extents (whole km and/or "global").
         priority_extent: The filtering area: the extent Minimum occurrences
             applies to (km or "global").
 

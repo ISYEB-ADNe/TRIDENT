@@ -7,6 +7,8 @@ from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 
+from loguru import logger
+
 APP_NAME = "trident"
 
 
@@ -65,8 +67,12 @@ def _repo_secrets() -> dict:
     path = root / ".streamlit" / "secrets.toml" if root else None
     if not path or not path.exists():
         return {}
-    with path.open("rb") as f:
-        return tomllib.load(f)
+    try:
+        with path.open("rb") as f:
+            return tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        logger.warning(f"{path} is not valid TOML, its settings are ignored: {e}")
+        return {}
 
 
 def get(key: str, default: str | None = None) -> str | None:

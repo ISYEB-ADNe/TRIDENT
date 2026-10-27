@@ -598,3 +598,12 @@ def test_area_params_circle_box_and_global():
     assert area_params(24.5, 54.4, "global", "circle") == {}
     with pytest.raises(ValueError):
         area_params(24.5, 54.4, 500, "square")
+
+
+def test_search_extents_are_whole_km():
+    """An extent is a key of the saved search: 500.0 is refused before any
+    request, as it would not match 500 once read back."""
+    with pytest.raises(ValueError, match="whole km"):
+        geo_pipeline.run_gbif_search(
+            ["Gadus morhua"], latitude=0, longitude=0, extents=[500.0, "global"]
+        )

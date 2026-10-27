@@ -29,7 +29,7 @@ def worms_search_url(name: str) -> str:
     return f"https://www.marinespecies.org/aphia.php?p=taxlist&tName={quote(name)}"
 
 
-def _get_json(session: requests.Session, url: str, params: dict):
+def _get_json(session: requests.Session, url: str, params: dict, timeout: int = 10):
     """GET a WoRMS lookup and return its JSON body, or None when nothing matches.
 
     WoRMS answers an unknown name or id with 204 (no content) or 404; both are
@@ -37,7 +37,7 @@ def _get_json(session: requests.Session, url: str, params: dict):
     does a body that is not JSON (e.g. a maintenance page): taken for "not
     found", it would be saved as such and never asked again.
     """
-    response = session.get(url, params=params, timeout=10)
+    response = session.get(url, params=params, timeout=timeout)
     if response.status_code in (204, 404):
         return None
     response.raise_for_status()
@@ -238,15 +238,23 @@ def resolve_accepted_name(
     }
     matched_by = "name"
     record, note = _record_of_name(get_aphia_records(taxon_name, session=session))
+    infraspecific = False
     if record is None and ncbi_taxid is not None and not pd.isna(ncbi_taxid):
-        record = get_aphia_record_by_ncbi_taxid(ncbi_taxid, session=session)
+        linked = get_aphia_record_by_ncbi_taxid(ncbi_taxid, session=session)
         matched_by = "ncbi_taxid"
+        # A linked record resolves as a name's does; only a species, or a
+        # subspecies resolved to its species, stands for a MOL species.
+        infraspecific = bool(linked) and linked.get("rank") in INFRASPECIFIC_RANKS
+        if infraspecific:
+            record = linked
+        elif linked and linked.get("rank") == "Species":
+            record = _record_of_name([linked])[0]
     if record is None:
         return {**not_found, "note": note}
 
     accepted = record.get("valid_name") or record.get("scientificname") or taxon_name
     aphia_id = record.get("valid_AphiaID") or record.get("AphiaID")
-    if matched_by == "ncbi_taxid" and record.get("rank") in INFRASPECIFIC_RANKS:
+    if infraspecific:
         species = _species_of(record)
         if species is None:
             return {**not_found, "note": note}
@@ -328,25 +336,12 @@ def get_children_by_aphia_id(
         # WoRMS API offset is 1-based
         params = {"marine_only": str(marine_only).lower(), "offset": offset}
 
-        response = session.get(url, params=params, timeout=timeout)
-
-        # 204 No Content and 404 both mean there are no (more) children.
-        if response.status_code in (204, 404):
-            if response.status_code == 404 and page == 1:
-                logger.debug(f"AphiaID {aphia_id} has no children (404).")
+        # None (204 or 404) when there are no (more) children.
+        page_records = _get_json(session, url, params, timeout)
+        if not page_records:
             break
-
-        response.raise_for_status()
-
-        # Handle empty strings or whitespace-only responses
-        if not response.text or not response.text.strip():
-            break
-
-        page_records = response.json()
-
-        # WoRMS usually returns a list; if not a list, it's likely an error msg or empty
-        if not isinstance(page_records, list) or not page_records:
-            break
+        if not isinstance(page_records, list):
+            raise ValueError(f"unexpected WoRMS answer: {page_records}")
 
         all_children.extend(page_records)
 

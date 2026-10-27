@@ -225,6 +225,7 @@ def _bold_filter_rebuild(input_selected, original_inputs):
         prepare_fn=_bold_filter_params,
         rebuild_fn=_bold_filter_rebuild,
         match_map_dict={"scientificName": "scientificName"},
+        versioned=True,
     ),
     log_reuse_as="BOLD filter",
 )

@@ -125,9 +125,7 @@ def display_gbif_parameters():
         save_widget("gbif_extent")
 
         try:
-            extents = [
-                int(float(x.strip())) for x in extent_input.split(",") if x.strip()
-            ]
+            extents = [int(x.strip()) for x in extent_input.split(",") if x.strip()]
 
             if not extents:
                 st.error(

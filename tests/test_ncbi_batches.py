@@ -315,6 +315,30 @@ def test_stuck_job_is_resubmitted_once_then_fails(ncbi_fake):
     assert not circuit.is_open
 
 
+def test_resubmitted_job_that_fails_fails_like_a_stuck_one(ncbi_fake, monkeypatch):
+    """A resubmitted job rejected by NCBI fails its sequences as a stuck one
+    does: no split, and NCBI does not count as down."""
+    ncbi_fake.stuck = {"s0": 1}
+    post = ncbi.requests.post
+
+    def post_then_reject(url, data, **kwargs):
+        reply = post(url, data, **kwargs)
+        if data["CMD"] == "Put":
+            ncbi_fake.bad.add("s0")
+        return reply
+
+    monkeypatch.setattr(ncbi.requests, "post", post_then_reject)
+    circuit = ncbi.BlastCircuit(threshold=1)
+
+    df, failed = ncbi.run_blast_batches(
+        [_batch(0, 2)], n_threads=1, circuit=circuit, give_up=-1.0
+    )
+
+    assert df.empty and sorted(failed) == ["s0", "s1"]
+    assert ncbi_fake.jobs == 2
+    assert not circuit.is_open
+
+
 def test_give_up_while_splitting_sends_nothing_more(ncbi_fake, monkeypatch):
     """A part of a split batch given up stops the split: the parts not sent
     yet fail with it, and the parts done keep their hits."""

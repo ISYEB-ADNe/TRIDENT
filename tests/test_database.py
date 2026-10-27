@@ -791,3 +791,21 @@ def test_load_provenance_missing_table(db_path):
         "queried_on",
         "trident_version",
     ]
+
+
+def test_rows_of_a_first_save_killed_early_go_to_no_item(db_path):
+    """A first save killed before its inputs table exists leaves rows of no
+    item: the next item saved does not take them over with their run_id."""
+
+    @save_to_db("test_first", cache=PartialCache(items_kwarg="names", item_key="name"))
+    def step(names):
+        return pd.DataFrame({"name": names, "v": [1] * len(names)})
+
+    with sqlite3.connect(db_path) as conn:
+        pd.DataFrame({"name": ["a"], "v": [9], "run_id": [1]}).to_sql(
+            "test_first", conn, index=False
+        )
+    conn.close()
+    step(["b"], db_path=db_path)
+    df, _ = step(["b"], db_path=db_path)
+    assert df[["name", "v"]].values.tolist() == [["b", 1]]

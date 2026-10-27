@@ -387,3 +387,35 @@ def test_taxid_leading_to_a_subspecies_resolves_to_its_species(monkeypatch):
     _lookups(monkeypatch, by_name=None, by_taxid=record)
     r = worms.resolve_accepted_name("Aporrectodea trapezoides", ncbi_taxid=408844)
     assert (r["accepted_name"], r["aphia_id"]) == ("Aporrectodea caliginosa", 1041019)
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {
+            "scientificname": "Gadus",
+            "AphiaID": 125732,
+            "status": "accepted",
+            "rank": "Genus",
+        },
+        {
+            "scientificname": "Gadus ogac",
+            "AphiaID": 1,
+            "status": "nomen dubium",
+            "rank": "Species",
+        },
+    ],
+    ids=["genus", "no accepted name"],
+)
+def test_taxid_record_is_used_only_when_it_leads_to_an_accepted_species(
+    monkeypatch, record
+):
+    """A record linked to the taxid resolves as a name's record does: one
+    without an accepted species leaves the name as NCBI writes it."""
+    _lookups(monkeypatch, by_name=None, by_taxid=record)
+    r = worms.resolve_accepted_name("Gadus ogac", ncbi_taxid=8053)
+    assert (r["accepted_name"], r["aphia_id"], r["matched_by"]) == (
+        "Gadus ogac",
+        None,
+        None,
+    )
