@@ -30,6 +30,7 @@ from trident.ui.ui import (
     lazy_expander,
     styled_or_plain,
     column_config,
+    BLAST_DATABASE_CAPTION,
     BLAST_HELP,
     get_recent_param_sets,
     param_preset_selector,
@@ -105,6 +106,7 @@ def display_ncbi_parameters():
         ),
         key="ncbi_search_preset",
     )
+    st.caption(BLAST_DATABASE_CAPTION)
 
     stored = st.session_state.ncbi_search_params
 

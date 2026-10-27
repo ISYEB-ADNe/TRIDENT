@@ -314,7 +314,7 @@ class StepLog:
         summary: str,
         failed: Sequence[str] = (),
         noun: str = "item",
-        retry: str = "Run the step again to retry them.",
+        retry: str = "Run the step again",
     ) -> None:
         """Log the end of the step: *summary* of its results, then the
         *failed* items (by name; *noun* is what an item is), which the next
@@ -322,9 +322,10 @@ class StepLog:
         elapsed = duration(time.monotonic() - self._start)
         logger.info(f"{self.step} done after {elapsed}: {summary}")
         if failed:
+            them = "it" if len(failed) == 1 else "them"
             logger.warning(
                 f"{self.step}: {len(failed)} {pluralize(len(failed), noun)} "
-                f"failed ({name_list(failed)}). {retry}"
+                f"failed ({name_list(failed)}). {retry} to retry {them}."
             )
 
 

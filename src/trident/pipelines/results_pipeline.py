@@ -631,7 +631,7 @@ def run_higher_taxa_lookup(
         f"{found}/{len(names)} {pluralize(len(names), 'taxon')} found",
         failed,
         "taxon",
-        retry="Build the table again to retry them.",
+        retry="Build the table again",
     )
     return pd.DataFrame(rows, columns=HIGHER_TAXA_COLS)
 

@@ -64,14 +64,16 @@ def setup_ncbi_credentials() -> None:
 
 
 _ncbi_credentials_loaded = False
+# The parallel BLAST batches all call a require_ncbi_auth function at once.
+_ncbi_credentials_lock = threading.Lock()
 
 
 def reload_ncbi_credentials() -> None:
     """Force re-reading credentials from config (e.g. after Settings change)."""
     global _ncbi_credentials_loaded
-    _ncbi_credentials_loaded = False
-    setup_ncbi_credentials()
-    _ncbi_credentials_loaded = True
+    with _ncbi_credentials_lock:
+        setup_ncbi_credentials()
+        _ncbi_credentials_loaded = True
 
 
 def require_ncbi_auth(func: Callable) -> Callable:
@@ -80,9 +82,10 @@ def require_ncbi_auth(func: Callable) -> Callable:
     @wraps(func)
     def wrapper(*args, **kwargs):
         global _ncbi_credentials_loaded
-        if not _ncbi_credentials_loaded:
-            setup_ncbi_credentials()
-            _ncbi_credentials_loaded = True
+        with _ncbi_credentials_lock:
+            if not _ncbi_credentials_loaded:
+                setup_ncbi_credentials()
+                _ncbi_credentials_loaded = True
         return func(*args, **kwargs)
 
     return wrapper

@@ -21,6 +21,7 @@ from trident.ui.ui import (
     lazy_expander,
     styled_or_plain,
     column_config,
+    BLAST_DATABASE_CAPTION,
     BLAST_HELP,
     get_recent_param_sets,
     param_preset_selector,
@@ -83,6 +84,7 @@ def display_hypo_parameters():
         ),
         key="hypo_search_preset",
     )
+    st.caption(BLAST_DATABASE_CAPTION)
     stored = st.session_state.hypo_merge_params
 
     def_hits = int(stored.get("hypo_max_hits") or HYPO_MAX_HITS_DEFAULT)
@@ -516,6 +518,7 @@ def display_hypo_check_controls():
         format_fn=lambda p: f"E-value: 1e-{p['hypo_check_ev_exponent']}",
         key="hypo_check_preset",
     )
+    st.caption(BLAST_DATABASE_CAPTION)
     stored = st.session_state.hypo_check_params
 
     default_ev_exp = int(

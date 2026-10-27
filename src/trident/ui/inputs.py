@@ -10,12 +10,14 @@ import streamlit as st
 from loguru import logger
 
 import trident.pipelines as pipe
+from trident.clients.fasta import load_fasta, records_to_dataframe
 from trident.core.config import is_streamlit_cloud, results_dir, source_root
 from trident.core.database import table_exists, check_schema_version, get_connection
 from trident.core.utils import pluralize
 from trident.ui.ui import (
     column_config,
     lazy_expander,
+    next_step_button,
     prefill_settings,
     reset_for_new_analysis,
 )
@@ -87,7 +89,7 @@ def _start_fasta_analysis(file_name: str, data: bytes, settings: dict | None = N
     leaves no analysis behind.
     """
     try:
-        seqs_df, _ = pipe.run_fasta_workflow(_fasta_handle(file_name, data))
+        records = load_fasta(_fasta_handle(file_name, data))
     except UnicodeDecodeError:
         st.error(
             f"❌ {file_name} is not UTF-8 text: save it as UTF-8 and upload it again."
@@ -98,9 +100,10 @@ def _start_fasta_analysis(file_name: str, data: bytes, settings: dict | None = N
             f"❌ {file_name} is not a FASTA file TRIDENT can read: {str(e).splitlines()[0]}"
         )
         return
-    if seqs_df is None or seqs_df.empty:
+    if not records:
         st.error("❌ No valid sequences found.")
         return
+    seqs_df = records_to_dataframe(records)
 
     base_name = Path(file_name).stem
     name = _fasta_analysis_name(base_name, seqs_df)
@@ -475,14 +478,7 @@ def display_analysis_status():
 
         display_fasta_sequence_table()
 
-        if st.button(
-            "Proceed to MOL",
-            icon=":material/arrow_forward:",
-            type="secondary",
-            width="stretch",
-        ):
-            st.session_state.requested_tab = "mol"
-            st.rerun()
+        next_step_button("Next: MOL ➔", "mol")
 
 
 def upload_and_start_analysis():

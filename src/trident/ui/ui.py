@@ -21,6 +21,7 @@ from loguru import logger
 from PIL import Image
 
 from trident.clients.ncbi import BLAST_SLOW_THREADS
+from trident.core.constants import BLAST_DATABASE
 from trident.core.utils import pluralize
 from trident.core import stop
 from trident.core.database import get_connection
@@ -343,6 +344,12 @@ BLAST_HELP = {
         "min; raise it if large batches keep failing this way."
     ),
 }
+
+# Shown above the BLAST settings: the database is fixed, not a setting.
+BLAST_DATABASE_CAPTION = (
+    f"Searches NCBI's {BLAST_DATABASE} database (Core Nucleotide), the default "
+    "of the NCBI BLAST website."
+)
 
 # --------------------------------------------------------------------
 # SESSION STATE MANAGEMENT
