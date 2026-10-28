@@ -76,10 +76,7 @@ def prepare_worms_input(df: pd.DataFrame, name_table: pd.DataFrame | None) -> li
     """
     genera = species_of(df["scientificName"], name_table).map(_genus_of)
     # A hit without a name has no genus to expand.
-    genera = genera.dropna().unique().tolist()
-    genus_word = pluralize(len(genera), "genus")
-    logger.debug(f"Prepared WoRMS input: {len(genera)} unique {genus_word}")
-    return genera
+    return genera.dropna().unique().tolist()
 
 
 ### NAME RESOLUTION ###
@@ -149,7 +146,7 @@ def run_name_resolution(
     ncbi_taxids = ncbi_taxids or {}
     rows: list[dict] = []
     failed: list[str] = []
-    log = StepLog("WoRMS name check", len(names))
+    log = StepLog("WoRMS name check", len(names), "name")
     try:
         for name in names:
             try:
@@ -191,10 +188,9 @@ def run_name_resolution(
     n_syn = sum(1 for r in rows if r["is_synonym"])
     n_taxid = sum(1 for r in rows if r["matchedBy"] == "ncbi_taxid")
     log.done(
-        f"{len(rows)} {pluralize(len(rows), 'name')} checked ({n_syn} "
-        f"{pluralize(n_syn, 'synonym')}, {n_taxid} found through their NCBI taxid)",
+        f"{n_syn} {pluralize(n_syn, 'synonym')}, {n_taxid} found through their "
+        "NCBI taxid",
         failed,
-        "name",
     )
     return pd.DataFrame(
         rows,

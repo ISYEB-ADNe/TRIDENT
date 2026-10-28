@@ -538,7 +538,7 @@ def get_species_from_genus_list(
     kept = skipped = 0
     failed_genera: list[str] = []
     session = create_session(user_agent=user_agent)
-    log = StepLog("WoRMS search", len(genus_list))
+    log = StepLog("WoRMS search", len(genus_list), "genus")
 
     for genus in genus_list:
         try:
@@ -546,13 +546,13 @@ def get_species_from_genus_list(
             with log.query(genus):
                 aphia_ids = get_genus_aphia_ids(genus, session=session)
             if not aphia_ids:
+                if result_sink is not None:
+                    result_sink(pd.DataFrame(), [genus])
                 log.item(
                     genus,
                     f"not in WoRMS (check: {worms_search_url(genus)})",
                     notable=True,
                 )
-                if result_sink is not None:
-                    result_sink(pd.DataFrame(), [genus])
                 continue
 
             # 2. Retrieve all children with internal pagination, and those of
@@ -617,6 +617,5 @@ def get_species_from_genus_list(
     log.done(
         f"{kept} species kept, {skipped} skipped (not accepted species)",
         failed_genera,
-        "genus",
     )
     return df, failed_genera

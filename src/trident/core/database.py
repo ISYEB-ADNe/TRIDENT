@@ -741,13 +741,24 @@ def _as_booleans(df: pd.DataFrame, columns: tuple[str, ...]) -> None:
             df[col] = df[col].eq(True)
 
 
+def _id_ranges(ids: list[int]) -> str:
+    """*ids* sorted, runs written as ranges: "1-6, 9, 12-14"."""
+    ranges: list[list[int]] = []
+    for i in sorted(set(ids)):
+        if ranges and i == ranges[-1][1] + 1:
+            ranges[-1][1] = i
+        else:
+            ranges.append([i, i])
+    return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in ranges)
+
+
 def warn_empty_params(params: dict, name: str) -> None:
     """Log when an upstream params dict is empty (weakens cache key). At DEBUG:
     it is for developers, and an empty upstream result also gives one."""
     if not params:
         logger.debug(
-            f"'{name}' is empty! "
-            "The cache will not be able to distinguish between different settings."
+            f"'{name}' is empty (an earlier step found nothing, or its settings "
+            "are unknown)"
         )
 
 
@@ -1109,25 +1120,26 @@ def save_to_db(
                 # 1. Classify each item as cached or uncached
                 _index_run_id(conn, table_name)
                 run_ids = _find_cached_run_ids(conn, table_name, cache_items)
-                replaced = False
-                for idx, (item, run_id) in enumerate(zip(cache_items, run_ids)):
+                replaced = []
+                for item, run_id in zip(cache_items, run_ids):
                     if run_id is not None and not force_rerun:
-                        logger.debug(
-                            f"Item {idx + 1}/{len(cache_items)}: cached (run_id={run_id})"
-                        )
                         cached_ids.append(run_id)
                     else:
                         if run_id is not None:
-                            logger.debug(
-                                f"Item {idx + 1}: will replace run_id={run_id}"
-                            )
                             _delete_run(conn, table_name, run_id)
                             _delete_run(conn, f"{table_name}_inputs", run_id)
                             _delete_provenance(conn, table_name, [run_id])
-                            replaced = True
+                            replaced.append(run_id)
                         uncached_items.append(item)
                 if replaced:
                     _after_deleting(conn)
+                    logger.debug(
+                        f"{table_name}: replaced run_ids {_id_ranges(replaced)}"
+                    )
+                if cached_ids:
+                    logger.debug(
+                        f"{table_name}: reused run_ids {_id_ranges(cached_ids)}"
+                    )
 
                 cached_dfs.append(_load_cached_items(conn, table_name, cached_ids))
                 _log_cache_use(

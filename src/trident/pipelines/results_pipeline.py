@@ -679,7 +679,7 @@ def run_higher_taxa_lookup(
     session = create_session(user_agent=user_agent)
     rows: list[dict] = []
     failed: list[str] = []
-    log = StepLog("WoRMS higher taxa", len(names))
+    log = StepLog("WoRMS higher taxa", len(names), "taxon")
     try:
         for name in names:
             try:
@@ -710,9 +710,8 @@ def run_higher_taxa_lookup(
         failure_sink.extend(failed)
     found = len({row["scientificName"] for row in rows})
     log.done(
-        f"{found}/{len(names)} {pluralize(len(names), 'taxon')} found",
+        f"{found} found",
         failed,
-        "taxon",
         retry="Build the table again",
     )
     return pd.DataFrame(rows, columns=HIGHER_TAXA_COLS)

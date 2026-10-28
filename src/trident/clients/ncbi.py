@@ -60,7 +60,6 @@ def setup_ncbi_credentials() -> None:
         logger.debug("CONTACT_EMAIL not set: NCBI requests will be anonymous")
     else:
         set_ncbi_email(email)
-        logger.info(f"NCBI contact email set: {email}")
 
 
 _ncbi_credentials_loaded = False
@@ -140,8 +139,6 @@ def create_sequence_batches(
         batches.append(sequences[start:end])
         start = end
 
-    batch_word = pluralize(len(batches), "batch")
-    logger.debug(f"Created {len(batches)} {batch_word}: {[len(b) for b in batches]}")
     return batches
 
 

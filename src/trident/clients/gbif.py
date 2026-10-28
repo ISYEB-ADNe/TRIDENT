@@ -344,7 +344,7 @@ def match_taxon_names(
         logger.debug("Empty names list")
         return pd.DataFrame(columns=GBIF_MATCH_COLUMNS)
 
-    log = StepLog("GBIF name match", len(names))
+    log = StepLog("GBIF name match", len(names), "species")
     local = threading.local()
     sessions = []  # every thread's session, closed once all names are matched
     sessions_lock = threading.Lock()
@@ -415,7 +415,7 @@ def match_taxon_names(
     by_name = f" ({n_by_name} by name, not by WoRMS ID)" if n_by_name else ""
     # The failed names are listed by the GBIF search, with its failed counts.
     log.done(
-        f"{int(matched.sum())}/{len(names)} species matched{by_name}, {n_other} not "
+        f"{int(matched.sum())} matched{by_name}, {n_other} not "
         f"matched to a species or left out{failed}"
     )
 

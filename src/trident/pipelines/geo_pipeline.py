@@ -55,9 +55,7 @@ def prepare_gbif_input(df: pd.DataFrame) -> list[str]:
         List of unique, non-null scientific names to use as GBIF query taxa.
     """
 
-    species_list = df["scientificName"].dropna().unique().tolist()
-    logger.debug(f"Prepared GBIF input: {len(species_list)} unique species")
-    return species_list
+    return df["scientificName"].dropna().unique().tolist()
 
 
 def prepare_gbif_worms_ids(df: pd.DataFrame) -> dict[str, str]:
@@ -193,7 +191,7 @@ def run_gbif_search(
         One row per (species, extent) with GBIF data: the match columns
         (filter_taxon_matches), occurrences and gbif_extent.
     """
-    log = StepLog("GBIF search")
+    log = StepLog("GBIF search", noun="species")
     errored = []
 
     # 1. Taxon matching
@@ -271,7 +269,7 @@ def run_gbif_search(
         progress_handler(0.9, "Merging and finalizing GBIF data...")
 
     if not results:
-        log.done("no area searched", errored, "species")
+        log.done("no area searched", errored)
         return ensure_columns(
             good_matches.iloc[:0].copy(), ["occurrences", "gbif_extent"]
         )
@@ -286,7 +284,6 @@ def run_gbif_search(
     log.done(
         f"{n_species} species, {len(results)} {pluralize(len(results), 'area')}",
         errored,
-        "species",
     )
 
     if progress_handler:
@@ -539,9 +536,6 @@ def build_geo_summary(
 
     # 4. Column Formatting
     summary_pivot.columns = [get_extent_column_name(c) for c in summary_pivot.columns]
-
-    seq_word = pluralize(len(summary_pivot), "sequence")
-    logger.debug(f"Generated GEO summary for {len(summary_pivot)} unique {seq_word}.")
 
     return summary_pivot
 

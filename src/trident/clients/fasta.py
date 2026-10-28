@@ -59,7 +59,6 @@ def records_to_fasta_string(sequences: list[SeqRecord]) -> str:
     Returns:
         FASTA-formatted string.
     """
-    logger.debug(f"Building FASTA string for {len(sequences)} sequences")
     with io.StringIO() as output:
         SeqIO.write(sequences, output, "fasta")
         return output.getvalue()
@@ -97,7 +96,6 @@ def dataframe_to_records(sequences_df: pd.DataFrame) -> list[SeqRecord]:
     Returns:
         List of SeqRecord objects.
     """
-    logger.debug(f"Converting DataFrame to SeqRecord list ({len(sequences_df)} rows)")
     return [
         blast_record(seq_id, dna_sequence)
         for seq_id, dna_sequence in zip(

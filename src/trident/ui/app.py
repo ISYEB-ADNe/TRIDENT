@@ -58,8 +58,8 @@ def _app_config():
             index=LOG_LEVELS.index(current_level) if current_level in LOG_LEVELS else 0,
             format_func=lambda level: ui.LOG_LEVEL_LABELS.get(level, level),
             help=(
-                "Controls how much detail appears in the status boxes "
-                "while a step is running. "
+                "Controls how much detail the steps' logs show, also for the "
+                "lines already logged. "
                 "**Standard** shows progress and key results. "
                 "**Verbose** adds every item and the details useful to report a "
                 "problem."

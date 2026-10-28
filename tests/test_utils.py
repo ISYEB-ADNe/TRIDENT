@@ -3,8 +3,12 @@
 import math
 
 import pandas as pd
+from loguru import logger
 
+from trident import logging as trident_logging
+from trident.logging import setup_logging
 from trident.core.utils import (
+    StepLog,
     extract_specific_epithet,
     notify_progress,
     preserve_sequence_order,
@@ -115,3 +119,58 @@ def test_to_binomial_keeps_the_species_a_qualifier_refers_to():
     )
     assert to_binomial("Rattus sp. NH 2147") == "Rattus sp."
     assert to_binomial("Odobenus rosmarus rosmarus") == "Odobenus rosmarus"
+
+
+def test_step_log_shows_progress_between_items_and_counts_them_all_at_the_end():
+    """Between two progress lines the items go to DEBUG, so a progress line
+    says how many are done; a notable item is always shown as itself, and the
+    end line counts every item."""
+    lines = []
+    sink = logger.add(
+        lambda m: lines.append((m.record["level"].name, m.record["message"]))
+    )
+    logger.enable("trident")  # as the app does (the package disables it)
+    log = StepLog("BOLD search", 3, "species")
+    log.ITEM_INTERVAL = 3600
+    try:
+        log.item("Gadus morhua", "45 BOLD sequences")
+        log.item("Gadus ogac", "12 BOLD sequences")
+        log.item("Gadus nobody", "not in BOLD", notable=True)
+        log.done("57 BOLD sequences for 2 species")
+    finally:
+        logger.remove(sink)
+        logger.disable("trident")
+    assert lines[:3] == [
+        (
+            "INFO",
+            "BOLD search: 1 of 3 species done (last: Gadus morhua, 45 BOLD sequences)",
+        ),
+        ("DEBUG", "BOLD search 2/3: Gadus ogac, 12 BOLD sequences"),
+        ("INFO", "BOLD search 3/3: Gadus nobody, not in BOLD"),
+    ]
+    level, end = lines[3]
+    assert level == "INFO" and end.endswith(
+        ": 3 of 3 species queried, 57 BOLD sequences for 2 species"
+    )
+
+
+def test_changing_the_log_level_keeps_the_other_log_handlers(monkeypatch):
+    """Setting the level again replaces only the console handler: a step's
+    log in the app, added elsewhere, keeps receiving, also when the console
+    handler was already removed (a notebook's logger.remove())."""
+    # Leave the session's handlers alone, and its logging state as it was.
+    monkeypatch.setattr(trident_logging, "_configured", True)
+    monkeypatch.setattr(trident_logging, "_handler_ids", [])
+    lines = []
+    sink = logger.add(lambda m: lines.append(m.record["message"]))
+    try:
+        setup_logging("INFO")
+        logger.remove(trident_logging._handler_ids[0])
+        setup_logging("DEBUG")
+        logger.info("still received")
+    finally:
+        for handler_id in trident_logging._handler_ids:
+            logger.remove(handler_id)
+        logger.remove(sink)
+        logger.disable("trident")
+    assert lines == ["still received"]

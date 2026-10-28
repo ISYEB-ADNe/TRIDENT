@@ -316,6 +316,18 @@ def column_config(columns, **overrides) -> dict:
 LOG_LEVEL_LABELS = {"INFO": "Standard", "DEBUG": "Verbose"}
 
 
+def shown_log_lines(entries: list, level: str) -> list[str]:
+    """The lines of a step's log, kept as (level, line), shown at *level* (the
+    chosen detail, read at each display: changing it also shows or hides the
+    lines already logged). A plain line, kept before levels were, is shown."""
+    threshold = logger.level(level).no
+    return [
+        entry[1] if isinstance(entry, tuple) else entry
+        for entry in entries
+        if not isinstance(entry, tuple) or logger.level(entry[0]).no >= threshold
+    ]
+
+
 # Help text for the NCBI BLAST settings shared by the MOL and HYPO tabs.
 BLAST_HELP = {
     "max_hits": (
@@ -370,7 +382,7 @@ class AppState:
 
     # The *_logs fields hold each step's log lines, written and read by
     # prefix (StreamlitLogSink, display_run_button).
-    ncbi_logs: list[str] = field(default_factory=list)
+    ncbi_logs: list[tuple[str, str]] = field(default_factory=list)
     ncbi_search_flag: bool = False
     ncbi_search_params: dict[str, Any] = field(default_factory=dict)
     ncbi_search_failed: list[str] = field(default_factory=list)
@@ -381,7 +393,7 @@ class AppState:
     mol_summary_df: "pd.DataFrame | None" = None
     mol_df: "pd.DataFrame | None" = None
 
-    worms_logs: list[str] = field(default_factory=list)
+    worms_logs: list[tuple[str, str]] = field(default_factory=list)
     worms_search_flag: bool = False
     tax_params: dict[str, Any] = field(default_factory=dict)
     tax_species: list[str] = field(default_factory=list)
@@ -392,7 +404,7 @@ class AppState:
     name_table: "pd.DataFrame | None" = None
     tax_df: "pd.DataFrame | None" = None
 
-    gbif_logs: list[str] = field(default_factory=list)
+    gbif_logs: list[tuple[str, str]] = field(default_factory=list)
     gbif_search_flag: bool = False
     gbif_search_params: dict[str, Any] = field(default_factory=dict)
     gbif_search_failed: list[str] = field(default_factory=list)
@@ -404,7 +416,7 @@ class AppState:
     geo_summary_df: "pd.DataFrame | None" = None
     geo_df: "pd.DataFrame | None" = None
 
-    bold_logs: list[str] = field(default_factory=list)
+    bold_logs: list[tuple[str, str]] = field(default_factory=list)
     bold_search_flag: bool = False
     bold_search_params: dict[str, Any] = field(default_factory=dict)
     bold_input_species: list[str] = field(default_factory=list)
@@ -416,7 +428,7 @@ class AppState:
     bold_search_df: "pd.DataFrame | None" = field(
         default=None, metadata={"names_source": "bold"}
     )
-    bold_filter_logs: list[str] = field(default_factory=list)
+    bold_filter_logs: list[tuple[str, str]] = field(default_factory=list)
     bold_filter_flag: bool = False
     bold_filter_df: "pd.DataFrame | None" = None
     bold_species: list[str] = field(default_factory=list)
@@ -424,7 +436,7 @@ class AppState:
     extra_params: dict[str, Any] = field(default_factory=dict)
     extra_df: "pd.DataFrame | None" = None
 
-    hypo_logs: list[str] = field(default_factory=list)
+    hypo_logs: list[tuple[str, str]] = field(default_factory=list)
     hypo_search_flag: bool = False
     hypo_merge_params: dict[str, Any] = field(default_factory=dict)
     hypo_search_failed: list[str] = field(default_factory=list)
@@ -432,7 +444,7 @@ class AppState:
     hypo_filter_flag: bool = False
     hypo_filter_params: dict[str, Any] = field(default_factory=dict)
     hypo_filter_df: "pd.DataFrame | None" = None
-    hypo_check_logs: list[str] = field(default_factory=list)
+    hypo_check_logs: list[tuple[str, str]] = field(default_factory=list)
     hypo_check_flag: bool = False
     hypo_check_params: dict[str, Any] = field(default_factory=dict)
     hypo_check_failed: list[str] = field(default_factory=list)
@@ -619,8 +631,10 @@ def display_run_button(
     elif mode == "IDENTICAL":
         if logs_prefix:
             with st.expander("✅ Step done: view its log", expanded=False):
-                if st.session_state.get(f"{logs_prefix}logs"):
-                    st.text("\n".join(st.session_state[f"{logs_prefix}logs"]))
+                entries = st.session_state.get(f"{logs_prefix}logs") or []
+                lines = shown_log_lines(entries, get_log_level())
+                if lines:
+                    st.text("\n".join(lines))
                 else:
                     st.info("No logs available for this session.")
         # Define button for re-running even if identical
@@ -959,12 +973,16 @@ class StreamlitLogSink:
         self._tag = uuid.uuid4().hex
 
         # Initialize session state logs
-        self.lines: list[str] = []
+        self.lines: list[tuple[str, str]] = []  # (level, line)
         st.session_state[f"{self.prefix}logs"] = self.lines
 
         self._taken_over = False
+        # The detail shown, read once: changing it reruns the script, and the
+        # step's next sink redraws the log (take_over).
+        self.level = get_log_level()
+        # Every line is kept, at any detail: shown_log_lines picks those shown.
         self._handler_id = logger.add(
-            self.write, filter=self.thread_filter, level=get_log_level()
+            self.write, filter=self.thread_filter, level="DEBUG"
         )
 
     def close(self):
@@ -989,7 +1007,7 @@ class StreamlitLogSink:
         old._taken_over = True
         old.close()
         self.lines[:] = old.lines + old._drain()
-        for line in self.lines:
+        for line in shown_log_lines(self.lines, self.level):
             self._show(line)
 
     def allow_current_thread(self):
@@ -1029,11 +1047,11 @@ class StreamlitLogSink:
         """Called by loguru from any thread - adds to queue"""
         text = message.record["message"]
         dt = message.record["time"].strftime("%H:%M:%S")
-        icon = self._LEVEL_ICONS.get(message.record["level"].name, "🔹")
-        line = f"{icon} [{dt}] {text}"
+        level = message.record["level"].name
+        line = f"{self._LEVEL_ICONS.get(level, '🔹')} [{dt}] {text}"
 
         # Put in queue (thread-safe)
-        self.log_queue.put(line)
+        self.log_queue.put((level, line))
 
     def _show(self, line) -> bool:
         try:
@@ -1042,8 +1060,8 @@ class StreamlitLogSink:
         except Exception:
             return False
 
-    def _drain(self) -> list[str]:
-        """Return and remove the queued lines."""
+    def _drain(self) -> list[tuple[str, str]]:
+        """Return and remove the queued (level, line) entries."""
         lines = []
         while True:
             try:
@@ -1055,9 +1073,9 @@ class StreamlitLogSink:
         """Called from main thread to display queued logs"""
         if self._taken_over:
             return 0
-        lines = self._drain()
-        self.lines.extend(lines)
-        return sum(self._show(line) for line in lines)
+        entries = self._drain()
+        self.lines.extend(entries)
+        return sum(self._show(line) for line in shown_log_lines(entries, self.level))
 
 
 # Pandas' Styler cap (262144 cells by default, above which st.dataframe

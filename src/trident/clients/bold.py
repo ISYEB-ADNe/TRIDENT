@@ -479,7 +479,7 @@ def get_records_from_species_list(
 
     all_records = []
     failed_species = []
-    log = StepLog("BOLD search", len(species_list))
+    log = StepLog("BOLD search", len(species_list), "species")
 
     for i, species in enumerate(species_list):
         try:
@@ -557,7 +557,7 @@ def _log_outcomes(log: StepLog, bold_search_df: pd.DataFrame, failed: list[str])
         summary += f" ({len(found_as)} under another name)"
     outcomes = outcomes_by_species(bold_search_df)
     counts = count_phrase(outcomes, "species", OUTCOMES_WITHOUT_SEQUENCES)
-    log.done(f"{summary}, {counts}" if counts else summary, failed, "species")
+    log.done(f"{summary}, {counts}" if counts else summary, failed)
     if found_as:
         logger.info(f"BOLD search, found under another name: {name_list(found_as)}")
     for outcome in OUTCOMES_WITHOUT_SEQUENCES:

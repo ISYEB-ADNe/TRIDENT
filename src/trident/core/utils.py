@@ -304,35 +304,45 @@ def describe_settings(params: dict) -> str:
 class StepLog:
     """Log lines of one search step, the same for every source: a line per
     item it queries ("BOLD search 12/33: Gadus morhua, 45 BOLD sequences") and
-    an end line ("BOLD search done after 6 min: 1240 BOLD sequences for 30
-    species").
+    an end line ("BOLD search done after 6 min: 33 of 33 species queried, 1240
+    BOLD sequences for 30 species").
 
-    The first item is logged at INFO, then an item when the last line is at
-    least ITEM_INTERVAL seconds old, otherwise at DEBUG: a slow source (BOLD takes about 10 s per
-    species) shows every item, a fast one (WoRMS, GBIF) one line every few
-    seconds, so a long step is never silent and a quick one does not flood the
-    log. A failed item, or one worth a look (*notable*: not found, doubtful
-    match), is always shown. Safe to call from worker threads.
+    Each item is logged at DEBUG, except the first and then one when the last
+    line shown (progress or notable) is at least ITEM_INTERVAL seconds old:
+    those are logged at INFO
+    as progress ("BOLD search: 12 of 33 species done (last: Gadus morhua, 45
+    BOLD sequences)"), so the items between them read as done, not missing. A
+    slow source (BOLD takes about 10 s per species) shows every item, a fast
+    one (WoRMS, GBIF) one line every few seconds, so a long step is never
+    silent and a quick one does not flood the log. A failed item, or one worth
+    a look (*notable*: not found, doubtful match), is always shown. *noun* is
+    what an item is. Safe to call from worker threads.
     """
 
     ITEM_INTERVAL = 10.0
 
-    def __init__(self, step: str, total: int = 0):
+    def __init__(self, step: str, total: int = 0, noun: str = "item"):
         self.step = step
         self.total = total
+        self.noun = noun
         self._start = self._last = time.monotonic()
         self._count = 0
         self._lock = threading.Lock()
 
-    def _next(self) -> tuple[str, bool]:
-        """The next item's prefix, and whether it is due at INFO."""
-        with self._lock:
-            self._count += 1
-            now = time.monotonic()
-            due = self._count == 1 or now - self._last >= self.ITEM_INTERVAL
-            if due:
-                self._last = now
-            return f"{self.step} {self._count}/{self.total}", due
+    def _of_total(self, count: int) -> str:
+        """ "12 of 33 species" ("12 species" without a total)."""
+        if not self.total:
+            return f"{count} {pluralize(count, self.noun)}"
+        return f"{count} of {self.total} {pluralize(self.total, self.noun)}"
+
+    def _advance(self, shown: bool) -> str:
+        """Count the next item (under the lock); its prefix ("BOLD search
+        12/33"). A *shown* line restarts the interval."""
+        self._count += 1
+        if shown:
+            self._last = time.monotonic()
+        total = f"/{self.total}" if self.total else ""
+        return f"{self.step} {self._count}{total}"
 
     @contextlib.contextmanager
     def query(self, name: str):
@@ -341,30 +351,44 @@ class StepLog:
             yield
 
     def item(self, name: str, outcome: str, notable: bool = False) -> None:
-        prefix, due = self._next()
-        level = "INFO" if due or notable else "DEBUG"
-        logger.log(level, f"{prefix}: {name}, {outcome}")
+        # Numbered and logged under the lock, so worker threads log in order.
+        with self._lock:
+            due = (
+                self._count == 0 or time.monotonic() - self._last >= self.ITEM_INTERVAL
+            )
+            prefix = self._advance(due or notable)
+            if notable:
+                logger.info(f"{prefix}: {name}, {outcome}")
+            elif due:
+                logger.info(
+                    f"{self.step}: {self._of_total(self._count)} done "
+                    f"(last: {name}, {outcome})"
+                )
+            else:
+                logger.debug(f"{prefix}: {name}, {outcome}")
 
     def failed(self, name: str, error: object) -> None:
-        prefix, _ = self._next()
-        logger.warning(f"{prefix}: {name} failed: {error}")
+        with self._lock:
+            logger.warning(f"{self._advance(True)}: {name} failed: {error}")
 
     def done(
         self,
         summary: str,
         failed: Sequence[str] = (),
-        noun: str = "item",
         retry: str = "Run the step again",
     ) -> None:
-        """Log the end of the step: *summary* of its results, then the
-        *failed* items (by name; *noun* is what an item is), which the next
-        run queries again (*retry* says how)."""
+        """Log the end of the step: how many of its items it queried (with a
+        total; *summary* need not repeat it), *summary* of its results, then
+        the *failed* items (by name), which the next run queries again
+        (*retry* says how)."""
         elapsed = duration(time.monotonic() - self._start)
+        if self.total:
+            summary = f"{self._of_total(self._count)} queried, {summary}"
         logger.info(f"{self.step} done after {elapsed}: {summary}")
         if failed:
             them = "it" if len(failed) == 1 else "them"
             logger.warning(
-                f"{self.step}: {len(failed)} {pluralize(len(failed), noun)} "
+                f"{self.step}: {len(failed)} {pluralize(len(failed), self.noun)} "
                 f"failed ({name_list(failed)}). {retry} to retry {them}."
             )
 

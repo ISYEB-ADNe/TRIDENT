@@ -158,8 +158,6 @@ def prepare_hypo_input(extra_df, queries_df):
             "entrez_query": queries[seq_id],
         }
 
-    n_seq = sum(len(v["sequences"]) for v in input_data.values())
-    logger.debug(f"Prepared HYPO input: {n_seq} BOLD sequences")
     return input_data
 
 
@@ -283,7 +281,7 @@ def run_hypo_search(
         The kept proxy hits (HYPO_SEARCH_COLUMNS), with the Entrez query they
         were found under.
     """
-    log = StepLog("HYPO search")
+    log = StepLog("HYPO search", noun="BLAST search")
 
     # Batches are made per Entrez query, across sequences: sequences with the same MOL
     # species fill one batch instead of sending one small job each. All batches
@@ -381,7 +379,6 @@ def run_hypo_search(
     log.done(
         f"{len(search_df)} of {n_hits} {pluralize(n_hits, 'hit')} kept{rule}",
         failed_records,
-        "BLAST search",
     )
     return search_df
 
@@ -719,7 +716,7 @@ def run_hypo_check(
         .drop_duplicates()
         .reset_index(drop=True)
     )
-    log = StepLog("HYPO check")
+    log = StepLog("HYPO check", noun="check")
 
     # Each check is saved as its input row (seq_id, dna_sequence, species) with
     # its hits added.
@@ -802,7 +799,7 @@ def run_hypo_check(
 
     # Every sequence may have errored (all reported to failure_sink).
     if not all_results:
-        log.done(f"0/{len(sequences_df)} checks with hits", failed, "check")
+        log.done(f"0/{len(sequences_df)} checks with hits", failed)
         return pd.DataFrame(columns=HYPO_CHECK_COLUMNS)
 
     # Missing hit columns are filled with NaN (float), not pd.NA (object), so
@@ -816,7 +813,6 @@ def run_hypo_check(
     log.done(
         f"{len(hits.drop_duplicates())}/{len(sequences_df)} checks with hits",
         failed,
-        "check",
     )
     return check_df
 

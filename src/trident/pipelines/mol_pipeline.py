@@ -121,7 +121,7 @@ def run_ncbi_search(
     Returns:
         DataFrame of processed BLAST hits with taxonomy and alignment metrics.
     """
-    log = StepLog("NCBI BLAST")
+    log = StepLog("NCBI BLAST", noun="sequence")
     batches = create_sequence_batches(sequences, batch_size)
     logger.debug(
         f"NCBI BLAST: {len(batches)} {pluralize(len(batches), 'batch')} "
@@ -159,7 +159,6 @@ def run_ncbi_search(
     log.done(
         f"{len(ncbi_df)} {pluralize(len(ncbi_df), 'hit')}",
         failed_ids,
-        "sequence",
     )
     return ncbi_df
 
