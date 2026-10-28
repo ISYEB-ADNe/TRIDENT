@@ -45,6 +45,9 @@ def get_connection(
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     try:
+        # A new file can give back the space of deleted rows (see
+        # _after_deleting); an existing one keeps its mode until a VACUUM.
+        conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
         yield conn
         conn.commit()
     except Exception:
@@ -88,7 +91,7 @@ def _params_to_sql_values(params: dict) -> dict:
 # when reading.
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: sequences in the sequence store
 
 
 def _set_schema_version(conn: sqlite3.Connection) -> None:
@@ -248,6 +251,104 @@ def _record_step_columns(
         f"INSERT OR REPLACE INTO {_COLUMNS_TABLE} (step, columns) VALUES (?, ?)",
         (step, json.dumps(columns)),
     )
+
+
+# ---------------------------------------------------------------------------
+# Sequence store
+#
+# The rows of a step repeat the sequence of their item (each BLAST hit its
+# query, each HYPO row its proxy): most of an analysis file, for a few distinct
+# sequences. A *_sequence column of a step table holds the id of its sequence
+# in the sequence store, and a result read back gets the sequence again. The
+# sequences table (the analysis input, read directly) and rows saved before
+# keep the sequence itself, which reading leaves as it is.
+# ---------------------------------------------------------------------------
+
+_SEQUENCE_STORE = "sequence_store"
+_PLAIN_TABLES = {"sequences"}
+
+
+def _sequence_columns(table_name: str, columns) -> list[str]:
+    """The *columns* of *table_name* whose sequences go to the sequence store."""
+    if table_name in _PLAIN_TABLES:
+        return []
+    return [col for col in columns if str(col).endswith("_sequence")]
+
+
+def _store_sequences(
+    conn: sqlite3.Connection, table_name: str, df: pd.DataFrame
+) -> pd.DataFrame:
+    """*df* with the sequence of each sequence column replaced by its id in
+    the sequence store (as text), added there if new."""
+    columns = _sequence_columns(table_name, df.columns)
+    if not columns:
+        return df
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS {_SEQUENCE_STORE} "
+        "(id INTEGER PRIMARY KEY, sequence TEXT NOT NULL UNIQUE)"
+    )
+    sequences = list({v for col in columns for v in df[col] if isinstance(v, str)})
+    conn.executemany(
+        f"INSERT OR IGNORE INTO {_SEQUENCE_STORE} (sequence) VALUES (?)",
+        [(sequence,) for sequence in sequences],
+    )
+    # Ids as text: a number column with a missing value would be written as
+    # floats ("1.0").
+    ids = dict(
+        conn.execute(
+            f"SELECT sequence, CAST(id AS TEXT) FROM {_SEQUENCE_STORE} "
+            "WHERE sequence IN (SELECT value FROM json_each(?))",
+            (json.dumps(sequences),),
+        )
+    )
+    return df.assign(**{col: df[col].map(lambda v: ids.get(v, v)) for col in columns})
+
+
+def _restore_sequences(
+    conn: sqlite3.Connection, table_name: str, df: pd.DataFrame
+) -> None:
+    """Put back, in place, the sequences of *df* stored as ids. Only the ids
+    are replaced, so a column keeps the type and the missing values reading
+    it gives; a sequence saved before the store is no id and stays. An id
+    comes back as text, or as a number in a column typed as one (12.0)."""
+    columns = _sequence_columns(table_name, df.columns)
+    if not columns or not table_exists(conn, _SEQUENCE_STORE):
+        return
+    keys = {_key_str(v) for col in columns for v in df[col].dropna().unique()}
+    ids = [int(key) for key in keys if key.isdigit()]
+    by_id = dict(
+        conn.execute(
+            f"SELECT CAST(id AS TEXT), sequence FROM {_SEQUENCE_STORE} "
+            "WHERE id IN (SELECT value FROM json_each(?))",
+            (json.dumps(ids),),
+        )
+    )
+    for col in columns:
+        restored = df[col].map(lambda v: by_id.get(_key_str(v)))
+        found = restored.notna()
+        if found.any():
+            df.loc[found, col] = restored[found]
+
+
+def _after_deleting(conn: sqlite3.Connection) -> None:
+    """After step rows were deleted: delete the sequences no row holds any
+    more, then give the freed space back to the file (a file made before
+    auto_vacuum keeps it until a VACUUM)."""
+    if table_exists(conn, _SEQUENCE_STORE):
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+        used = [
+            f'SELECT CAST("{col}" AS INTEGER) FROM {table} WHERE "{col}" IS NOT NULL'
+            for (table,) in tables
+            for col in _sequence_columns(
+                table, [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+            )
+        ]
+        where = f" WHERE id NOT IN ({' UNION '.join(used)})" if used else ""
+        conn.execute(f"DELETE FROM {_SEQUENCE_STORE}{where}")
+    conn.commit()
+    conn.execute("PRAGMA incremental_vacuum").fetchall()
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +535,7 @@ def _load_cached_items(
         for ids in groups.values()
     ]
     df = pd.concat(reads, ignore_index=True)
+    _restore_sequences(conn, table_name, df)
     position = {run_id: i for i, run_id in enumerate(run_ids)}
     order = df["run_id"].map(position).to_numpy().argsort(kind="stable")
     return df.iloc[order].drop(columns="run_id").reset_index(drop=True)
@@ -492,6 +594,7 @@ def _delete_orphan_rows(conn: sqlite3.Connection, table_name: str) -> None:
     conn.commit()
     if cursor.rowcount:
         logger.debug(f"{table_name}: deleted {cursor.rowcount} rows of no item")
+        _after_deleting(conn)
 
 
 def _append_rows(conn: sqlite3.Connection, table_name: str, df: pd.DataFrame) -> None:
@@ -501,8 +604,9 @@ def _append_rows(conn: sqlite3.Connection, table_name: str, df: pd.DataFrame) ->
     like a column added later (``_add_missing_columns``): pandas would type it
     from those rows alone (TEXT for None, REAL for NaN), and SQLite would then
     store its later values as text or floats (an id 126160 as '126160' or
-    126160.0).
+    126160.0). Sequences go to the sequence store (``_store_sequences``).
     """
+    df = _store_sequences(conn, table_name, df)
     if table_exists(conn, table_name):
         _add_missing_columns(conn, table_name, df)
         df.to_sql(name=table_name, con=conn, if_exists="append", index=False)
@@ -1002,6 +1106,7 @@ def save_to_db(
                 # 1. Classify each item as cached or uncached
                 _index_run_id(conn, table_name)
                 run_ids = _find_cached_run_ids(conn, table_name, cache_items)
+                replaced = False
                 for idx, (item, run_id) in enumerate(zip(cache_items, run_ids)):
                     if run_id is not None and not force_rerun:
                         logger.debug(
@@ -1016,7 +1121,10 @@ def save_to_db(
                             _delete_run(conn, table_name, run_id)
                             _delete_run(conn, f"{table_name}_inputs", run_id)
                             _delete_provenance(conn, table_name, [run_id])
+                            replaced = True
                         uncached_items.append(item)
+                if replaced:
+                    _after_deleting(conn)
 
                 cached_dfs.append(_load_cached_items(conn, table_name, cached_ids))
                 _log_cache_use(
@@ -1193,7 +1301,7 @@ def clear_empty_cache(
                 empty_ids,
             )
             _delete_provenance(conn, table_name, empty_ids)
-            conn.commit()
+            _after_deleting(conn)
             n = len(empty_ids)
             logger.info(
                 f"{step or table_name}: {n} empty saved {pluralize(n, 'result')} "

@@ -133,7 +133,7 @@ The **Parameters** tab lists the settings of every step that has run.
 - **One row per candidate species** (`<analysis>_candidates.csv`): each sequence with its candidate species, its taxonomy, its path (MOL+GEO or HYPO), the identity and query cover of its hits, its GBIF occurrences and links to each source.
 - **One row per sequence** (`<analysis>_assignments.csv`): each sequence at its assigned rank, following Darwin Core and the FAIRe taxa table, ready for a GBIF submission.
 - **Parameters** (`<analysis>_parameters.txt`): the settings of every step, from the Parameters tab.
-- **Analysis file (`.db`)**: the whole analysis, already saved in `results/`. Download it to keep a copy elsewhere or to share it.
+- **Analysis file (`.db`)**: the whole analysis, already saved in `results/`. Download it to keep a copy elsewhere or to share it, and open it again from the Start tab. It is a SQLite database, readable with any SQLite tool. Each sequence is stored once, in its `sequence_store` table: the `*_sequence` columns of the step tables hold its `id` there.
 
 ### Online demo
 

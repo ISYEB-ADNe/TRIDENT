@@ -382,6 +382,50 @@ def test_cached_items_read_together_keep_their_types(db_path):
     )
 
 
+def test_sequences_are_stored_once_read_back_whole_and_erased_with_their_rows(
+    db_path,
+):
+    """Rows repeating a sequence store it once, and a result read back has
+    its sequences as a live run does, also next to rows saved before the
+    sequence store, missing values and a column typed as numbers. Erasing
+    the step's results also drops the sequences no row holds any more."""
+    proxy = {"sequence": "TTGA" * 30}
+
+    @save_to_db("test_seq", cache=PartialCache(items_kwarg="names", item_key="name"))
+    def step(names):
+        rows = [
+            (n, "ACGT" * 50, proxy["sequence"] if i else None)
+            for n in names
+            for i in range(3)
+        ]
+        return pd.DataFrame(rows, columns=["name", "dna_sequence", "proxy_sequence"])
+
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE test_seq (name, dna_sequence TEXT, proxy_sequence REAL, run_id)"
+        )
+        conn.execute("INSERT INTO test_seq VALUES ('old', 'GGCC', NULL, 1)")
+        conn.execute("CREATE TABLE test_seq_inputs (name, run_id)")
+        conn.execute("INSERT INTO test_seq_inputs VALUES ('old', 1)")
+    live, _ = step(["old", "a", "b"], db_path=db_path)
+    cached, _ = step(["old", "a", "b"], db_path=db_path)
+
+    def values(df):  # missing values as None, as live and cached ones differ
+        return df.astype(object).where(df.notna(), None).values.tolist()
+
+    def stored():
+        with get_connection(db_path) as conn:
+            return {r[0] for r in conn.execute("SELECT sequence FROM sequence_store")}
+
+    assert values(cached) == values(live)
+    assert cached.loc[0, "dna_sequence"] == "GGCC"
+    assert stored() == {"ACGT" * 50, "TTGA" * 30}
+
+    proxy["sequence"] = "CCAT" * 30
+    step(["old", "a", "b"], db_path=db_path, force_rerun=True)
+    assert stored() == {"ACGT" * 50, "CCAT" * 30}
+
+
 def test_no_items_runs_the_function_for_its_columns(db_path):
     """With an empty input, the function is called directly and its empty
     result keeps its columns."""
