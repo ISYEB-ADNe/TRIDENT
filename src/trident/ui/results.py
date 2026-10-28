@@ -28,13 +28,13 @@ from trident.pipelines.results_pipeline import (
     species_flow_table,
     build_results_df,
     exclusion_keys,
-    flow_lost_at,
+    flows_lost_at,
     filter_excluded_results,
-    resolve_sequences,
     EXPORT_COLS,
     build_gbif_export_df,
-    best_identity_per_sequence,
+    build_assignments,
     flag_low_identity,
+    CHECK_HIT_NOTE,
 )
 from trident.ui.defaults import NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
 from trident.ui.geo import display_gbif_sequence_table
@@ -49,7 +49,6 @@ from trident.ui.ui import (
     highlight_check_hit,
     highlight_empty_sequence,
     CHECK_HIT_LEGEND,
-    CHECK_HIT_NOTE,
     mol_query_cover,
     sequence_selector,
     display_same_species,
@@ -119,21 +118,6 @@ FILTERS = [
     "Low identity",
 ]
 
-# Why a sequence ends without a species, by the step that lost it.
-LOSS_REASONS = {
-    "MOL Search": "no NCBI hit (MOL)",
-    "MOL Filter": "no hit passing the MOL filter",
-    "TAX": "no species found in WoRMS (TAX)",
-    "GEO": "no candidate recorded in the area (GEO)",
-    "GEO not run": "GEO not run",
-    "EXTRA": "only candidates added by TAX, none with a BOLD proxy (EXTRA)",
-    "EXTRA not run": "only candidates added by TAX, EXTRA not run",
-    "HYPO": "only candidates added by TAX, none validated by HYPO",
-    "HYPO not run": "only candidates added by TAX, HYPO not run",
-    "Curation": "all its candidates excluded by hand",
-}
-
-
 # --------------------------------------------------------------------
 # DATA
 # -------------------------------------------------------------------
@@ -143,16 +127,15 @@ LOSS_REASONS = {
 FLOW_TABLES = ["ncbi_search_df", "mol_df", "tax_df", "geo_df", "extra_df", "hypo_df"]
 
 
-def _species_flows(seq_ids):
-    """The species flow of each sequence (see build_species_flows) for the
-    steps run."""
+def _flow_tables():
+    """The arguments of build_species_flows (and flows_lost_at) besides the
+    sequences, for the steps run."""
     state = st.session_state
-    return build_species_flows(
-        seq_ids,
+    return {
         **{key: state.get(key) for key in FLOW_TABLES},
-        excluded=state.get("excluded_results", []),
-        name_table=state.get("name_table"),
-    )
+        "excluded": state.get("excluded_results", []),
+        "name_table": state.get("name_table"),
+    }
 
 
 def _lost_at(seq_ids):
@@ -174,52 +157,14 @@ def _lost_at(seq_ids):
     memo["excluded"] = excluded
     missing = [seq_id for seq_id in seq_ids if seq_id not in lost]
     if missing:
-        flows = _species_flows(missing)
-        lost.update({seq_id: flow_lost_at(links) for seq_id, links in flows.items()})
+        lost.update(flows_lost_at(missing, **_flow_tables()))
     return {seq_id: lost[seq_id] for seq_id in seq_ids}
 
 
 def _assignments(curated_df, threshold):
-    """One row per sequence: its assignment after curation, and what to check."""
-    table = resolve_sequences(curated_df)
-    species_rows = curated_df.dropna(subset=["scientificName"])
-    by_seq = species_rows.groupby("seq_id")
-
-    best = best_identity_per_sequence(species_rows, mol_query_cover())
-    table["best_identity"] = table["seq_id"].map(best["identity"])
-    table["best_via"] = table["seq_id"].map(best["via"])
-    table["low_identity"] = table["best_identity"] < threshold
-    table["paths"] = table["seq_id"].map(
-        by_seq["validation_step"].agg(lambda s: " + ".join(sorted(s.unique())))
-    )
-    check_hit = table["seq_id"].map(by_seq["hypo_check_hit"].any())
-    table["hypo_check_hit"] = check_hit.fillna(False).astype(bool)
-
-    unassigned = table.loc[table["n_species"] == 0, "seq_id"].tolist()
-    # Where it lost its last species, as its species flow shows it.
-    lost = {seq_id: step for seq_id, (step, _) in _lost_at(unassigned).items()}
-    table["lost_at"] = table["seq_id"].map(lost)
-    notes = []
-    for _, row in table.iterrows():
-        if row["n_species"] == 0:
-            lost_at = row["lost_at"]
-            notes.append(
-                "no candidate left"
-                if lost_at is None
-                else LOSS_REASONS.get(lost_at, lost_at)
-            )
-            continue
-        note = []
-        if row["low_identity"]:
-            via = f" (via {row['best_via']})" if pd.notna(row["best_via"]) else ""
-            note.append(f"best identity below {threshold}%{via}")
-        if row["hypo_check_hit"]:
-            note.append(CHECK_HIT_NOTE)
-        if pd.isna(row["taxonRank"]) and not row["species_level"]:
-            note.append("no shared taxon" if row["n_species"] > 1 else "rank unknown")
-        notes.append(", ".join(note))
-    table["note"] = notes
-    return table
+    """build_assignments with the MOL filter's query cover and the lost-at
+    steps kept between reruns (_lost_at)."""
+    return build_assignments(curated_df, threshold, mol_query_cover(), _lost_at)
 
 
 def _filtered_seq_ids(assignments, choice):
@@ -645,7 +590,7 @@ def _show_lost_at(seq_id, step):
 def show_species_flow(seq_id):
     """The selected sequence's candidates at each step, as a Sankey."""
     state = st.session_state
-    links = _species_flows([seq_id])[seq_id]
+    links = build_species_flows([seq_id], **_flow_tables())[seq_id]
     if not links:
         st.info("No NCBI hit for this sequence.")
         return

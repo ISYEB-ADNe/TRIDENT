@@ -26,6 +26,7 @@ from trident.core.utils import pluralize
 from trident.core import stop
 from trident.core.database import get_connection
 from trident.pipelines.names import replace_source_rows, same_species_groups
+from trident.pipelines.results_pipeline import CHECK_HIT_NOTE
 from trident.logging import get_log_level
 from trident.ui.defaults import (
     NCBI_GAP_MIN_TOP_DEFAULT,
@@ -686,10 +687,10 @@ def run_step_workflow(
         # shows as "Settings have changed" once it is done.
         run = st.session_state[STEP_RUNS][flag_key]
         st.session_state[_JOB_STEP] = flag_key
-        # A stopped step keeps no result (run_with_progress raises StepStopped):
         # Erasing or asking again is for one run: the next one reuses what this
         # one saved. Set here, before the selector is drawn again.
         st.session_state[f"{btn_key}_cache_mode"] = REUSE_SAVED
+        # A stopped step keeps no result (run_with_progress raises StepStopped):
         # its finished queries are cached, and running it again with the same
         # settings continues from there.
         try:
@@ -1301,9 +1302,7 @@ def highlight_low_identity(row):
     return [style] * len(row)
 
 
-# What the hypo_check_hit flag means (see add_check_hit), and the legend of the
-# rows highlight_check_hit colours.
-CHECK_HIT_NOTE = "HYPO species whose marker the HYPO check found in GenBank"
+# The legend of the rows highlight_check_hit colours.
 CHECK_HIT_LEGEND = f":orange[■] {CHECK_HIT_NOTE}"
 
 

@@ -8,13 +8,18 @@ taxa (run_higher_taxa_lookup), saved per name like the other steps' searches.
     build_gbif_export_df(results_df, ...) → DataFrame (one row per sequence)
     run_higher_taxa_lookup(names, ...) → (records_df, params)
     resolve_sequences(results_df) → DataFrame (species count and shared taxon per sequence)
+    exclusion_keys(df) → Series ("{seq_id}||{scientificName}" per row, as exclusions store it)
+    filter_excluded_results(results_df, excluded) → DataFrame (excluded species rows dropped)
+    build_assignments(curated_df, threshold, query_cover, lost_at) → DataFrame (one row per sequence)
     add_check_hit(df) → DataFrame
     add_low_identity_warning(df, threshold) → DataFrame
     best_identity_per_sequence(df, query_cover) → DataFrame (identity and via per sequence)
     flag_low_identity(df, threshold, best_identity) → DataFrame
     build_species_flow(seq_id, ..., name_table) → list of (source, target, names) links
+    build_species_flows(seq_ids, ..., name_table) → {seq_id: links}
     species_flow_table(seq_id, links, ...) → DataFrame (one row per name)
     flow_lost_at(links) → (step, names) where a sequence without a species lost them
+    flows_lost_at(seq_ids, ..., name_table) → {seq_id: (step, names)}
     plot_species_flow(links) → Plotly Sankey figure
 """
 
@@ -53,6 +58,23 @@ from trident.pipelines.names import (
 # HYPO only, shown in the app but not exported: the MOL species a HYPO
 # species' CO1 proxy matched, and the sequence's MOL identity to it.
 VIA_COLS = ["proxy_hit_species", "via_mol_identity"]
+
+# What the hypo_check_hit flag means (see add_check_hit).
+CHECK_HIT_NOTE = "HYPO species whose marker the HYPO check found in GenBank"
+
+# Why a sequence ends without a species, by the step that lost it (flow_lost_at).
+LOSS_REASONS = {
+    "MOL Search": "no NCBI hit (MOL)",
+    "MOL Filter": "no hit passing the MOL filter",
+    "TAX": "no species found in WoRMS (TAX)",
+    "GEO": "no candidate recorded in the area (GEO)",
+    "GEO not run": "GEO not run",
+    "EXTRA": "only candidates added by TAX, none with a BOLD proxy (EXTRA)",
+    "EXTRA not run": "only candidates added by TAX, EXTRA not run",
+    "HYPO": "only candidates added by TAX, none validated by HYPO",
+    "HYPO not run": "only candidates added by TAX, HYPO not run",
+    "Curation": "all its candidates excluded by hand",
+}
 
 # MOL+GEO only, for the GBIF export: the NCBI names of the species' MOL hits,
 # joined by ", " as the export writes them.
@@ -453,6 +475,66 @@ def resolve_sequences(results_df: pd.DataFrame) -> pd.DataFrame:
             "species",
         ],
     )
+
+
+def build_assignments(
+    curated_df: pd.DataFrame,
+    threshold: float,
+    query_cover: float,
+    lost_at: Callable[[list[str]], dict[str, tuple[str | None, set[str]]]],
+) -> pd.DataFrame:
+    """One row per sequence: its assignment after curation, and what to check.
+
+    Args:
+        curated_df: build_results_df rows left after curation
+            (filter_excluded_results).
+        threshold: Identity (%) below which a sequence's best identity is
+            flagged (low_identity).
+        query_cover: The MOL filter's query cover, which the best identity's
+            hit also requires (see best_identity_per_sequence).
+        lost_at: Called with the sequences left without a species; returns
+            flow_lost_at of each (flows_lost_at with the step tables).
+
+    Returns:
+        resolve_sequences' columns plus best_identity, best_via, low_identity,
+        paths (validation steps), hypo_check_hit, lost_at and note.
+    """
+    table = resolve_sequences(curated_df)
+    species_rows = curated_df.dropna(subset=["scientificName"])
+    by_seq = species_rows.groupby("seq_id")
+
+    best = best_identity_per_sequence(species_rows, query_cover)
+    table["best_identity"] = table["seq_id"].map(best["identity"])
+    table["best_via"] = table["seq_id"].map(best["via"])
+    table["low_identity"] = table["best_identity"] < threshold
+    table["paths"] = table["seq_id"].map(
+        by_seq["validation_step"].agg(lambda s: " + ".join(sorted(s.unique())))
+    )
+    check_hit = table["seq_id"].map(by_seq["hypo_check_hit"].any())
+    table["hypo_check_hit"] = check_hit.fillna(False).astype(bool)
+
+    unassigned = table.loc[table["n_species"] == 0, "seq_id"].tolist()
+    lost = lost_at(unassigned) if unassigned else {}
+    table["lost_at"] = table["seq_id"].map({s: step for s, (step, _) in lost.items()})
+    notes = []
+    for row in table.to_dict("records"):
+        if row["n_species"] == 0:
+            step = row["lost_at"]
+            notes.append(
+                "no candidate left" if pd.isna(step) else LOSS_REASONS.get(step, step)
+            )
+            continue
+        note = []
+        if row["low_identity"]:
+            via = f" (via {row['best_via']})" if pd.notna(row["best_via"]) else ""
+            note.append(f"best identity below {threshold}%{via}")
+        if row["hypo_check_hit"]:
+            note.append(CHECK_HIT_NOTE)
+        if pd.isna(row["taxonRank"]) and not row["species_level"]:
+            note.append("no shared taxon" if row["n_species"] > 1 else "rank unknown")
+        notes.append(", ".join(note))
+    table["note"] = notes
+    return table
 
 
 def exclusion_keys(df: pd.DataFrame) -> pd.Series:
@@ -962,6 +1044,34 @@ FLOW_LOSS_STEPS = {
 }
 # Loss nodes whose candidates still wait for a step.
 FLOW_NOT_RUN = {"geo_not_run", "extra_not_run", "hypo_not_run"}
+
+
+def flows_lost_at(
+    seq_ids,
+    ncbi_search_df,
+    mol_df,
+    tax_df=None,
+    geo_df=None,
+    extra_df=None,
+    hypo_df=None,
+    excluded=(),
+    *,
+    name_table,
+):
+    """flow_lost_at of each of *seq_ids*, as {seq_id: (step, names)}, from
+    their flows (build_species_flows, same arguments)."""
+    flows = build_species_flows(
+        seq_ids,
+        ncbi_search_df,
+        mol_df,
+        tax_df,
+        geo_df,
+        extra_df,
+        hypo_df,
+        excluded,
+        name_table=name_table,
+    )
+    return {seq_id: flow_lost_at(links) for seq_id, links in flows.items()}
 
 
 def flow_lost_at(links):

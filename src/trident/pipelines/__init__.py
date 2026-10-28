@@ -80,12 +80,21 @@ from .hypo_pipeline import (
 
 from .results_pipeline import (
     build_results_df,
+    filter_excluded_results,
+    exclusion_keys,
+    resolve_sequences,
+    build_assignments,
+    build_species_flows,
+    species_flow_table,
+    plot_species_flow,
     flow_lost_at,
+    flows_lost_at,
     build_gbif_export_df,
     add_check_hit,
     add_low_identity_warning,
     EXPORT_COLS,
     GBIF_EXPORT_COLS,
+    LOSS_REASONS,
 )
 
 
@@ -152,10 +161,19 @@ __all__ = [
     "build_hypo_filter_summary",
     "build_hypo_check_summary",
     "build_results_df",
+    "filter_excluded_results",
+    "exclusion_keys",
+    "resolve_sequences",
+    "build_assignments",
+    "build_species_flows",
+    "species_flow_table",
+    "plot_species_flow",
     "flow_lost_at",
+    "flows_lost_at",
     "build_gbif_export_df",
     "add_check_hit",
     "add_low_identity_warning",
     "EXPORT_COLS",
     "GBIF_EXPORT_COLS",
+    "LOSS_REASONS",
 ]

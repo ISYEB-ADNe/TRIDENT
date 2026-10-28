@@ -433,13 +433,10 @@ def preserve_sequence_order(column_name: str, source_df_name: str) -> Callable:
             if not isinstance(result, pd.DataFrame) or result.empty:
                 return result
 
-            temp_key = "_original_order_idx"
-            result[temp_key] = result[column_name].map(original_order)
-            result = (
-                result.sort_values(by=temp_key, ascending=True, kind="stable")
-                .drop(columns=[temp_key])
-                .reset_index(drop=True)
-            )
+            # A sort key, not a column: the result may be the caller's own frame.
+            result = result.sort_values(
+                column_name, key=lambda ids: ids.map(original_order), kind="stable"
+            ).reset_index(drop=True)
 
             return result
 

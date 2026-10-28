@@ -7,7 +7,9 @@ from trident.pipelines import results_pipeline
 from trident.pipelines.names import build_name_table
 from trident.pipelines.results_pipeline import (
     EXPORT_COLS,
+    build_assignments,
     build_results_df,
+    CHECK_HIT_NOTE,
     flow_lost_at,
     filter_excluded_results,
     build_gbif_export_df,
@@ -226,6 +228,64 @@ def test_any_hypo_check_hit_is_flagged(sequences_df, geo_df, mol_df):
     )
     flagged = result.loc[result["hypo_check_hit"], "scientificName"].tolist()
     assert sorted(flagged) == ["SpecX", "SpecZ"]
+
+
+def test_assignment_notes_say_what_to_check_and_where_a_sequence_lost_its_species():
+    """An assigned sequence has no note; one below the identity threshold or
+    with a HYPO check hit says so; one without a species gets the reason of
+    the step where it lost its last one, or "no candidate left"."""
+    sequences_df = pd.DataFrame(
+        {
+            "seq_id": ["s1", "s2", "s3", "s4"],
+            "dna_sequence": ["ATCG", "GCTA", "TTTT", "GGGG"],
+        }
+    )
+    species = {
+        "seq_id": ["s1", "s2"],
+        "scientificName": ["Gadus morhua", "Salmo salar"],
+        "taxonRank": "Species",
+        "genus": ["Gadus", "Salmo"],
+        "specificEpithet": ["morhua", "salar"],
+    }
+    mol_df = pd.DataFrame(
+        {**species, "identity_percentage": [99.0, 95.0], "query_cover": 100}
+    )
+    geo_df = pd.DataFrame(
+        {
+            **species,
+            "in_mol": True,
+            "mol_identity": [99.0, 95.0],
+            "mol_query_cover": 100,
+        }
+    )
+    hypo_df = pd.DataFrame(
+        {
+            "seq_id": ["s2"],
+            "scientificName": ["Salmo trutta"],
+            "taxonRank": "Species",
+            "genus": ["Salmo"],
+            "specificEpithet": ["trutta"],
+            "proxy_hit_species": ["Salmo salar"],
+            "hypo_check_identity": [92.0],
+            "hypo_check_query_cover": [100],
+        }
+    )
+    results = build_results_df(
+        sequences_df, geo_df, mol_df, hypo_df=hypo_df, name_table=None
+    )
+    lost = {"s3": ("GEO", {"Gadus ogac"}), "s4": (None, set())}
+
+    def lost_at(seq_ids):
+        assert sorted(seq_ids) == ["s3", "s4"]
+        return {seq_id: lost[seq_id] for seq_id in seq_ids}
+
+    notes = build_assignments(results, 97, 90, lost_at).set_index("seq_id")["note"]
+    assert notes.to_dict() == {
+        "s1": "",
+        "s2": f"best identity below 97%, {CHECK_HIT_NOTE}",
+        "s3": "no candidate recorded in the area (GEO)",
+        "s4": "no candidate left",
+    }
 
 
 def test_empty_mol_list_flows_to_results(monkeypatch):

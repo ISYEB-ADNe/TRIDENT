@@ -81,7 +81,8 @@ def test_epithet_only_when_the_name_starts_with_the_genus():
 
 def test_step_output_follows_the_input_sequence_order():
     """Rows are grouped by sequence in the order of the input, duplicates
-    included; an empty result or one without the column passes through."""
+    included; an empty result or one without the column passes through. A step
+    returning its input unchanged leaves the caller's frame as it was."""
 
     @preserve_sequence_order("seq_id", "input_df")
     def scramble(input_df):
@@ -89,6 +90,13 @@ def test_step_output_follows_the_input_sequence_order():
 
     df = pd.DataFrame({"seq_id": ["b", "a", "b", "a"], "val": [4, 1, 3, 2]})
     assert scramble(df)["seq_id"].tolist() == ["b", "b", "a", "a"]
+
+    @preserve_sequence_order("seq_id", "input_df")
+    def identity(input_df):
+        return input_df
+
+    identity(df)
+    assert df.columns.tolist() == ["seq_id", "val"]
 
     @preserve_sequence_order("seq_id", "input_df")
     def empty(input_df):
