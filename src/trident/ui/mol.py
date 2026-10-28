@@ -19,6 +19,8 @@ from trident.core.constants import (
     BLAST_DATABASE,
     NCBI_CUT_RANGE,
     NCBI_CUT_TOP_IDENTITY,
+    SHORT_SEQUENCE_EV_EXPONENT,
+    SHORT_SEQUENCE_LENGTH,
 )
 import trident.pipelines as pipe
 
@@ -144,6 +146,18 @@ def display_ncbi_parameters():
             f"(threshold: $10^{{-{active_ev}}}$)" if active_ev != "None" else ""
         )
         st.caption(f"Active in results: **{active_ev}** {threshold_str}")
+
+    sequences_df = st.session_state.get("sequences_df")
+    if sequences_df is not None and ev_exponent > SHORT_SEQUENCE_EV_EXPONENT:
+        n_short = int((sequences_df["seq_length"] < SHORT_SEQUENCE_LENGTH).sum())
+        if n_short:
+            st.warning(
+                f"{n_short} {pluralize(n_short, 'sequence is', 'sequences are')} "
+                f"under {SHORT_SEQUENCE_LENGTH} bp: at this E-value "
+                f"{pluralize(n_short, 'it gets', 'they get')} only near-identical "
+                f"hits, or none. Use an exponent of {SHORT_SEQUENCE_EV_EXPONENT} "
+                "or less."
+            )
 
     # --- Row 2: Advanced Settings  ---
     with st.expander(

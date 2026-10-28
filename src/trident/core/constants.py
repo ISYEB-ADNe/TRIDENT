@@ -15,6 +15,11 @@ BLAST_DATABASE = "core_nt"
 # --- MOL (NCBI BLAST + barcoding-gap filter) ---
 NCBI_MAX_HITS = 500
 NCBI_EV_EXPONENT = 20
+# A sequence under SHORT_SEQUENCE_LENGTH bp cannot reach a strict E-value with
+# mismatches: above SHORT_SEQUENCE_EV_EXPONENT, it gets only near-identical
+# hits, or none (an 80 bp read reaches about 82% identity at 1e-10).
+SHORT_SEQUENCE_LENGTH = 80
+SHORT_SEQUENCE_EV_EXPONENT = 10
 NCBI_METHOD = "barcoding_gap"
 NCBI_QUERY_COVER = 90
 NCBI_GAP_SIZE = 2
