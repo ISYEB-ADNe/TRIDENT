@@ -418,6 +418,7 @@ def test_sequences_are_stored_once_read_back_whole_and_erased_with_their_rows(
             return {r[0] for r in conn.execute("SELECT sequence FROM sequence_store")}
 
     assert values(cached) == values(live)
+    assert values(step(["a"], db_path=db_path)[0]) == values(live[live.name == "a"])
     assert cached.loc[0, "dna_sequence"] == "GGCC"
     assert stored() == {"ACGT" * 50, "TTGA" * 30}
 

@@ -992,8 +992,9 @@ def show_exports(curated_df):
         st.caption(
             "The whole analysis in one file: the results of every step, the "
             f"database searches and the settings used. {keep} It is a SQLite "
-            "database, readable with any SQLite tool (each sequence is kept "
-            "once, in its sequence_store table)."
+            "database, readable with any SQLite tool: a sequence column may hold "
+            "the id of its sequence in the sequence_store table, where each is "
+            "kept once (see the README)."
         )
         st.download_button(
             label=f"📥 Analysis file ({Path(db_path).name})",

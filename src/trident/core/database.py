@@ -327,6 +327,8 @@ def _restore_sequences(
         restored = df[col].map(lambda v: by_id.get(_key_str(v)))
         found = restored.notna()
         if found.any():
+            if df[col].dtype.kind in "fiu":  # a number column cannot take text
+                df[col] = df[col].astype(object)
             df.loc[found, col] = restored[found]
 
 
@@ -604,16 +606,17 @@ def _append_rows(conn: sqlite3.Connection, table_name: str, df: pd.DataFrame) ->
     like a column added later (``_add_missing_columns``): pandas would type it
     from those rows alone (TEXT for None, REAL for NaN), and SQLite would then
     store its later values as text or floats (an id 126160 as '126160' or
-    126160.0). Sequences go to the sequence store (``_store_sequences``).
+    126160.0). Sequences go to the sequence store (``_store_sequences``) in
+    the transaction that writes the rows, after every commit before them: a
+    cleanup on another connection (``_after_deleting``) cannot delete them
+    before the rows that hold them are written.
     """
-    df = _store_sequences(conn, table_name, df)
-    if table_exists(conn, table_name):
-        _add_missing_columns(conn, table_name, df)
-        df.to_sql(name=table_name, con=conn, if_exists="append", index=False)
-    else:
+    if not table_exists(conn, table_name):
         empty = df.columns[df.isna().all()]
-        df.drop(columns=empty).to_sql(name=table_name, con=conn, index=False)
-        _add_missing_columns(conn, table_name, df)
+        df.drop(columns=empty).iloc[:0].to_sql(name=table_name, con=conn, index=False)
+    _add_missing_columns(conn, table_name, df)
+    df = _store_sequences(conn, table_name, df)
+    df.to_sql(name=table_name, con=conn, if_exists="append", index=False)
 
 
 def _save_items(

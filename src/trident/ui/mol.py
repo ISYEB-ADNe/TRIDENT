@@ -12,7 +12,11 @@ from trident.core.utils import (
     species_for_sequences,
 )
 from trident.clients import ncbi
-from trident.clients.fasta import dataframe_to_records, records_to_fasta_string
+from trident.clients.fasta import (
+    clean_sequence,
+    dataframe_to_records,
+    records_to_fasta_string,
+)
 from trident.clients.ncbi import set_ncbi_email
 from trident.core import config
 from trident.core.constants import (
@@ -149,7 +153,9 @@ def display_ncbi_parameters():
 
     sequences_df = st.session_state.get("sequences_df")
     if sequences_df is not None and ev_exponent > SHORT_SEQUENCE_EV_EXPONENT:
-        n_short = int((sequences_df["seq_length"] < SHORT_SEQUENCE_LENGTH).sum())
+        # BLAST gets the cleaned bases (see submit_blast_batch), not the read.
+        lengths = sequences_df["dna_sequence"].map(lambda s: len(clean_sequence(s)))
+        n_short = int((lengths < SHORT_SEQUENCE_LENGTH).sum())
         if n_short:
             st.warning(
                 f"{n_short} {pluralize(n_short, 'sequence is', 'sequences are')} "

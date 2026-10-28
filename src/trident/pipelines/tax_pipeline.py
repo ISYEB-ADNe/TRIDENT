@@ -11,7 +11,7 @@ Step order:
 
 Exploration:
     build_tax_summary(tax_df, mol_df, name_table)
-    mol_rejected_rows(tax_df, ncbi_search_df, name_table)
+    mol_rejected_rows(tax_df, ncbi_search_df, name_table, query_cover)
 
 Names: build_name_table (see names.py) makes the name table of the MOL names
 from run_name_resolution; the later steps take it to compare names.
@@ -518,7 +518,7 @@ def mol_rejected_rows(
     tax_df: pd.DataFrame,
     ncbi_search_df: pd.DataFrame | None,
     name_table: pd.DataFrame | None,
-    query_cover: float | None = None,
+    query_cover: float | None,
 ) -> pd.DataFrame:
     """TAX rows of species that BLAST returned for that same sequence but MOL rejected.
 
@@ -533,6 +533,7 @@ def mol_rejected_rows(
         name_table: See build_name_table.
         query_cover: The MOL filter's minimum query cover: the best hit is
             one covering that much when the species has one (see best_hits).
+            None ranks by identity alone; the rows found are the same.
 
     Returns:
         The matching tax_df rows (original index kept), with the best hit
@@ -595,7 +596,8 @@ def finalize_tax_results(
 
     tax_df = worms_merge_df.copy()
     if drop_mol_rejected:
-        rejected = mol_rejected_rows(tax_df, ncbi_search_df, name_table)
+        # Which rows only: their best hit does not matter here.
+        rejected = mol_rejected_rows(tax_df, ncbi_search_df, name_table, None)
         if not rejected.empty:
             n_rejected = rejected["scientificName"].nunique()
             logger.info(
