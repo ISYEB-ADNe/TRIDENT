@@ -398,3 +398,23 @@ def test_mol_search_step_saves_each_sequence_hits_and_retries_failed_ones(
     df, _ = run_ncbi_search(sequences, batch_size=2, num_threads=1, db_path=db_path)
     assert list(ncbi_fake.queries.values()) == [["s1"]]
     assert sorted(df["seq_id"].unique()) == ["s0", "s1", "s2"]
+
+
+def test_blast_is_sent_the_bases_and_the_hits_keep_the_sequence_as_given(
+    ncbi_fake, monkeypatch
+):
+    """BLAST gets the sequence uppercase, without gaps or end Ns (inner Ns
+    kept); the hits carry the sequence as the user gave it."""
+    given = "--nnacgt-acgtnacgtn--"
+    sent = []
+    fake_post = ncbi.requests.post
+
+    def post(url, data, **kwargs):
+        if data["CMD"] == "Put":
+            sent.append(data["QUERY"].splitlines()[1])
+        return fake_post(url, data, **kwargs)
+
+    monkeypatch.setattr(ncbi.requests, "post", post)
+    df, _ = run_ncbi_search([SeqRecord(Seq(given), id="s0")], num_threads=1)
+    assert sent == ["ACGTACGTNACGT"]
+    assert df["dna_sequence"].unique().tolist() == [given]

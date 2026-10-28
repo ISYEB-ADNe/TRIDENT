@@ -261,7 +261,7 @@ def run_bold_filter(
                 filtered_dfs.append(species_df)
                 continue
 
-            seqs = species_df["dna_sequence"].astype(str).str.strip().tolist()
+            seqs = species_df["dna_sequence"].tolist()
             rep_indices, _ = select_longest_sequences(
                 seqs,
                 n_longest=longest_n,

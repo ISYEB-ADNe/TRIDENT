@@ -8,6 +8,7 @@ import pandas as pd
 import requests
 from loguru import logger
 
+from trident.clients.fasta import clean_sequence
 from trident.core import stop
 from trident.core.http import create_session, with_optional_session
 from trident.core.utils import (
@@ -416,9 +417,14 @@ SEARCH_ONLY_COLUMNS = ["bold_scientificName", "bold_matched_by", "bold_outcome"]
 
 def with_sequences(bold_search_df: pd.DataFrame) -> pd.DataFrame:
     """The rows of the BOLD search that hold a sequence, without
-    SEARCH_ONLY_COLUMNS."""
-    return bold_search_df.dropna(subset=["dna_sequence"]).drop(
+    SEARCH_ONLY_COLUMNS. The sequence is cleaned (see clean_sequence): the
+    steps after the search compare, rank and store its bases, not the record
+    as submitted."""
+    rows = bold_search_df.dropna(subset=["dna_sequence"]).drop(
         columns=SEARCH_ONLY_COLUMNS, errors="ignore"
+    )
+    return rows.assign(
+        dna_sequence=rows["dna_sequence"].astype(str).map(clean_sequence)
     )
 
 

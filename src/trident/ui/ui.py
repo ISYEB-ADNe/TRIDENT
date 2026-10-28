@@ -687,6 +687,9 @@ def run_step_workflow(
         run = st.session_state[STEP_RUNS][flag_key]
         st.session_state[_JOB_STEP] = flag_key
         # A stopped step keeps no result (run_with_progress raises StepStopped):
+        # Erasing or asking again is for one run: the next one reuses what this
+        # one saved. Set here, before the selector is drawn again.
+        st.session_state[f"{btn_key}_cache_mode"] = REUSE_SAVED
         # its finished queries are cached, and running it again with the same
         # settings continues from there.
         try:

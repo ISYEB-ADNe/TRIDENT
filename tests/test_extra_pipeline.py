@@ -7,6 +7,9 @@ raw BLAST hits, under any of the species' names. run_bold_merge then attaches
 the BOLD proxies to the other pairs only.
 """
 
+import json
+from pathlib import Path
+
 import pandas as pd
 
 from trident.pipelines import extra_pipeline
@@ -167,3 +170,17 @@ def test_resumed_bold_filter_filters_only_the_new_species(tmp_path, monkeypatch)
     assert df.loc[df["scientificName"] == "A", "dna_sequence"].tolist() == [
         "ACGTACGTACGT"
     ]
+
+
+def test_bold_filter_compares_and_keeps_the_bases_of_aligned_records():
+    """Real BOLD records stored aligned (end gaps, lowercase bases): the filter
+    ranks them by their bases, counts a lowercase twin as redundant, and keeps
+    the sequence without gaps, in uppercase. FMV430-09 is 666 bases padded to
+    905 characters, WXYZ022-11 is 671 bases; SCFAD318-09 (634 bases, 6
+    lowercase) is 98.8% identical to SCAFB971-07 (642 bases) once cleaned."""
+    records = json.loads(
+        (Path(__file__).parent / "fixtures/bold_aligned_records.json").read_text()
+    )
+    df, _ = run_bold_filter(pd.DataFrame(records), similarity=98)
+    assert sorted(df["seq_id"]) == ["SCAFB971-07", "WXYZ022-11"]
+    assert df["dna_sequence"].str.fullmatch("[ACGT]+").all()

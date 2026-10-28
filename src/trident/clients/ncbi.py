@@ -18,7 +18,7 @@ from Bio import Blast
 from Bio.SeqRecord import SeqRecord
 from loguru import logger
 
-from .fasta import records_to_fasta_string
+from .fasta import blast_record, clean_sequence, records_to_fasta_string
 from trident.core import config, stop
 from trident.core.http import retry_call
 from trident.core.constants import (
@@ -772,7 +772,11 @@ def submit_blast_batch(
         stop.check_stop()  # also for the qblast client, which has no stop
         logger.debug(f"{label}: {len(batch)} sequences")
 
-        multi_fasta = records_to_fasta_string(batch)
+        # BLAST is sent the bases (see clean_sequence); the hits keep the
+        # sequence as given.
+        multi_fasta = records_to_fasta_string(
+            [blast_record(r.id, clean_sequence(str(r.seq))) for r in batch]
+        )
         runner = _blast_runner(retry)
         try:
             records = runner(multi_fasta, evalue, hitlist_size, entrez_query)

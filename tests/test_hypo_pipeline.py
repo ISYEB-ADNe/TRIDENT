@@ -463,7 +463,7 @@ def test_hypo_check_searches_every_name_of_the_species(tmp_path, monkeypatch):
 def test_hypo_check_sends_the_sequences_of_a_species_together(tmp_path, monkeypatch):
     """The sequences of one species share its query and go to NCBI in one
     search; each still gets its own result, from its own hits, saved with the
-    sequence as it was given (BLAST gets gaps as N)."""
+    sequence as it was given (BLAST gets it cleaned)."""
     sent = []
 
     def blast(batch, entrez_query=None, **kwargs):

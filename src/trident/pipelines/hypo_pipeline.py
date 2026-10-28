@@ -721,9 +721,8 @@ def run_hypo_check(
     )
     log = StepLog("HYPO check")
 
-    # The rows themselves are kept with each batch: BLAST gets a copy of each
-    # sequence (see blast_record), but the checks are saved under the input's
-    # seq_id and dna_sequence.
+    # Each check is saved as its input row (seq_id, dna_sequence, species) with
+    # its hits added.
     batches = [
         (sci_name, group.iloc[i : i + batch_size])
         for sci_name, group in sequences_df.groupby(

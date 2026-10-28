@@ -65,14 +65,24 @@ def records_to_fasta_string(sequences: list[SeqRecord]) -> str:
         return output.getvalue()
 
 
+def clean_sequence(dna_sequence: str) -> str:
+    """The bases of a sequence: uppercase, without gaps ('-') and without the
+    Ns at its ends. A gap is a position where the sequence has no base (BOLD
+    keeps some records aligned, as submitted), and end Ns hold no base either:
+    both would count in the sequence's length, and so in the query cover.
+    Lowercase is the same base: BLAST reads it as uppercase, and the BOLD
+    filter must too. Inner Ns and other ambiguity codes stay, as bases that
+    could not be read. A sequence of gaps and Ns only keeps its length, as
+    Ns."""
+    sequence = dna_sequence.strip().upper()
+    return sequence.replace("-", "").strip("N") or sequence.replace("-", "N")
+
+
 def blast_record(seq_id, dna_sequence: str) -> SeqRecord:
-    """A sequence as BLAST is sent it: without its end gaps, other gaps ('-')
-    replaced with 'N', and no description, so the FASTA header is the id
-    alone. End gaps are alignment padding (BOLD stores some records aligned):
-    sent as N, they would count in the query length and cap the query cover.
-    A sequence of gaps only keeps them (as N), so it is never sent empty."""
-    bases = dna_sequence.strip("-") or dna_sequence
-    return SeqRecord(Seq(bases.replace("-", "N")), id=str(seq_id), description="")
+    """A sequence as a BLAST query, with no description so the FASTA header
+    is the id alone. It is cleaned only when sent (see submit_blast_batch), so
+    the hits keep the sequence as given."""
+    return SeqRecord(Seq(dna_sequence), id=str(seq_id), description="")
 
 
 def dataframe_to_records(sequences_df: pd.DataFrame) -> list[SeqRecord]:
