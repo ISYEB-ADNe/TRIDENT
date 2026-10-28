@@ -76,13 +76,20 @@ def top_hit_per_group(
     ascending: bool = False,
     n: int = 1,
     columns: "list[str] | None" = None,
+    cover_first: float | None = None,
 ) -> pd.DataFrame:
     """Keep the top *n* rows per *keys* group, ordered by *sort* (descending by default).
 
     Row order follows the sort (not the group keys). With n == 1 this is
     sort + drop_duplicates(keep first); with n > 1 it is sort + groupby.head(n).
-    Optionally narrow to *columns*.
+    With *cover_first*, rows whose query_cover reaches it rank before the
+    others, so a short fragment is the top row only when the group has no
+    longer one. Optionally narrow to *columns*.
     """
+    if cover_first is not None:
+        cover = pd.to_numeric(df["query_cover"], errors="coerce")
+        df = df.assign(_full_cover=cover >= cover_first)
+        sort = ["_full_cover", *sort]
     ranked = df.sort_values(sort, ascending=ascending)
     if n == 1:
         top = ranked.drop_duplicates(subset=keys)
@@ -91,6 +98,32 @@ def top_hit_per_group(
     if columns is not None:
         top = top[columns]
     return top
+
+
+def unbeaten_hits(df: pd.DataFrame, keys: "list[str]", n: int = 1) -> pd.DataFrame:
+    """The hits of each *keys* group that no other hit of the group beats on
+    both identity_percentage and query_cover (at least as high on both, higher
+    on one), with at most *n* hits of the same identity and cover.
+
+    Whatever minimum identity and cover a filter applies later, the best hit
+    passing it is among these: a short high-identity fragment cannot push out
+    a full-length hit, as a top N by identity would. Rows without a group key
+    are left out, as in a groupby.
+    """
+    scores = ["identity_percentage", "query_cover"]
+    points = (
+        df[[*keys, *scores]]
+        .dropna(subset=keys)
+        .drop_duplicates()
+        .sort_values(scores, ascending=False)
+    )
+    # Sorted by identity, a point is beaten when an earlier one of its group
+    # (higher identity, or the same with a higher cover) covers at least as much.
+    best_cover = points.groupby(keys, sort=False)["query_cover"].cummax()
+    before = best_cover.groupby([points[k] for k in keys], sort=False).shift()
+    unbeaten = points[before.isna() | (points["query_cover"] > before)]
+    kept = df.merge(unbeaten, on=[*keys, *scores])
+    return kept.groupby([*keys, *scores], sort=False).head(n).reset_index(drop=True)
 
 
 # Plurals that are not the word + "s", so each is written once.
@@ -218,7 +251,7 @@ SETTING_LABELS: dict[str, str] = {
     "hypo_max_hits": "Max hits per query",
     "hypo_ev_exponent": "E-value exponent",
     "hypo_identity_cutoff": "Min hit identity (%)",
-    "hypo_ntop": "Top hits kept",
+    "hypo_ntop": "Hits kept per score",
     "hypo_query_cover": "Query cover (%)",
     "hypo_identity": "Proxy identity (%)",
     "hypo_check_ev_exponent": "HYPO check E-value exponent",

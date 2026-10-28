@@ -46,6 +46,7 @@ from trident.core.utils import (
     preserve_sequence_order,
     ensure_columns,
     top_hit_per_group,
+    unbeaten_hits,
 )
 from trident.clients.fasta import blast_record
 from trident.clients.ncbi import (
@@ -264,9 +265,10 @@ def run_hypo_search(
         ev_exponent: Negative exponent for E-value threshold (e.g. 10 → 1e-10).
         max_hits: Maximum hits per query.
         identity_cutoff: Minimum identity of a proxy hit kept from the
-            search, before the top N.
-        ntop: If > 0, keep only top N hits per (proxy record, hit species,
-            Entrez query) by identity.
+            search, before the hits are compared (see ntop).
+        ntop: If > 0, keep per (proxy record, hit species, Entrez query)
+            only the hits no other beats on both identity and cover, at most
+            N with the same identity and cover (see unbeaten_hits).
         give_up_minutes: Minutes a BLAST job may wait at NCBI before it is
             resubmitted once, then counted as failed (see ``BlastGaveUp``).
         progress_handler: Optional progress tracker (a dict with "current", or
@@ -312,17 +314,17 @@ def run_hypo_search(
     no_hits = pd.DataFrame(columns=HYPO_SEARCH_COLUMNS)
 
     def keep(hits: pd.DataFrame) -> pd.DataFrame:
-        """The hits above the identity cutoff, then the top N of each cache item
-        (proxy record, Entrez query) and hit species: hits under two queries do
-        not compete, so a batch's hits are kept on their own."""
+        """The hits above the identity cutoff, then those of each cache item
+        (proxy record, Entrez query) and hit species that no other beats on
+        both identity and cover, up to N of the same scores (see
+        unbeaten_hits): the HYPO filter's cover minimum then finds its best
+        hit. Hits under two queries do not compete, so a batch's hits are kept
+        on their own."""
         if identity_cutoff > 0:
             hits = hits[hits["identity_percentage"] >= identity_cutoff]
         if ntop > 0:
-            hits = top_hit_per_group(
-                hits,
-                keys=["seq_id", "scientificName", "entrez_query"],
-                sort=["identity_percentage", "query_cover"],
-                n=ntop,
+            hits = unbeaten_hits(
+                hits, keys=["seq_id", "scientificName", "entrez_query"], n=ntop
             )
         return hits[HYPO_SEARCH_COLUMNS]
 
@@ -353,7 +355,7 @@ def run_hypo_search(
     kept_hits = []
     outcomes = run_blast_pool(job, jobs, num_threads, give_up_minutes * 60)
     failed_records = []
-    n_hits = 0  # as the batch lines count them, before the cutoff and top N
+    n_hits = 0  # as the batch lines count them, before the hits are kept
     for (_, batch, query), (hits, failed_ids, n_found) in zip(jobs, outcomes):
         # Report the proxy records whose BLAST errored, with the batch's query:
         # (proxy seq_id, entrez_query) is the cache key, so they are retried on
@@ -371,7 +373,10 @@ def run_hypo_search(
     if identity_cutoff > 0:
         kept.append(f"identity ≥ {identity_cutoff}%")
     if ntop > 0:
-        kept.append(f"best {ntop} per BOLD sequence and species")
+        kept.append(
+            f"not beaten on both identity and cover by another hit of the same "
+            f"BOLD sequence and species, up to {ntop} with the same scores"
+        )
     rule = f" ({', '.join(kept)})" if kept else ""
     log.done(
         f"{len(search_df)} of {n_hits} {pluralize(n_hits, 'hit')} kept{rule}",
@@ -838,12 +843,12 @@ def best_check_hits(hypo_check_df, query_cover, columns=None):
     highest identity among hits as long as the MOL filter requires, so it is
     comparable with the MOL hits; a partial hit only when there is no other.
     """
-    cover = pd.to_numeric(hypo_check_df["query_cover"], errors="coerce")
     return top_hit_per_group(
-        hypo_check_df.assign(_full_cover=cover >= query_cover),
+        hypo_check_df,
         keys=["seq_id", "scientificName"],
-        sort=["_full_cover", "identity_percentage", "query_cover"],
+        sort=["identity_percentage", "query_cover"],
         columns=columns,
+        cover_first=query_cover,
     )
 
 

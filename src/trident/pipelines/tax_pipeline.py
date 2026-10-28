@@ -518,6 +518,7 @@ def mol_rejected_rows(
     tax_df: pd.DataFrame,
     ncbi_search_df: pd.DataFrame | None,
     name_table: pd.DataFrame | None,
+    query_cover: float | None = None,
 ) -> pd.DataFrame:
     """TAX rows of species that BLAST returned for that same sequence but MOL rejected.
 
@@ -530,6 +531,8 @@ def mol_rejected_rows(
         tax_df: TAX list with 'seq_id', 'scientificName' and 'in_mol'.
         ncbi_search_df: Raw BLAST hits, before the MOL filter.
         name_table: See build_name_table.
+        query_cover: The MOL filter's minimum query cover: the best hit is
+            one covering that much when the species has one (see best_hits).
 
     Returns:
         The matching tax_df rows (original index kept), with the best hit
@@ -540,9 +543,9 @@ def mol_rejected_rows(
     if ncbi_search_df is None or ncbi_search_df.empty or tax_df.empty:
         return tax_df.iloc[:0].assign(**{c: pd.Series(dtype=float) for c in score_cols})
 
-    seen = best_hits(ncbi_search_df, name_table, list(MOL_HIT_COLUMNS)).rename(
-        columns={"species_key": "_key", **MOL_HIT_COLUMNS}
-    )
+    seen = best_hits(
+        ncbi_search_df, name_table, list(MOL_HIT_COLUMNS), query_cover
+    ).rename(columns={"species_key": "_key", **MOL_HIT_COLUMNS})
 
     expanded = tax_df[~tax_df["in_mol"]].drop(columns=score_cols, errors="ignore")
     rejected = (

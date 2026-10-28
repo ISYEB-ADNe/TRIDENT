@@ -20,6 +20,7 @@ from trident.ui.ui import (
     run_with_progress,
     reset_state_after,
     highlight_in_mol,
+    mol_query_cover,
     display_same_species,
     with_same_species,
     sequence_selector,
@@ -158,7 +159,7 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
     st.session_state.tax_failed = tax_failed
     st.session_state.tax_homonyms = pipe.genus_homonyms(worms_search_df, tax_df)
     st.session_state.tax_mol_rejected = pipe.mol_rejected_rows(
-        worms_merge_df, ncbi_search_df, name_table
+        worms_merge_df, ncbi_search_df, name_table, mol_query_cover()
     )
     st.session_state.name_table = name_table
     st.session_state.tax_summary_df = summary_df

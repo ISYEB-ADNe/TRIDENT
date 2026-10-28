@@ -226,7 +226,7 @@ The settings of each step are detailed below. Defaults are those used by the app
 | Max hits per query | 500 | As in MOL. |
 | E-value exponent | 20 (1e-20) | E-value limit of the proxy BLAST. |
 | Min hit identity (%) | 90 | Minimum identity of a proxy hit kept from the search. |
-| Top hits kept | 3 | Best hits kept per proxy and hit species. |
+| Hits kept per score | 3 | Per proxy and hit species, the search keeps the hits no other beats on both identity and query cover (a short fragment cannot push out a full-length hit); this is how many hits with the same identity and cover are kept. |
 | Query cover (%) | 50 | Minimum query cover of a proxy hit (looser than MOL, since proxy and target marker lengths differ). |
 | Proxy identity (%) | 95 | A proxy hit on a MOL species of the sequence at or above this identity makes the species hypothetical. |
 | HYPO check E-value exponent | 3 (1e-3) | E-value limit of the HYPO check. |

@@ -80,7 +80,7 @@ def display_hypo_parameters():
         presets,
         format_fn=lambda p: (
             f"E-value: 1e-{p['hypo_ev_exponent']}, Max hits: {p['hypo_max_hits']}, "
-            f"Top: {p['hypo_ntop']}, min hit identity: {p['hypo_identity_cutoff']}%"
+            f"Hits per score: {p['hypo_ntop']}, min hit identity: {p['hypo_identity_cutoff']}%"
         ),
         key="hypo_search_preset",
     )
@@ -145,7 +145,12 @@ def display_hypo_parameters():
             SETTING_LABELS["hypo_ntop"],
             1,
             100,
-            help="Best hits kept per BOLD sequence and hit species.",
+            help=(
+                "Per BOLD sequence and hit species, the search keeps the hits "
+                "no other beats on both identity and query cover, so a short "
+                "fragment cannot push out a full-length hit. This sets how many "
+                "hits with the same identity and cover are kept."
+            ),
             key="hypo_ntop",
         )
         save_widget("hypo_ntop")

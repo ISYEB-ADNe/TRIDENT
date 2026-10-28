@@ -66,11 +66,13 @@ def records_to_fasta_string(sequences: list[SeqRecord]) -> str:
 
 
 def blast_record(seq_id, dna_sequence: str) -> SeqRecord:
-    """A sequence as BLAST is sent it: gaps ('-') replaced with 'N', and no
-    description, so the FASTA header is the id alone."""
-    return SeqRecord(
-        Seq(dna_sequence.replace("-", "N")), id=str(seq_id), description=""
-    )
+    """A sequence as BLAST is sent it: without its end gaps, other gaps ('-')
+    replaced with 'N', and no description, so the FASTA header is the id
+    alone. End gaps are alignment padding (BOLD stores some records aligned):
+    sent as N, they would count in the query length and cap the query cover.
+    A sequence of gaps only keeps them (as N), so it is never sent empty."""
+    bases = dna_sequence.strip("-") or dna_sequence
+    return SeqRecord(Seq(bases.replace("-", "N")), id=str(seq_id), description="")
 
 
 def dataframe_to_records(sequences_df: pd.DataFrame) -> list[SeqRecord]:

@@ -320,9 +320,12 @@ def best_hits(
     hits: pd.DataFrame,
     name_table: pd.DataFrame | None,
     columns: list[str] = (),
+    query_cover: float | None = None,
 ) -> pd.DataFrame:
     """Best hit (identity, then query cover) of each species for each
     sequence, under any of its names. Hits without a name are left out.
+    With *query_cover*, hits covering at least that much rank first, so a
+    short fragment is the best hit only when the species has no longer one.
 
     Returns:
         DataFrame with columns seq_id, species_key and *columns* of the hit,
@@ -340,6 +343,7 @@ def best_hits(
         keys=["seq_id", "species_key"],
         sort=["identity_percentage", "query_cover"],
         columns=["seq_id", "species_key", *columns],
+        cover_first=query_cover,
     )
 
 

@@ -11,6 +11,7 @@ unwrap to the pure logic so no database is involved.
 """
 
 import inspect
+from pathlib import Path
 import threading
 
 import pandas as pd
@@ -33,6 +34,8 @@ from trident.pipelines.hypo_pipeline import (
     run_hypo_filter,
     finalize_hypo_results,
 )
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 _merge = inspect.unwrap(run_hypo_merge)
 _filter = inspect.unwrap(run_hypo_filter)
@@ -321,6 +324,43 @@ def test_hypo_search_failed_proxy_blast_is_not_cached(tmp_path, monkeypatch):
     assert sorted(zip(cached["seq_id"], cached["entrez_query"])) == sorted(
         [("P1", query_b), ("P2", query_a)]
     )
+
+
+def test_hypo_search_keeps_the_best_hit_for_any_filter_minimum(tmp_path, monkeypatch):
+    """A short high-identity fragment does not push a full-length hit out of
+    the search: for any identity and cover minimum of the HYPO filter, the best
+    hit among the kept ones is the best among all hits above the cutoff. Real
+    hits of a Balaenoptera musculus proxy on B. borealis: three fragments at
+    96.1% over 11.9% of the proxy, mitogenomes at 94.1% over 99.8%."""
+    raw = pd.read_json(FIXTURES / "blast_hits_balaenoptera_borealis.json")
+    monkeypatch.setattr(
+        hypo_pipeline, "blast_batch", lambda *a, **k: ([raw.copy()], [])
+    )
+    query = '("Balaenoptera borealis"[orgn])'
+    sequences = {
+        "MUSA_Vert16S_00065": {
+            "sequences": [SeqRecord(Seq("ACGT"), id="GBCOC19035-23")],
+            "entrez_query": query,
+        }
+    }
+
+    kept, _ = run_hypo_search(
+        sequences, identity_cutoff=90, ntop=3, db_path=str(tmp_path / "hypo.db")
+    )
+
+    every = ncbi.process_blast_results(raw.copy())
+    every = every[every["identity_percentage"] >= 90]
+    scores = ["identity_percentage", "query_cover"]
+
+    def best(hits, identity, cover):
+        passing = hits[(hits[scores[0]] >= identity) & (hits[scores[1]] >= cover)]
+        ranked = passing.sort_values(scores, ascending=False)
+        return tuple(ranked[scores].iloc[0]) if len(ranked) else None
+
+    for identity, cover in every[scores].drop_duplicates().itertuples(index=False):
+        assert best(kept, identity, cover) == best(every, identity, cover)
+    full_length = kept.loc[kept["query_cover"] >= 50, "hit_url"].str.rsplit("/").str[-1]
+    assert sorted(full_length) == ["MF409248.1", "MF409249.1", "OZ239556.1"]
 
 
 # --- run_hypo_search: BLAST jobs ---
