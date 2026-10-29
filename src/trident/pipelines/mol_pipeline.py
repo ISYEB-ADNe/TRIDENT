@@ -123,10 +123,7 @@ def run_ncbi_search(
     """
     log = StepLog("NCBI BLAST", noun="sequence")
     batches = create_sequence_batches(sequences, batch_size)
-    logger.debug(
-        f"NCBI BLAST: {len(batches)} {pluralize(len(batches), 'batch')} "
-        f"of up to {batch_size} sequences"
-    )
+    log.batches(len(batches), f"up to {batch_size} sequences each")
     hits_of: dict[int, pd.DataFrame] = {}  # processed hits of each batch
 
     def batch_done(i, dfs, failed):

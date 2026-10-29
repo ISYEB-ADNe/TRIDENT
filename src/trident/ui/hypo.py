@@ -335,8 +335,8 @@ def hypo_search_workflow():
     if mode == "IDENTICAL":
         show_failed_items_banner(
             st.session_state.hypo_search_failed,
-            "BOLD proxy sequence",
-            "BOLD proxy sequences",
+            "BOLD sequence",
+            "BOLD sequences",
             source="NCBI BLAST",
             gives_up=True,
         )
@@ -580,7 +580,7 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
             percent = min(curr / total, 1.0)
             progress_bar.progress(
                 percent,
-                text=f"Check: {curr} / {total} species checks done...",
+                text=f"Check: {curr} / {total} sequence checks done...",
             )
 
     # Save check results
@@ -768,8 +768,8 @@ def hypo_final_check_workflow():
         if mode == "IDENTICAL":
             show_failed_items_banner(
                 st.session_state.hypo_check_failed,
-                "species check",
-                "species checks",
+                "sequence check",
+                "sequence checks",
                 source="NCBI BLAST",
                 gives_up=True,
             )

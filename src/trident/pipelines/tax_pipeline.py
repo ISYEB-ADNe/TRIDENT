@@ -146,7 +146,7 @@ def run_name_resolution(
     ncbi_taxids = ncbi_taxids or {}
     rows: list[dict] = []
     failed: list[str] = []
-    log = StepLog("WoRMS name check", len(names), "name")
+    log = StepLog("WoRMS name check", len(names), "MOL name")
     try:
         for name in names:
             try:

@@ -79,7 +79,7 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
         if total > 0:
             progress_bar.progress(
                 min(curr / total, 1.0),
-                text=f"Name check: {curr}/{total} names",
+                text=f"Name check: {curr}/{total} MOL {pluralize(total, 'name')}",
             )
 
     resolution_df, _ = run_with_progress(

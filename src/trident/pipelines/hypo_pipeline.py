@@ -232,7 +232,7 @@ HYPO_SEARCH_COLUMNS = [
         rebuild_fn=_hypo_search_rebuild,
         match_map_dict={"seq_id": "seq_id", "entrez_query": "entrez_query"},
     ),
-    log_as=("HYPO search", "BLAST search"),
+    log_as=("HYPO search", "BOLD sequence"),
 )
 def run_hypo_search(
     sequences_dict,
@@ -281,7 +281,7 @@ def run_hypo_search(
         The kept proxy hits (HYPO_SEARCH_COLUMNS), with the Entrez query they
         were found under.
     """
-    log = StepLog("HYPO search", noun="BLAST search")
+    log = StepLog("HYPO search", noun="BOLD sequence")
 
     # Batches are made per Entrez query, across sequences: sequences with the same MOL
     # species fill one batch instead of sending one small job each. All batches
@@ -301,10 +301,10 @@ def run_hypo_search(
         for batch in create_sequence_batches(records, batch_size)
     ]
     n_seqs = len(sequences_dict)
-    logger.debug(
-        f"HYPO search: {len(owner)} {pluralize(len(owner), 'search')} "
-        f"for {n_seqs} {pluralize(n_seqs, 'sequence')}, in {len(batches)} "
-        f"{pluralize(len(batches), 'batch')}"
+    log.batches(
+        len(batches),
+        "one or more per set of MOL species",
+        of=f"{n_seqs} {pluralize(n_seqs, 'sequence')}",
     )
 
     circuit = BlastCircuit()  # shared by every job of this run
@@ -666,7 +666,7 @@ def _hypo_check_rebuild(input_selected, original_inputs):
         rebuild_fn=_hypo_check_rebuild,
         match_map_dict={"seq_id": "seq_id", "scientificName": "scientificName"},
     ),
-    log_as=("HYPO check", "species check"),
+    log_as=("HYPO check", "sequence check"),
     bool_columns=("hit_found",),
 )
 @preserve_sequence_order("seq_id", "hypo_filter_df")
@@ -716,7 +716,7 @@ def run_hypo_check(
         .drop_duplicates()
         .reset_index(drop=True)
     )
-    log = StepLog("HYPO check", noun="check")
+    log = StepLog("HYPO check", noun="sequence check")
 
     # Each check is saved as its input row (seq_id, dna_sequence, species) with
     # its hits added.
@@ -727,11 +727,12 @@ def run_hypo_check(
         )
         for i in range(0, len(group), batch_size)
     ]
+    n_species = sequences_df["scientificName"].nunique(dropna=False)
+    log.batches(len(batches), "one or more per species", of=f"{n_species} species")
     circuit = BlastCircuit()  # shared by every job of this run
     blast_kwargs = {
         "evalue": 10 ** (-ev_exponent),
         "hitlist_size": 10,
-        "job_name": "Check",
     }
     hit_columns = {
         "seq_id": "blast_id",
@@ -799,7 +800,7 @@ def run_hypo_check(
 
     # Every sequence may have errored (all reported to failure_sink).
     if not all_results:
-        log.done(f"0/{len(sequences_df)} checks with hits", failed)
+        log.done(f"0/{len(sequences_df)} sequence checks with hits", failed)
         return pd.DataFrame(columns=HYPO_CHECK_COLUMNS)
 
     # Missing hit columns are filled with NaN (float), not pd.NA (object), so
@@ -811,7 +812,7 @@ def run_hypo_check(
     # Counted per (sequence, species), as the checks are.
     hits = check_df.loc[check_df["hit_found"], ["seq_id", "scientificName"]]
     log.done(
-        f"{len(hits.drop_duplicates())}/{len(sequences_df)} checks with hits",
+        f"{len(hits.drop_duplicates())}/{len(sequences_df)} sequence checks with hits",
         failed,
     )
     return check_df

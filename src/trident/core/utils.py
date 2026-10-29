@@ -403,6 +403,14 @@ class StepLog:
             prefix = self._advance(True, self.clock())
             logger.warning(f"{prefix}: {name} failed: {error}")
 
+    def batches(self, n: int, how: str, of: str = "") -> None:
+        """Log how the step sends its items to NCBI ("HYPO check: 14 species,
+        sent in 14 batches (one or more per species)"), so the batch numbers
+        of the BLAST lines read against it; nothing when there is none."""
+        if n:
+            of = f"{of}, " if of else ""
+            logger.info(f"{self.step}: {of}sent in {n} {pluralize(n, 'batch')} ({how})")
+
     def done(
         self,
         summary: str,

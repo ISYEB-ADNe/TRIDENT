@@ -221,7 +221,7 @@ def parse_blast_records(records: list) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=BLAST_RAW_COLUMNS)
 
 
-# Label of the batch the current thread is running ("Batch 3/40", "Check 2/5"),
+# Label of the batch the current thread is running ("Batch 3/40"),
 # set by submit_blast_batch, so the client's log lines (submission, slow job,
 # retry) say which batch they are about.
 _job_label: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -723,7 +723,6 @@ def submit_blast_batch(
     batch_id: int | str | None = None,
     retry: bool = True,
     circuit: BlastCircuit | None = None,
-    job_name: str = "Batch",
 ) -> pd.DataFrame | None:
     """Submit a BLASTn query for a single batch of sequences.
 
@@ -747,8 +746,6 @@ def submit_blast_batch(
             used when splitting a batch that already failed its retries.
         circuit: Optional run-wide ``BlastCircuit``. While it is open, the job
             gets a single attempt; its outcome is recorded when retries apply.
-        job_name: What the log lines call the job, before *batch_id*
-            ("Batch 3/40", "Check 2/5").
 
     Returns:
         DataFrame of raw BLAST hits, or None if the query failed.
@@ -762,7 +759,7 @@ def submit_blast_batch(
     """
     if circuit is not None and circuit.is_open:
         retry = False
-    label = f"{job_name} {batch_id}" if batch_id is not None else "BLAST job"
+    label = f"Batch {batch_id}" if batch_id is not None else "BLAST job"
     token = _job_label.set(label)
     start = time.monotonic()
     try:
