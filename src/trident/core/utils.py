@@ -301,32 +301,54 @@ def describe_settings(params: dict) -> str:
     )
 
 
+def failed_items(df) -> list[str]:
+    """Items whose query failed in the call that returned *df*.
+
+    Read from ``df.attrs["failed_items"]``, set by ``save_to_db``. Empty when
+    *df* is missing or did not come from a cached step. An item reported as a
+    full cache key (a tuple) is shown by its first value, e.g. the sequence id.
+    """
+    if df is None:
+        return []
+    names = (
+        str(x[0] if isinstance(x, tuple) else x)
+        for x in df.attrs.get("failed_items", [])
+    )
+    return list(dict.fromkeys(names))
+
+
 class StepLog:
     """Log lines of one search step, the same for every source: a line per
     item it queries ("BOLD search 12/33: Gadus morhua, 45 BOLD sequences") and
     an end line ("BOLD search done after 6 min: 33 of 33 species queried, 1240
     BOLD sequences for 30 species").
 
-    Each item is logged at DEBUG, except the first and then one when the last
-    line shown (progress or notable) is at least ITEM_INTERVAL seconds old:
-    those are logged at INFO
-    as progress ("BOLD search: 12 of 33 species done (last: Gadus morhua, 45
-    BOLD sequences)"), so the items between them read as done, not missing. A
-    slow source (BOLD takes about 10 s per species) shows every item, a fast
-    one (WoRMS, GBIF) one line every few seconds, so a long step is never
-    silent and a quick one does not flood the log. A failed item, or one worth
+    An item is logged at INFO when it is the first, when it took at least
+    half of ITEM_INTERVAL seconds since the one before (a slow source: BOLD
+    takes about 10 s per species), or when the last line shown is at least
+    ITEM_INTERVAL seconds old; the others go to DEBUG. It is shown as its own
+    line when no item was hidden since the last line shown, else as progress
+    ("BOLD search: 12 of 33 species done (last: Gadus morhua, 45 BOLD
+    sequences)"), so the hidden items read as done, not missing. A slow
+    source shows every item as its own line, a fast one (WoRMS, GBIF) one
+    progress line every few seconds, so a long step is never silent and a
+    quick one does not flood the log. A failed item, or one worth
     a look (*notable*: not found, doubtful match), is always shown. *noun* is
     what an item is. Safe to call from worker threads.
     """
 
     ITEM_INTERVAL = 10.0
+    # The clock of the intervals (a test can replace it).
+    clock = staticmethod(time.monotonic)
 
     def __init__(self, step: str, total: int = 0, noun: str = "item"):
         self.step = step
         self.total = total
         self.noun = noun
-        self._start = self._last = time.monotonic()
+        # _last: the last line shown; _previous: the last item
+        self._start = self._last = self._previous = self.clock()
         self._count = 0
+        self._hidden = 0  # items logged at DEBUG since the last line shown
         self._lock = threading.Lock()
 
     def _of_total(self, count: int) -> str:
@@ -335,12 +357,16 @@ class StepLog:
             return f"{count} {pluralize(count, self.noun)}"
         return f"{count} of {self.total} {pluralize(self.total, self.noun)}"
 
-    def _advance(self, shown: bool) -> str:
-        """Count the next item (under the lock); its prefix ("BOLD search
-        12/33"). A *shown* line restarts the interval."""
+    def _advance(self, shown: bool, now: float) -> str:
+        """Count the next item, done at *now* (under the lock); its prefix
+        ("BOLD search 12/33"). A *shown* line restarts the interval."""
         self._count += 1
+        self._previous = now
         if shown:
-            self._last = time.monotonic()
+            self._last = now
+            self._hidden = 0
+        else:
+            self._hidden += 1
         total = f"/{self.total}" if self.total else ""
         return f"{self.step} {self._count}{total}"
 
@@ -353,13 +379,18 @@ class StepLog:
     def item(self, name: str, outcome: str, notable: bool = False) -> None:
         # Numbered and logged under the lock, so worker threads log in order.
         with self._lock:
-            due = (
-                self._count == 0 or time.monotonic() - self._last >= self.ITEM_INTERVAL
+            now = self.clock()
+            shown = (
+                notable
+                or self._count == 0
+                or now - self._previous >= self.ITEM_INTERVAL / 2
+                or now - self._last >= self.ITEM_INTERVAL
             )
-            prefix = self._advance(due or notable)
-            if notable:
+            hidden = self._hidden
+            prefix = self._advance(shown, now)
+            if notable or (shown and not hidden):
                 logger.info(f"{prefix}: {name}, {outcome}")
-            elif due:
+            elif shown:
                 logger.info(
                     f"{self.step}: {self._of_total(self._count)} done "
                     f"(last: {name}, {outcome})"
@@ -369,7 +400,8 @@ class StepLog:
 
     def failed(self, name: str, error: object) -> None:
         with self._lock:
-            logger.warning(f"{self._advance(True)}: {name} failed: {error}")
+            prefix = self._advance(True, self.clock())
+            logger.warning(f"{prefix}: {name} failed: {error}")
 
     def done(
         self,
@@ -381,7 +413,7 @@ class StepLog:
         total; *summary* need not repeat it), *summary* of its results, then
         the *failed* items (by name), which the next run queries again
         (*retry* says how)."""
-        elapsed = duration(time.monotonic() - self._start)
+        elapsed = duration(self.clock() - self._start)
         if self.total:
             summary = f"{self._of_total(self._count)} queried, {summary}"
         logger.info(f"{self.step} done after {elapsed}: {summary}")

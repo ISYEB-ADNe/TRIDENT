@@ -15,6 +15,7 @@ from trident.core.config import is_streamlit_cloud
 from trident.core.database import fingerprint, load_provenance
 from trident.core.utils import (
     count_phrase,
+    failed_items,
     name_list,
     normalize_name,
     pluralize,
@@ -41,7 +42,6 @@ from trident.ui.geo import display_gbif_sequence_table
 from trident.ui.ui import (
     column_config,
     SELECTED_SEQUENCE_KEY,
-    failed_items,
     persist_value,
     save_widget,
     styled_or_plain,
@@ -124,7 +124,14 @@ FILTERS = [
 
 
 # The session tables of the species flow, named as build_species_flow's arguments.
-FLOW_TABLES = ["ncbi_search_df", "mol_df", "tax_df", "geo_df", "extra_df", "hypo_df"]
+FLOW_TABLES = [
+    "ncbi_search_df",
+    "mol_df",
+    "tax_df",
+    "geo_df",
+    "extra_df",
+    "hypo_df",
+]
 
 
 def _flow_tables():
@@ -133,6 +140,9 @@ def _flow_tables():
     state = st.session_state
     return {
         **{key: state.get(key) for key in FLOW_TABLES},
+        # The GBIF search's session table is the merge of TAX with its counts.
+        "gbif_merge_df": state.get("gbif_search_df"),
+        "gbif_failed": state.get("gbif_search_failed") or [],
         "excluded": state.get("excluded_results", []),
         "name_table": state.get("name_table"),
     }
@@ -145,7 +155,10 @@ def _lost_at(seq_ids):
     the same objects mean the same data. An exclusion changes only its own
     sequence's flow."""
     state = st.session_state
-    tables = [state.get(key) for key in [*FLOW_TABLES, "name_table"]]
+    tables = [
+        state.get(key)
+        for key in [*FLOW_TABLES, "gbif_search_df", "gbif_search_failed", "name_table"]
+    ]
     excluded = set(state.get("excluded_results", []))
     memo = state.get("lost_at_memo")
     if memo is None or any(old is not new for old, new in zip(memo["tables"], tables)):
@@ -516,6 +529,12 @@ def show_assignments(assignments, curated_df, threshold):
 LOST_AT_TABLES = {
     "MOL Filter": ("ncbi_search_df", "This sequence's NCBI hits:"),
     "TAX": ("mol_df", "This sequence's MOL hits:"),
+    "GEO match": (
+        "tax_df",
+        "This sequence's candidates with no confident GBIF match (also listed "
+        'on the GEO page under "TAX species not found in GBIF"):',
+    ),
+    "GEO failed": ("tax_df", "This sequence's candidates whose GBIF search failed:"),
     "EXTRA": ("geo_df", "This sequence's candidates added by TAX:"),
     "EXTRA not run": ("geo_df", "This sequence's candidates added by TAX:"),
     "HYPO": ("geo_df", "The candidates added by TAX that HYPO tested:"),
@@ -546,9 +565,6 @@ def _show_lost_at(seq_id, step):
         # Only the candidates lost at GEO, not a congener the MOL filter
         # rejected that TAX kept.
         seq_df = df[(df["seq_id"] == seq_id) & df["scientificName"].isin(names)]
-        if seq_df.empty:
-            st.caption("GBIF returned no counts for its candidate species.")
-            return
         area = area_label(extent, params.get("gbif_area"))
         st.caption(
             f"This sequence's candidates and their GBIF occurrences. GEO keeps a "
@@ -568,9 +584,10 @@ def _show_lost_at(seq_id, step):
     key, caption = LOST_AT_TABLES[step]
     df = st.session_state[key]
     rows = df[df["seq_id"] == seq_id]
-    if key == "geo_df":
-        # Only the candidates that ended at this step: GEO also lists species
-        # lost earlier, such as a congener the MOL filter rejected and TAX kept.
+    if key in ("tax_df", "geo_df"):
+        # Only the candidates that ended at this step: TAX and GEO also list
+        # species lost elsewhere, such as a congener the MOL filter rejected
+        # and TAX kept.
         rows = rows[rows["scientificName"].isin(names)]
     name_table = st.session_state.name_table
     if key == "mol_df" and not resolved_names(name_table).empty:

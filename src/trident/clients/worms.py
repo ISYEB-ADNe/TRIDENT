@@ -333,7 +333,8 @@ def get_children_by_aphia_id(
         aphia_id: AphiaID of the parent taxon (e.g. a genus).
         session: Optional requests.Session.
         timeout: Request timeout in seconds.
-        marine_only: If True, WoRMS returns only marine-flagged children.
+        marine_only: If True, WoRMS returns only the children flagged marine
+            or brackish (its marine_only option keeps both).
 
     Returns:
         List of raw taxon records as dictionaries. Empty list if none found.
@@ -524,8 +525,8 @@ def get_species_from_genus_list(
         progress_handler: Optional progress tracker (a dict with "current", or
             tqdm-like).
         user_agent: User-Agent header for HTTP requests.
-        marine_only: If True (default), WoRMS returns only marine-flagged
-            children; False also returns non-marine records.
+        marine_only: If True (default), WoRMS returns only the children
+            flagged marine or brackish; False also returns the others.
         result_sink: Called with the species of each genus and the genus once
             it is done (see save_to_db), unless its query errored.
 

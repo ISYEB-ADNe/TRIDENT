@@ -8,6 +8,7 @@ import streamlit as st
 from trident.core.utils import (
     FILTER_METHOD_LABELS,
     SETTING_LABELS,
+    failed_items,
     pluralize,
     species_for_sequences,
 )
@@ -30,7 +31,6 @@ import trident.pipelines as pipe
 
 
 from trident.ui.ui import (
-    failed_items,
     show_failed_items_banner,
     show_filter_success,
     lazy_expander,

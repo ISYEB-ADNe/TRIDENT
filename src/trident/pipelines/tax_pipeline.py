@@ -303,8 +303,8 @@ def run_worms_search(
         progress_handler: Optional progress tracker (a dict with "current", or
             tqdm-like).
         user_agent: User-Agent header for HTTP requests.
-        marine_only: If True (default), WoRMS returns only marine-flagged
-            species; False also returns non-marine records.
+        marine_only: If True (default), WoRMS returns only the species
+            flagged marine or brackish; False also returns the others.
         failure_sink: If provided, genera whose query errored are appended here
             so the cache layer skips them and retries on the next run.
         result_sink: Given by save_to_db, which saves each genus as soon as

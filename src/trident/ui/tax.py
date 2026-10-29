@@ -5,13 +5,17 @@ import pandas as pd
 import streamlit as st
 
 
-from trident.core.utils import SETTING_LABELS, pluralize, species_for_sequences
+from trident.core.utils import (
+    SETTING_LABELS,
+    failed_items,
+    pluralize,
+    species_for_sequences,
+)
 from trident.core import config
 import trident.pipelines as pipe
 
 from trident.ui.ui import (
     record_empty_step,
-    failed_items,
     show_failed_items_banner,
     lazy_expander,
     styled_or_plain,
@@ -182,7 +186,8 @@ def worms_search_workflow():
                 key="worms_marine_only",
                 help=(
                     "Restrict WoRMS expansion to marine-flagged species "
-                    "(default). Uncheck to also include non-marine WoRMS records."
+                    "(default). WoRMS counts brackish species as marine too. "
+                    "Uncheck to also include non-marine WoRMS records."
                 ),
             )
             save_widget("worms_marine_only")

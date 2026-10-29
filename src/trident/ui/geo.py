@@ -7,6 +7,7 @@ import streamlit as st
 from trident.core.utils import (
     AREA_LABELS,
     SETTING_LABELS,
+    failed_items,
     pluralize,
     species_for_sequences,
 )
@@ -22,7 +23,6 @@ from trident.clients.gbif import (
 
 from trident.ui.ui import (
     record_empty_step,
-    failed_items,
     show_failed_items_banner,
     lazy_expander,
     styled_or_plain,

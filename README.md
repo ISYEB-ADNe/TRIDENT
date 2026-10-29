@@ -187,7 +187,7 @@ The settings of each step are detailed below. Defaults are those used by the app
 
 | Setting | Default | Meaning |
 |---|---|---|
-| Marine species only | Yes | Expand each genus to its marine species only; uncheck to also add non-marine WoRMS records. |
+| Marine species only | Yes | Expand each genus to its marine species only (WoRMS counts brackish species as marine too); uncheck to also add non-marine WoRMS records. |
 | Exclude species already rejected by MOL | Yes | For each sequence, leave out the species added by TAX that BLAST returned for it but that the MOL filter did not keep. A species rejected for one sequence is kept for the others. |
 
 </details>

@@ -866,22 +866,6 @@ def record_empty_step(
     reset_state_after(df_key)
 
 
-def failed_items(df) -> list[str]:
-    """Items whose query failed in the call that returned *df*.
-
-    Read from ``df.attrs["failed_items"]``, set by ``save_to_db``. Empty when
-    *df* is missing or did not come from a cached step. An item reported as a
-    full cache key (a tuple) is shown by its first value, e.g. the sequence id.
-    """
-    if df is None:
-        return []
-    names = (
-        str(x[0] if isinstance(x, tuple) else x)
-        for x in df.attrs.get("failed_items", [])
-    )
-    return list(dict.fromkeys(names))
-
-
 def show_failed_items_banner(
     failed,
     item: str = "item",

@@ -16,11 +16,15 @@ from trident.clients.bold import (
 )
 import trident.pipelines as pipe
 
-from trident.core.utils import SETTING_LABELS, count_phrase, species_for_sequences
+from trident.core.utils import (
+    SETTING_LABELS,
+    count_phrase,
+    failed_items,
+    species_for_sequences,
+)
 from trident.ui.ui import (
     RETRY_EMPTY,
     record_empty_step,
-    failed_items,
     show_failed_items_banner,
     show_filter_success,
     lazy_expander,

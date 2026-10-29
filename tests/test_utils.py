@@ -121,36 +121,56 @@ def test_to_binomial_keeps_the_species_a_qualifier_refers_to():
     assert to_binomial("Odobenus rosmarus rosmarus") == "Odobenus rosmarus"
 
 
-def test_step_log_shows_progress_between_items_and_counts_them_all_at_the_end():
-    """Between two progress lines the items go to DEBUG, so a progress line
-    says how many are done; a notable item is always shown as itself, and the
-    end line counts every item."""
+def test_step_log_shows_progress_between_items_and_counts_them_all_at_the_end(
+    monkeypatch,
+):
+    """A slow item (BOLD, about 10 s each) is shown as itself; quick items go to
+    DEBUG, and the next line shown after them is a progress line saying how
+    many are done. A notable item is always shown as itself, and the end line
+    counts every item."""
+    # Seconds: StepLog's start, then each item, then the end line.
+    clock = iter([0, 0, 3, 6, 9, 12, 16, 25, 26, 32, 33])
+    monkeypatch.setattr(StepLog, "clock", staticmethod(lambda: next(clock)))
     lines = []
     sink = logger.add(
         lambda m: lines.append((m.record["level"].name, m.record["message"]))
     )
     logger.enable("trident")  # as the app does (the package disables it)
-    log = StepLog("BOLD search", 3, "species")
-    log.ITEM_INTERVAL = 3600
+    log = StepLog("BOLD search", 9, "species")
     try:
         log.item("Gadus morhua", "45 BOLD sequences")
         log.item("Gadus ogac", "12 BOLD sequences")
         log.item("Gadus nobody", "not in BOLD", notable=True)
-        log.done("57 BOLD sequences for 2 species")
+        log.item("Gadus macrocephalus", "8 BOLD sequences")
+        log.item("Gadus minor", "2 BOLD sequences")
+        log.item("Gadus quick", "1 BOLD sequence")  # 10 s after the last shown
+        log.item("Gadus chalcogrammus", "3 BOLD sequences")  # 9 s on its own
+        log.item("Gadus fast", "4 BOLD sequences")
+        log.item("Gadus slow", "5 BOLD sequences")  # slow, after a hidden one
+        log.done("80 BOLD sequences for 8 species")
     finally:
         logger.remove(sink)
         logger.disable("trident")
-    assert lines[:3] == [
+    assert lines[:9] == [
+        ("INFO", "BOLD search 1/9: Gadus morhua, 45 BOLD sequences"),
+        ("DEBUG", "BOLD search 2/9: Gadus ogac, 12 BOLD sequences"),
+        ("INFO", "BOLD search 3/9: Gadus nobody, not in BOLD"),
+        ("DEBUG", "BOLD search 4/9: Gadus macrocephalus, 8 BOLD sequences"),
+        ("DEBUG", "BOLD search 5/9: Gadus minor, 2 BOLD sequences"),
         (
             "INFO",
-            "BOLD search: 1 of 3 species done (last: Gadus morhua, 45 BOLD sequences)",
+            "BOLD search: 6 of 9 species done (last: Gadus quick, 1 BOLD sequence)",
         ),
-        ("DEBUG", "BOLD search 2/3: Gadus ogac, 12 BOLD sequences"),
-        ("INFO", "BOLD search 3/3: Gadus nobody, not in BOLD"),
+        ("INFO", "BOLD search 7/9: Gadus chalcogrammus, 3 BOLD sequences"),
+        ("DEBUG", "BOLD search 8/9: Gadus fast, 4 BOLD sequences"),
+        (
+            "INFO",
+            "BOLD search: 9 of 9 species done (last: Gadus slow, 5 BOLD sequences)",
+        ),
     ]
-    level, end = lines[3]
+    level, end = lines[9]
     assert level == "INFO" and end.endswith(
-        ": 3 of 3 species queried, 57 BOLD sequences for 2 species"
+        ": 9 of 9 species queried, 80 BOLD sequences for 8 species"
     )
 
 

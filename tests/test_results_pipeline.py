@@ -529,7 +529,8 @@ def test_resolve_sequences_matches_the_gbif_export(monkeypatch):
 
 def test_species_flow_ends_each_candidate_once():
     """Each NCBI name and each species TAX added ends in exactly one place, from
-    TAX on under its WoRMS accepted name; other sequences do not leak in."""
+    TAX on under its WoRMS accepted name; other sequences do not leak in. A
+    species GBIF did not match ends apart from one GBIF counts left out."""
     ncbi_search_df = pd.DataFrame(
         {
             "seq_id": ["s1"] * 6 + ["s2"],
@@ -558,7 +559,7 @@ def test_species_flow_ends_each_candidate_once():
     # TAX adds Gadus rejected back, as when it keeps MOL-rejected congeners.
     tax_df = pd.DataFrame(
         {
-            "seq_id": ["s1"] * 6,
+            "seq_id": ["s1"] * 7,
             "scientificName": [
                 "Gadus macrocephalus",
                 "Gadus morhua",
@@ -566,11 +567,14 @@ def test_species_flow_ends_each_candidate_once():
                 "Gadus nobold",
                 "Gadus rejected",
                 "Gadus extra",
+                "Gadus unknown",
             ],
-            "in_mol": [True, True, False, False, False, False],
+            "in_mol": [True, True, False, False, False, False, False],
         }
     )
     geo_df = tax_df.iloc[:5]
+    # GBIF counted Gadus extra (too few records), but not Gadus unknown.
+    gbif_merge_df = tax_df.iloc[:6]
     extra_df = pd.DataFrame(
         {"seq_id": ["s1"], "scientificName": ["Gadus chalcogrammus"]}
     )
@@ -586,6 +590,7 @@ def test_species_flow_ends_each_candidate_once():
         hypo_df=hypo_df,
         excluded=["s1||Gadus macrocephalus", "s2||Gadus morhua"],
         name_table=names,
+        gbif_merge_df=gbif_merge_df,
     )
     table = species_flow_table("s1", links, ncbi_search_df, names)
 
@@ -594,6 +599,7 @@ def test_species_flow_ends_each_candidate_once():
         "Gadus rejected": "Removed by the MOL filter",
         "Salmo salar": "Not kept at TAX",
         "Gadus extra": "Not in the GEO area",
+        "Gadus unknown": "Not matched in GBIF",
         "Gadus nobold": "No BOLD proxy (EXTRA)",
         "Gadus macrocephalus": "Excluded by hand",
         "Gadus morhua": "Kept",
@@ -605,6 +611,7 @@ def test_species_flow_ends_each_candidate_once():
         "Gadus chalcogrammus",
         "Gadus nobold",
         "Gadus extra",
+        "Gadus unknown",
     }
     assert table.set_index("species").loc["Gadus macrocephalus", "identity"] == 99.0
 
@@ -612,7 +619,10 @@ def test_species_flow_ends_each_candidate_once():
 def test_lost_at_is_the_flows_last_loss():
     """A sequence without a species lost them where its flow's last loss is:
     a congener BLAST returned and the MOL filter rejected is a filter loss even
-    when TAX keeps it, and expanded species wait for EXTRA, then HYPO."""
+    when TAX keeps it, and expanded species wait for EXTRA, then HYPO. At GEO,
+    a sequence whose candidates GBIF did not match lost them there, unless
+    some were counted and found outside the area; a failed GBIF search
+    outranks both."""
     ncbi_search_df = pd.DataFrame(
         {
             "seq_id": ["s1", "s1", "s2"],
@@ -671,3 +681,35 @@ def test_lost_at_is_the_flows_last_loss():
         name_table=names,
     )
     assert flow_lost_at(links) == ("Curation", {"Gadus morhua"})
+
+    def lost_at_geo(gbif_merge_df, gbif_failed=()):
+        links = build_species_flow(
+            "s2",
+            ncbi_search_df,
+            mol_df,
+            tax_df,
+            tax_df.iloc[[1]],
+            name_table=names,
+            gbif_merge_df=gbif_merge_df,
+            gbif_failed=gbif_failed,
+        )
+        return flow_lost_at(links)
+
+    unmatched = {"Gadus morhua", "Gadus added"}
+    assert lost_at_geo(tax_df.iloc[[1]]) == ("GEO match", unmatched)
+    assert lost_at_geo(tax_df.iloc[[1, 3]]) == ("GEO", {"Gadus added"})
+    # A failed search waits for GEO to run again, whatever the others became,
+    # also when another area's count worked; EXTRA comes after GEO.
+    failed = lost_at_geo(tax_df.iloc[[1, 2, 3]], ["Gadus morhua"])
+    assert failed == ("GEO failed", {"Gadus morhua"})
+    links = build_species_flow(
+        "s2",
+        ncbi_search_df,
+        mol_df,
+        tax_df,
+        tax_df.iloc[[3]],
+        name_table=names,
+        gbif_merge_df=tax_df.iloc[[2, 3]],
+        gbif_failed=["Gadus morhua"],
+    )
+    assert flow_lost_at(links) == ("GEO failed", {"Gadus morhua"})

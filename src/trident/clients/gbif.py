@@ -1047,6 +1047,9 @@ def plot_bounding_boxes(
         "geo": dict(
             center=dict(lon=longitude, lat=latitude),
             projection_type="azimuthal equal area",
+            # Without the rotation the projection stays centred on 0°E 0°N
+            # and points far from it come out stretched
+            projection_rotation=dict(lon=longitude, lat=latitude),
             projection_scale=proj_scale,
             resolution=50,
             showland=True,

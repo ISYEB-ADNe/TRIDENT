@@ -68,6 +68,8 @@ LOSS_REASONS = {
     "MOL Filter": "no hit passing the MOL filter",
     "TAX": "no species found in WoRMS (TAX)",
     "GEO": "no candidate recorded in the area (GEO)",
+    "GEO match": "no candidate matched in GBIF (GEO)",
+    "GEO failed": "GBIF search failed for its candidates, run GEO again",
     "GEO not run": "GEO not run",
     "EXTRA": "only candidates added by TAX, none with a BOLD proxy (EXTRA)",
     "EXTRA not run": "only candidates added by TAX, EXTRA not run",
@@ -793,6 +795,8 @@ FLOW_NODES = {
     "tax_out": (2, "Not kept at TAX", "186, 176, 172"),
     "tax_mol": (2, "MOL species (TAX)", "76, 120, 168"),
     "tax_added": (2, "Added by TAX", "245, 133, 24"),
+    "gbif_failed": (3, "GBIF search failed", "186, 176, 172"),
+    "gbif_unmatched": (3, "Not matched in GBIF", "186, 176, 172"),
     "geo_out": (3, "Not in the GEO area", "186, 176, 172"),
     "geo_not_run": (3, "GEO not run", "186, 176, 172"),
     "mol_geo": (3, "MOL+GEO", "76, 120, 168"),
@@ -873,6 +877,8 @@ def build_species_flow(
     *,
     name_table,
     species_names=None,
+    gbif_merge_df=None,
+    gbif_failed=(),
 ):
     """One sequence's candidates through the steps, for the steps run so far.
 
@@ -884,6 +890,14 @@ def build_species_flow(
     Args:
         excluded: "{seq_id}||{scientificName}" keys of the candidates excluded
             by hand.
+        gbif_merge_df: The TAX species with GBIF counts (run_gbif_merge): a
+            species TAX listed without counts there ends at "Not matched in
+            GBIF" (not in GBIF, or a doubtful match) rather than "Not in the
+            GEO area". Without it, every species GEO did not keep ends at the
+            latter.
+        gbif_failed: Names of the species whose GBIF search failed, for one
+            area or more (failed_items of the search): GEO did not keep them
+            and they end at "GBIF search failed".
         name_table: See build_name_table.
         species_names: The lookup of the names' species, shared by
             build_species_flows; one for this sequence otherwise.
@@ -926,12 +940,25 @@ def build_species_flow(
 
     mol_geo = _names(geo_df, seq_id, _in_mol)
     added_geo = lookup.without(_names(geo_df, seq_id, _added), hit_keys)
-    links += [
-        ("tax_mol", "geo_out", tax_mol - mol_geo),
-        ("tax_mol", "mol_geo", mol_geo),
-        ("tax_added", "geo_out", tax_added - added_geo),
-        ("tax_added", "added_geo", added_geo),
-    ]
+    # A failed search fails the species even when another area's count
+    # worked; the others without GBIF counts were not matched.
+    failed = set(gbif_failed)
+    unmatched = (
+        set()
+        if gbif_merge_df is None
+        else (tax_mol | tax_added) - _names(gbif_merge_df, seq_id) - failed
+    )
+    for src, listed, kept in (
+        ("tax_mol", tax_mol, mol_geo),
+        ("tax_added", tax_added, added_geo),
+    ):
+        out = listed - kept
+        links += [
+            (src, "gbif_failed", out & failed),
+            (src, "gbif_unmatched", out & unmatched),
+            (src, "geo_out", out - failed - unmatched),
+        ]
+    links += [("tax_mol", "mol_geo", mol_geo), ("tax_added", "added_geo", added_geo)]
 
     names = sorted(mol_geo | added_geo)
     candidates = pd.DataFrame(
@@ -974,6 +1001,8 @@ def build_species_flows(
     excluded=(),
     *,
     name_table,
+    gbif_merge_df=None,
+    gbif_failed=(),
 ):
     """build_species_flow of each of *seq_ids*, as {seq_id: links}. The rows
     of these sequences are split by sequence once, instead of each step table
@@ -988,6 +1017,7 @@ def build_species_flows(
             "geo_df": geo_df,
             "extra_df": extra_df,
             "hypo_df": hypo_df,
+            "gbif_merge_df": gbif_merge_df,
         }.items()
     }
     by_seq = {
@@ -1019,6 +1049,7 @@ def build_species_flows(
             excluded=excluded,
             name_table=name_table,
             species_names=lookup,
+            gbif_failed=gbif_failed,
         )
         for seq_id in seq_ids
     }
@@ -1033,6 +1064,8 @@ def _nonempty(links):
 FLOW_LOSS_STEPS = {
     "filter_out": "MOL Filter",
     "tax_out": "TAX",
+    "gbif_failed": "GEO failed",
+    "gbif_unmatched": "GEO match",
     "geo_out": "GEO",
     "geo_not_run": "GEO not run",
     "no_proxy": "EXTRA",
@@ -1041,8 +1074,9 @@ FLOW_LOSS_STEPS = {
     "hypo_not_run": "HYPO not run",
     "excluded": "Curation",
 }
-# Loss nodes whose candidates still wait for a step.
-FLOW_NOT_RUN = {"geo_not_run", "extra_not_run", "hypo_not_run"}
+# Loss nodes whose candidates still wait for a step (a failed GBIF search
+# waits for GEO to run again).
+FLOW_NOT_RUN = {"geo_not_run", "gbif_failed", "extra_not_run", "hypo_not_run"}
 
 
 def flows_lost_at(
@@ -1056,6 +1090,8 @@ def flows_lost_at(
     excluded=(),
     *,
     name_table,
+    gbif_merge_df=None,
+    gbif_failed=(),
 ):
     """flow_lost_at of each of *seq_ids*, as {seq_id: (step, names)}, from
     their flows (build_species_flows, same arguments)."""
@@ -1069,6 +1105,8 @@ def flows_lost_at(
         hypo_df,
         excluded,
         name_table=name_table,
+        gbif_merge_df=gbif_merge_df,
+        gbif_failed=gbif_failed,
     )
     return {seq_id: flow_lost_at(links) for seq_id, links in flows.items()}
 
@@ -1076,8 +1114,9 @@ def flows_lost_at(
 def flow_lost_at(links):
     """Where a sequence without a species lost its last ones, with the names
     that ended there. Curation when species it had were excluded by hand (the
-    user's decision empties it, whatever its other candidates became); else a
-    step not run yet when a candidate still waits for it; else the flow's
+    user's decision empties it, whatever its other candidates became); else,
+    when candidates still wait for a step (a failed GBIF search waits for GEO),
+    the first of those steps; else the flow's
     furthest loss (FLOW_NODES runs left to right): a sequence with some species
     HYPO did not confirm and others without a BOLD proxy lost its last chance
     at HYPO.
@@ -1092,12 +1131,13 @@ def flow_lost_at(links):
     losses = [(dst, names) for _, dst, names in links if dst in FLOW_LOSS_STEPS]
     if not losses:
         return None, set()
+    # Among candidates waiting for a step, the step to run first.
     last, _ = max(
         losses,
         key=lambda loss: (
             loss[0] == "excluded",
             loss[0] in FLOW_NOT_RUN,
-            rank[loss[0]],
+            -rank[loss[0]] if loss[0] in FLOW_NOT_RUN else rank[loss[0]],
         ),
     )
     return FLOW_LOSS_STEPS[last], set().union(
