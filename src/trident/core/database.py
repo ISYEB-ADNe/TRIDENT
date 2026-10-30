@@ -45,9 +45,13 @@ def get_connection(
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     try:
-        # A new file can give back the space of deleted rows (see
-        # _after_deleting); an existing one keeps its mode until a VACUUM.
-        conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
+        # A new database can give back the space of deleted rows (see
+        # _after_deleting). Set on an empty one only (no page yet, even when
+        # an earlier connection left the file): on an existing one it changes
+        # nothing but still writes the header, so reading a saved analysis
+        # would change its bytes.
+        if conn.execute("PRAGMA page_count").fetchone()[0] == 0:
+            conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
         yield conn
         conn.commit()
     except Exception:

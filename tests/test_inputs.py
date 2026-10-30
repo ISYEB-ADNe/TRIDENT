@@ -37,6 +37,19 @@ def test_upload_opens_the_saved_analysis_with_the_same_content(tmp_path, monkeyp
     assert _saved_copy(changed, "AbuDhabi") is None
     # A file without sequences is never opened, even when it is in the folder.
     assert _saved_copy(not_analysis, "Other") is None
+    # Looking at the saved analyses leaves their bytes as they were...
+    assert (tmp_path / "AbuDhabi.db").read_bytes() == data
+    assert (tmp_path / "AbuDhabi (2).db").read_bytes() == data
+    # ...and a copy committed elsewhere without a change to its rows is still
+    # the same analysis.
+    committed = tmp_path / "elsewhere" / "AbuDhabi.db"
+    committed.parent.mkdir()
+    committed.write_bytes(data)
+    with sqlite3.connect(committed) as conn:
+        conn.execute("PRAGMA user_version = 0")
+    conn.close()
+    assert committed.read_bytes() != data
+    assert _saved_copy(committed.read_bytes(), "AbuDhabi") == tmp_path / "AbuDhabi.db"
 
 
 def _upload(text, name):

@@ -182,12 +182,30 @@ def _free_name(name: str, usable=lambda path: not path.exists()) -> str:
     return candidate
 
 
+def _same_sqlite_content(path: Path, data: bytes) -> bool:
+    """Whether the SQLite file at *path* holds these bytes, outside the header
+    fields any commit rewrites even when no row changed: the change counter
+    (bytes 24-27), and the counter and SQLite version of that commit (92-99).
+    Read only when the sizes match, then compared by 1 MB blocks: as fast as
+    one comparison, without a second copy of the file in memory."""
+    if path.stat().st_size != len(data):
+        return False
+    saved = path.read_bytes()
+    if saved[:24] != data[:24] or saved[28:92] != data[28:92]:
+        return False
+    block = 1 << 20
+    return all(
+        saved[i : i + block] == data[i : i + block]
+        for i in range(100, len(data), block)
+    )
+
+
 def _saved_copy(data: bytes, name: str, active: str | None = None) -> Path | None:
-    """The saved analysis of the results folder with exactly these bytes, or
-    None: uploading it again opens it instead of copying it. Among identical
-    copies, the *active* one comes first (its upload is then seen as already
-    active), then the one named *name*. A file without sequences is not an
-    analysis to open.
+    """The saved analysis of the results folder with the same content as these
+    bytes (_same_sqlite_content), or None: uploading it again opens it instead of
+    copying it. Among identical copies, the *active* one comes first (its
+    upload is then seen as already active), then the one named *name*. A file
+    without sequences is not an analysis to open.
 
     Not on Streamlit Cloud, where the folder holds every user's analyses.
     """
@@ -198,11 +216,7 @@ def _saved_copy(data: bytes, name: str, active: str | None = None) -> Path | Non
         key=lambda path: (path.stem != active, path.stem != name),
     )
     for path in paths:
-        if (
-            path.stat().st_size == len(data)
-            and path.read_bytes() == data
-            and _has_sequences(path)
-        ):
+        if _same_sqlite_content(path, data) and _has_sequences(path):
             return path
     return None
 
@@ -405,11 +419,19 @@ def handle_file_upload():
                 _open_saved(saved)
             return
 
+        free_name = _free_name(name)
         restore_name = st.text_input(
             "Save as:",
-            value=_free_name(name),
+            value=free_name,
             key=f"restore_name_{st.session_state.fasta_uploader_key}",
         ).strip()
+        # Not on Cloud: the folder holds every user's analyses, never compared.
+        if free_name != name and restore_name == free_name and not is_streamlit_cloud():
+            st.caption(
+                f"A file named **{name}** is already in the results folder, "
+                f"so this one is saved as **{free_name}**. Type **{name}** to "
+                "replace it."
+            )
         if not restore_name:
             st.error("Enter a name for the analysis.")
             return
