@@ -15,7 +15,6 @@ from trident.core import config
 import trident.pipelines as pipe
 
 from trident.ui.ui import (
-    ready,
     record_empty_step,
     lazy_expander,
     styled_or_plain,
@@ -29,7 +28,6 @@ from trident.ui.ui import (
     with_same_species,
     sequence_selector,
     run_step_workflow,
-    next_step_button,
     require_prerequisite,
     persist_value,
     save_widget,
@@ -571,7 +569,5 @@ def tax_analysis():
     if st.session_state.tax_df is not None:
         st.divider()
         display_worms_results()
-        if ready("tax_df") is not None:
-            next_step_button("Next: GEO ➔", "geo")
 
     st.divider()

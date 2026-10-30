@@ -50,7 +50,6 @@ from trident.ui.ui import (
     run_with_progress,
     sequence_selector,
     run_step_workflow,
-    next_step_button,
     require_prerequisite,
 )
 
@@ -1039,6 +1038,5 @@ def mol_analysis():
     if ready("mol_df") is not None:
         st.divider()
         display_ncbi_results()
-        next_step_button("Next: TAX ➔", "tax")
 
     st.divider()

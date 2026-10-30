@@ -42,7 +42,6 @@ from trident.ui.ui import (
     reset_state_after,
     sequence_selector,
     run_step_workflow,
-    next_step_button,
     require_prerequisite,
     check_legends,
     highlight_check_result,
@@ -984,7 +983,5 @@ def hypo_analysis():
     if hypo_df is not None and not hypo_df.empty:
         st.divider()
         display_hypo_results()
-        if ready("hypo_df") is not None:
-            next_step_button("Open Results ➔", "results")
 
     st.divider()

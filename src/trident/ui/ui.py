@@ -840,13 +840,17 @@ NEXT_STEP_STYLE = """<style>
 </style>"""
 
 
-def next_step_button(label: str, tab_id: str):
-    """Render a right-aligned navigation button, green: its step is done."""
+def step_buttons(
+    back: tuple[str, str] | None = None, next_: tuple[str, str] | None = None
+):
+    """The navigation row of a tab, each button a (label, tab id): on the
+    left the way back to the step before, grey; on the right the next step,
+    green, given once this step is done."""
     st.html(NEXT_STEP_STYLE)
-    cols = st.columns([5, 1])
-    with cols[1]:
-        if st.button(label, key=f"next_step_{tab_id}", width="stretch"):
-            st.session_state["requested_tab"] = tab_id
+    left, _, right = st.columns([1, 4, 1])
+    for col, button, key in ((left, back, "back_step"), (right, next_, "next_step")):
+        if button and col.button(button[0], key=f"{key}_{button[1]}", width="stretch"):
+            st.session_state["requested_tab"] = button[1]
             st.rerun()
 
 

@@ -175,6 +175,29 @@ def main():
 
         dashboard.dashboard_main()
 
+    _step_navigation(current_tab)
+
+
+# The tabs of the analysis in order; Parameters is not a step.
+STEP_TABS = [tab for tab in TAB_CONFIG if tab != "parameters"]
+
+
+def _step_navigation(tab_id: str):
+    """Under every step after Start, whatever the tab showed: back to the step
+    before, and on to the next once this one is done (its ✅ in the tab bar).
+    Start offers the next step in its own analysis box."""
+    if tab_id not in STEP_TABS[1:]:
+        return
+    i = STEP_TABS.index(tab_id)
+    back = STEP_TABS[i - 1]
+    after = STEP_TABS[i + 1 : i + 2]
+    state_key = TAB_CONFIG[tab_id][1]
+    done = after and state_key and ui.ready(state_key) is not None
+    ui.step_buttons(
+        back=(f"⬅ {TAB_CONFIG[back][0]}", back),
+        next_=(f"{TAB_CONFIG[after[0]][0]} ➔", after[0]) if done else None,
+    )
+
 
 if __name__ == "__main__":
     main()

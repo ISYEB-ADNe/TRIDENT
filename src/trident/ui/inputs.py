@@ -22,7 +22,7 @@ from trident.core.utils import pluralize
 from trident.ui.ui import (
     column_config,
     lazy_expander,
-    next_step_button,
+    step_buttons,
     prefill_settings,
     reset_for_new_analysis,
 )
@@ -505,7 +505,7 @@ def display_analysis_status():
 
         display_fasta_sequence_table()
 
-        next_step_button("Next: MOL ➔", "mol")
+        step_buttons(next_=("Next: MOL ➔", "mol"))
 
 
 def upload_and_start_analysis():

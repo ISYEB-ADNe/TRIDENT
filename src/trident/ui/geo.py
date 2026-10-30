@@ -40,7 +40,6 @@ from trident.ui.ui import (
     with_same_species,
     sequence_selector,
     run_step_workflow,
-    next_step_button,
     require_prerequisite,
 )
 
@@ -927,6 +926,5 @@ def geo_analysis():
     if ready("geo_df") is not None:
         st.divider()
         display_gbif_results()
-        next_step_button("Next: EXTRA ➔", "extra")
 
     st.divider()

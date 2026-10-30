@@ -41,7 +41,6 @@ from trident.ui.ui import (
     sequence_selector,
     display_same_species,
     run_step_workflow,
-    next_step_button,
     require_prerequisite,
 )
 
@@ -756,6 +755,5 @@ def extra_analysis():
             st.info(
                 "No BOLD sequence matched a GEO candidate: the EXTRA list is empty."
             )
-        next_step_button("Next: HYPO ➔", "hypo")
 
     st.divider()
