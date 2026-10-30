@@ -11,6 +11,7 @@ from trident.pipelines.results_pipeline import (
     build_results_df,
     CHECK_HIT_NOTE,
     flow_lost_at,
+    flows_lost_at,
     filter_excluded_results,
     build_gbif_export_df,
     build_species_flow,
@@ -691,7 +692,7 @@ def test_lost_at_is_the_flows_last_loss():
             tax_df.iloc[[1]],
             name_table=names,
             gbif_merge_df=gbif_merge_df,
-            gbif_failed=gbif_failed,
+            failed={"gbif_search_failed": gbif_failed},
         )
         return flow_lost_at(links)
 
@@ -710,6 +711,61 @@ def test_lost_at_is_the_flows_last_loss():
         tax_df.iloc[[3]],
         name_table=names,
         gbif_merge_df=tax_df.iloc[[2, 3]],
-        gbif_failed=["Gadus morhua"],
+        failed={"gbif_search_failed": ["Gadus morhua"]},
     )
     assert flow_lost_at(links) == ("GEO failed", {"Gadus morhua"})
+
+
+def test_a_candidate_whose_query_failed_ends_at_its_steps_failed_box():
+    """Failed queries the user went on without are no results: a species
+    whose genus WoRMS could not be asked about, and a candidate whose BOLD
+    search, HYPO search or HYPO check failed, end at that step's failed box,
+    not at "Not kept at TAX", "No BOLD proxy" or "Not validated by HYPO"; a
+    sequence whose MOL BLAST search failed is lost at "MOL failed", not at "no
+    NCBI hit"."""
+    ncbi_search_df = pd.DataFrame(
+        {"seq_id": "s1", "scientificName": ["Gadus morhua", "Salmo salar"]}
+    )
+    mol_df = ncbi_search_df
+    added = ["Gadus nobold", "Gadus unsearched", "Gadus unchecked"]
+    tax_df = pd.DataFrame(
+        {
+            "seq_id": "s1",
+            "scientificName": ["Gadus morhua", *added],
+            "in_mol": [True, False, False, False],
+        }
+    )
+    extra_df = tax_df.iloc[2:]  # Gadus nobold has no proxy
+    failed = {
+        "tax_failed": ["Salmo"],
+        "bold_search_failed": ["Gadus nobold"],
+        "hypo_search_failed": [("s1", "Gadus unsearched")],
+        "hypo_check_failed": [("s1", "Gadus unchecked")],
+    }
+    links = build_species_flow(
+        "s1",
+        ncbi_search_df,
+        mol_df,
+        tax_df,
+        tax_df,
+        extra_df,
+        extra_df.iloc[:0],
+        name_table=_names({}),
+        failed=failed,
+    )
+    ends = {dst: names for _, dst, names in links if dst != "added_geo"}
+    assert ends["tax_failed"] == {"Salmo salar"}
+    assert ends["bold_search_failed"] == {"Gadus nobold"}
+    assert ends["hypo_search_failed"] == {"Gadus unsearched"}
+    assert ends["hypo_check_failed"] == {"Gadus unchecked"}
+    assert not {"tax_out", "no_proxy", "hypo_out"} & set(ends)
+
+    no_hits = ncbi_search_df.iloc[:0]
+    lost = flows_lost_at(
+        ["s2"],
+        no_hits,
+        no_hits,
+        name_table=_names({}),
+        failed={"ncbi_search_failed": ["s2"]},
+    )
+    assert lost == {"s2": ("MOL failed", set())}

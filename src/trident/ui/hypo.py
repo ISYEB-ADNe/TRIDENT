@@ -17,10 +17,10 @@ import trident.pipelines as pipe
 from trident.pipelines.results_pipeline import add_check_hit
 
 from trident.ui.ui import (
+    ready,
     RANK_COLUMNS,
     coerce_stored_value,
     record_empty_step,
-    show_failed_items_banner,
     show_filter_success,
     lazy_expander,
     styled_or_plain,
@@ -263,7 +263,9 @@ def hypo_search_job(
 
     # 5. Save Results and Cleanup
     st.session_state.hypo_merge_df = hypo_merge_df
-    st.session_state.hypo_search_failed = failed_items(hypo_search_df)
+    st.session_state.hypo_search_failed = pipe.failed_search_candidates(
+        failed_items(hypo_search_df, whole=True), extra_df, queries_df
+    )
     st.session_state.hypo_merge_params = hypo_merge_params
     logsink.close()
     progress_bar.empty()
@@ -299,12 +301,12 @@ def hypo_search_workflow():
         )
         n_searches, n_seqs = pipe.count_hypo_searches(extra_df, queries_df)
         n_skipped = extra_df["seq_id"].nunique() - n_seqs
-        ready = (
+        ready_text = (
             f"Ready to run **{n_searches:,}** BOLD proxy searches against NCBI "
             f"for **{n_seqs:,}** sequences."
         )
         if n_skipped:
-            ready += (
+            ready_text += (
                 f" {n_skipped:,} {pluralize(n_skipped, 'sequence')} without a MOL "
                 f"species in the TAX list {pluralize(n_skipped, 'is')} "
                 "not searched."
@@ -324,22 +326,15 @@ def hypo_search_workflow():
             current_params=current_params,
             job_fn=hypo_search_job,
             job_kwargs={"params": current_params, "queries_df": queries_df},
-            new_string=ready,
+            new_string=ready_text,
             btn_key="hypo_search_apply",
+            failed_key="hypo_search_failed",
             logs_prefix="hypo_",
             threaded=True,
             status_label=f"🔍 Running **{n_searches:,}** proxy searches on NCBI BLAST...",
         )
 
     # Raw Results Preview
-    if mode == "IDENTICAL":
-        show_failed_items_banner(
-            st.session_state.hypo_search_failed,
-            "BOLD sequence",
-            "BOLD sequences",
-            source="NCBI BLAST",
-            gives_up=True,
-        )
     if mode != "NEW" and st.session_state.hypo_merge_df is not None:
         with lazy_expander(
             f"Inspect full HYPO search results ({len(st.session_state.hypo_merge_df):,} hits)",
@@ -603,7 +598,7 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
         on_poll=_poll,
     )
     st.session_state.hypo_check_df = hypo_check_df
-    st.session_state.hypo_check_failed = failed_items(hypo_check_df)
+    st.session_state.hypo_check_failed = failed_items(hypo_check_df, whole=True)
     st.session_state.hypo_check_params = hypo_check_params
     st.session_state.hypo_check_summary_df = pipe.build_hypo_check_summary(
         hypo_check_df, mol_query_cover()
@@ -742,7 +737,6 @@ def hypo_final_check_workflow():
                 "hypo_df",
                 "hypo_params",
                 lambda: pipe.empty_hypo_results(st.session_state.extra_df),
-                failed_key="hypo_search_failed",
                 params=st.session_state.hypo_filter_params,
             )
             return
@@ -759,20 +753,13 @@ def hypo_final_check_workflow():
             job_kwargs={"params": current_params},
             new_string=f"Ready to check **{unique_species:,}** species in GenBank.",
             btn_key="hypo_check_apply",
+            failed_key="hypo_check_failed",
             logs_prefix="hypo_check_",
             threaded=True,
             status_label="🔍 Running NCBI BLAST...",
         )
 
         # Results
-        if mode == "IDENTICAL":
-            show_failed_items_banner(
-                st.session_state.hypo_check_failed,
-                "sequence check",
-                "sequence checks",
-                source="NCBI BLAST",
-                gives_up=True,
-            )
         if mode != "NEW" and st.session_state.hypo_check_df is not None:
             st.divider()
             st.markdown("#### HYPO Check Results")
@@ -958,7 +945,6 @@ def hypo_analysis():
             "hypo_df",
             "hypo_params",
             lambda: pipe.empty_hypo_results(st.session_state.extra_df),
-            failed_key="bold_search_failed",
         )
         return
 
@@ -966,19 +952,22 @@ def hypo_analysis():
     hypo_search_workflow()
 
     # HYPO Data Filtering
-    if st.session_state.hypo_merge_df is not None:
+    if ready("hypo_merge_df") is not None:
         st.divider()
         hypo_filter_workflow()
 
     # Final NCBI Check
-    if st.session_state.hypo_filter_df is not None:
+    if ready("hypo_filter_df") is not None:
         st.divider()
         hypo_final_check_workflow()
 
     # Final HYPO Results (only after check completes)
-    if st.session_state.hypo_df is not None and not st.session_state.hypo_df.empty:
+    # The HYPO list shows while its failed checks wait; Results waits for them.
+    hypo_df = st.session_state.hypo_df
+    if hypo_df is not None and not hypo_df.empty:
         st.divider()
         display_hypo_results()
-        next_step_button("Open Results ➔", "results")
+        if ready("hypo_df") is not None:
+            next_step_button("Open Results ➔", "results")
 
     st.divider()

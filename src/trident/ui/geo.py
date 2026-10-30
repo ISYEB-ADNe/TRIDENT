@@ -22,8 +22,8 @@ from trident.clients.gbif import (
 )
 
 from trident.ui.ui import (
+    ready,
     record_empty_step,
-    show_failed_items_banner,
     lazy_expander,
     styled_or_plain,
     column_config,
@@ -416,14 +416,10 @@ def gbif_search_workflow():
             job_kwargs={"params": current_params},
             new_string=f"Ready to count the GBIF occurrences of **{unique_sp}** species.",
             btn_key="gbif_search_apply",
+            failed_key="gbif_search_failed",
             logs_prefix="gbif_",
             threaded=True,
             status_label="🗺️ Running GBIF search...",
-        )
-
-    if mode == "IDENTICAL":
-        show_failed_items_banner(
-            st.session_state.gbif_search_failed, "species", "species", source="GBIF"
         )
 
     # Results Preview
@@ -916,7 +912,6 @@ def geo_analysis():
             "geo_df",
             "geo_params",
             lambda: pipe.empty_geo_results(st.session_state.tax_df),
-            failed_key="tax_failed",
         )
         return
 
@@ -924,12 +919,12 @@ def geo_analysis():
     gbif_search_workflow()
 
     # Filtering
-    if st.session_state.gbif_search_df is not None:
+    if ready("gbif_search_df") is not None:
         st.divider()
         gbif_filter_workflow()
 
     # Results
-    if st.session_state.geo_df is not None:
+    if ready("geo_df") is not None:
         st.divider()
         display_gbif_results()
         next_step_button("Next: EXTRA ➔", "extra")

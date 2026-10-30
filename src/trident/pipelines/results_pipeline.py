@@ -24,6 +24,7 @@ taxa (run_higher_taxa_lookup), saved per name like the other steps' searches.
 """
 
 from collections.abc import Callable
+from typing import NamedTuple
 
 import pandas as pd
 from loguru import logger
@@ -69,7 +70,6 @@ LOSS_REASONS = {
     "TAX": "no species found in WoRMS (TAX)",
     "GEO": "no candidate recorded in the area (GEO)",
     "GEO match": "no candidate matched in GBIF (GEO)",
-    "GEO failed": "GBIF search failed for its candidates, run GEO again",
     "GEO not run": "GEO not run",
     "EXTRA": "only candidates added by TAX, none with a BOLD proxy (EXTRA)",
     "EXTRA not run": "only candidates added by TAX, EXTRA not run",
@@ -77,6 +77,90 @@ LOSS_REASONS = {
     "HYPO not run": "only candidates added by TAX, HYPO not run",
     "Curation": "all its candidates excluded by hand",
 }
+
+
+class FailedStep(NamedTuple):
+    """A search whose queries can fail: its name, the item it queries (with
+    its plural when pluralize cannot make it), the source, the step a
+    sequence is lost at when the failures took its last candidates and why,
+    what a failure means for an item, and the request that failed when it is
+    not the item's own."""
+
+    step: str
+    item: str
+    source: str
+    lost_at: str
+    reason: str
+    plural: str | None = None
+    lost: str = "could not be queried"
+    request: str | None = None
+
+    @property
+    def gives_up(self) -> bool:
+        """Whether the source also fails a query it gave up waiting for
+        (NCBI BLAST jobs stuck in NCBI's queue)."""
+        return self.source == "NCBI BLAST"
+
+    def label(self, n: int) -> str:
+        return pluralize(n, self.item, self.plural)
+
+
+# The searches whose failed queries the app holds the next steps for and a
+# flow can be given (see build_species_flow), in pipeline order, by the name
+# of their failed items in the app. Each but the MOL search (whose sequence
+# has no hits to show) is also the loss node of the flow where those
+# candidates end.
+FAILED_STEPS = {
+    "ncbi_search_failed": FailedStep(
+        "MOL BLAST search",
+        "sequence",
+        "NCBI BLAST",
+        "MOL failed",
+        "MOL BLAST search failed, run MOL again",
+    ),
+    "tax_failed": FailedStep(
+        "TAX WoRMS search",
+        "name or genus",
+        "WoRMS",
+        "TAX failed",
+        "WoRMS search failed for its species, run TAX again",
+        plural="names or genera",
+    ),
+    "gbif_search_failed": FailedStep(
+        "GEO GBIF search",
+        "species",
+        "GBIF",
+        "GEO failed",
+        "GBIF search failed for its candidates, run GEO again",
+    ),
+    "bold_search_failed": FailedStep(
+        "EXTRA BOLD search",
+        "species",
+        "BOLD",
+        "EXTRA failed",
+        "only candidates added by TAX, BOLD search failed for some, run EXTRA again",
+    ),
+    # A candidate with several proxies may still be validated by another.
+    "hypo_search_failed": FailedStep(
+        "HYPO BLAST search",
+        "candidate",
+        "NCBI BLAST",
+        "HYPO search failed",
+        "only candidates added by TAX, HYPO BLAST search failed for some, run "
+        "HYPO again",
+        lost="could not be fully tested",
+        request="the NCBI BLAST search of one or more of their BOLD proxies",
+    ),
+    "hypo_check_failed": FailedStep(
+        "HYPO check",
+        "candidate",
+        "NCBI BLAST",
+        "HYPO check failed",
+        "only candidates added by TAX, HYPO check failed for some, run the check again",
+        lost="could not be checked",
+    ),
+}
+LOSS_REASONS |= {step.lost_at: step.reason for step in FAILED_STEPS.values()}
 
 # MOL+GEO only, for the GBIF export: the NCBI names of the species' MOL hits,
 # joined by ", " as the export writes them.
@@ -792,17 +876,21 @@ FLOW_NODES = {
     "ncbi": (0, "NCBI hits", "76, 120, 168"),
     "filter_out": (1, "Removed by the MOL filter", "186, 176, 172"),
     "mol": (1, "MOL list", "76, 120, 168"),
+    "tax_failed": (2, "WoRMS search failed", "186, 176, 172"),
     "tax_out": (2, "Not kept at TAX", "186, 176, 172"),
     "tax_mol": (2, "MOL species (TAX)", "76, 120, 168"),
     "tax_added": (2, "Added by TAX", "245, 133, 24"),
-    "gbif_failed": (3, "GBIF search failed", "186, 176, 172"),
+    "gbif_search_failed": (3, "GBIF search failed", "186, 176, 172"),
     "gbif_unmatched": (3, "Not matched in GBIF", "186, 176, 172"),
     "geo_out": (3, "Not in the GEO area", "186, 176, 172"),
     "geo_not_run": (3, "GEO not run", "186, 176, 172"),
     "mol_geo": (3, "MOL+GEO", "76, 120, 168"),
     "added_geo": (3, "Added, in the GEO area", "245, 133, 24"),
     "hypo": (4, "Validated by HYPO", "245, 133, 24"),
+    "bold_search_failed": (4, "BOLD search failed", "186, 176, 172"),
     "no_proxy": (4, "No BOLD proxy (EXTRA)", "186, 176, 172"),
+    "hypo_search_failed": (4, "HYPO BLAST search failed", "186, 176, 172"),
+    "hypo_check_failed": (4, "HYPO check failed", "186, 176, 172"),
     "hypo_out": (4, "Not validated by HYPO", "186, 176, 172"),
     "extra_not_run": (4, "EXTRA not run", "186, 176, 172"),
     "hypo_not_run": (4, "HYPO not run", "186, 176, 172"),
@@ -878,7 +966,7 @@ def build_species_flow(
     name_table,
     species_names=None,
     gbif_merge_df=None,
-    gbif_failed=(),
+    failed=None,
 ):
     """One sequence's candidates through the steps, for the steps run so far.
 
@@ -895,9 +983,12 @@ def build_species_flow(
             GBIF" (not in GBIF, or a doubtful match) rather than "Not in the
             GEO area". Without it, every species GEO did not keep ends at the
             latter.
-        gbif_failed: Names of the species whose GBIF search failed, for one
-            area or more (failed_items of the search): GEO did not keep them
-            and they end at "GBIF search failed".
+        failed: The failed items of each search the user went on without, by
+            FAILED_STEPS name: the candidates they would have kept end at the
+            step's "failed" box (FLOW_FAILED) rather than at a loss they did
+            not have. Names or genera for WoRMS, species for GBIF (for one
+            area or more) and BOLD, (seq_id, scientificName) for the HYPO
+            search and check.
         name_table: See build_name_table.
         species_names: The lookup of the names' species, shared by
             build_species_flows; one for this sequence otherwise.
@@ -907,6 +998,7 @@ def build_species_flow(
         at least one name.
     """
     lookup = species_names or _SpeciesNames(name_table)
+    failed = _failed_sets(failed)
     hits = _names(ncbi_search_df, seq_id)
     mol = _names(mol_df, seq_id)
     key_of = lookup.keys(hits | mol)
@@ -927,8 +1019,21 @@ def build_species_flow(
     # MOL species (by their WoRMS name) that TAX does not list.
     mol_species = lookup.species(mol)
     tax_mol_keys = set(lookup.keys(tax_mol).values())
+    tax_out = lookup.without(mol_species, tax_mol_keys)
+    # A species whose name or genus WoRMS could not be asked about.
+    worms_failed = failed.get("tax_failed", set())
     links += [
-        ("mol", "tax_out", lookup.without(mol_species, tax_mol_keys)),
+        *_split_losses(
+            "mol",
+            tax_out,
+            [
+                (
+                    "tax_failed",
+                    {n for n in tax_out if {n, n.split()[0]} & worms_failed},
+                )
+            ],
+            "tax_out",
+        ),
         ("mol", "tax_mol", tax_mol),
     ]
     if geo_df is None:
@@ -942,22 +1047,20 @@ def build_species_flow(
     added_geo = lookup.without(_names(geo_df, seq_id, _added), hit_keys)
     # A failed search fails the species even when another area's count
     # worked; the others without GBIF counts were not matched.
-    failed = set(gbif_failed)
-    unmatched = (
-        set()
-        if gbif_merge_df is None
-        else (tax_mol | tax_added) - _names(gbif_merge_df, seq_id) - failed
-    )
+    geo_losses = [
+        ("gbif_search_failed", failed.get("gbif_search_failed", set())),
+        (
+            "gbif_unmatched",
+            set()
+            if gbif_merge_df is None
+            else (tax_mol | tax_added) - _names(gbif_merge_df, seq_id),
+        ),
+    ]
     for src, listed, kept in (
         ("tax_mol", tax_mol, mol_geo),
         ("tax_added", tax_added, added_geo),
     ):
-        out = listed - kept
-        links += [
-            (src, "gbif_failed", out & failed),
-            (src, "gbif_unmatched", out & unmatched),
-            (src, "geo_out", out - failed - unmatched),
-        ]
+        links += _split_losses(src, listed - kept, geo_losses, "geo_out")
     links += [("tax_mol", "mol_geo", mol_geo), ("tax_added", "added_geo", added_geo)]
 
     names = sorted(mol_geo | added_geo)
@@ -976,18 +1079,55 @@ def build_species_flow(
         return _nonempty(links)
     # HYPO tests only the added species EXTRA found a BOLD proxy for.
     proxied = _names(extra_df, seq_id)
-    links.append(("added_geo", "no_proxy", added_geo - proxied))
+    links += _split_losses(
+        "added_geo",
+        added_geo - proxied,
+        [("bold_search_failed", failed.get("bold_search_failed", set()))],
+        "no_proxy",
+    )
     if hypo_df is None:
         links.append(("added_geo", "hypo_not_run", added_geo & proxied))
         return _nonempty(links)
     hypo = _names(hypo_df, seq_id) & added_geo & proxied
+    hypo_out = (added_geo & proxied) - hypo
+    # The candidates whose HYPO check, or else proxy search, failed.
+    links += _split_losses(
+        "added_geo",
+        hypo_out,
+        [
+            (key, {n for n in hypo_out if (seq_id, n) in failed.get(key, set())})
+            for key in ("hypo_check_failed", "hypo_search_failed")
+        ],
+        "hypo_out",
+    )
     links += [
-        ("added_geo", "hypo_out", (added_geo & proxied) - hypo),
         ("added_geo", "hypo", hypo),
         ("hypo", "kept", hypo - excluded),
         ("hypo", "excluded", hypo & excluded),
     ]
     return _nonempty(links)
+
+
+def _failed_sets(failed):
+    """*failed* (see build_species_flow) with each step's items as a set,
+    once for all the flows."""
+    return {
+        key: items if isinstance(items, (set, frozenset)) else set(items)
+        for key, items in (failed or {}).items()
+    }
+
+
+def _split_losses(src, names, failed_nodes, rest):
+    """Links from *src* for the lost *names*: those of each failed node, in
+    order, go to it (the first that holds a name takes it), the others to
+    the plain loss node *rest*."""
+    links = []
+    left = set(names)
+    for node, members in failed_nodes:
+        links.append((src, node, left & members))
+        left -= members
+    links.append((src, rest, left))
+    return links
 
 
 def build_species_flows(
@@ -1002,7 +1142,7 @@ def build_species_flows(
     *,
     name_table,
     gbif_merge_df=None,
-    gbif_failed=(),
+    failed=None,
 ):
     """build_species_flow of each of *seq_ids*, as {seq_id: links}. The rows
     of these sequences are split by sequence once, instead of each step table
@@ -1036,6 +1176,8 @@ def build_species_flows(
     mol = set() if mol_df is None else set(mol_df["scientificName"].dropna())
     lookup.keys(names | lookup.species(mol))
 
+    failed = _failed_sets(failed)
+
     def rows_of(key, seq_id):
         if key not in by_seq:
             return None
@@ -1049,7 +1191,7 @@ def build_species_flows(
             excluded=excluded,
             name_table=name_table,
             species_names=lookup,
-            gbif_failed=gbif_failed,
+            failed=failed,
         )
         for seq_id in seq_ids
     }
@@ -1060,11 +1202,14 @@ def _nonempty(links):
     return [link for link in links if link[2]]
 
 
+# The loss nodes of failed queries, each waiting for its step to run again.
+FLOW_FAILED = {
+    node: step.lost_at for node, step in FAILED_STEPS.items() if node in FLOW_NODES
+}
 # The step each loss node of the flow stands for, as Results names it.
 FLOW_LOSS_STEPS = {
     "filter_out": "MOL Filter",
     "tax_out": "TAX",
-    "gbif_failed": "GEO failed",
     "gbif_unmatched": "GEO match",
     "geo_out": "GEO",
     "geo_not_run": "GEO not run",
@@ -1073,10 +1218,11 @@ FLOW_LOSS_STEPS = {
     "hypo_out": "HYPO",
     "hypo_not_run": "HYPO not run",
     "excluded": "Curation",
+    **FLOW_FAILED,
 }
-# Loss nodes whose candidates still wait for a step (a failed GBIF search
-# waits for GEO to run again).
-FLOW_NOT_RUN = {"geo_not_run", "gbif_failed", "extra_not_run", "hypo_not_run"}
+# Loss nodes whose candidates still wait for a step: not run yet, or run
+# again for its failed queries.
+FLOW_NOT_RUN = {"geo_not_run", "extra_not_run", "hypo_not_run", *FLOW_FAILED}
 
 
 def flows_lost_at(
@@ -1091,10 +1237,11 @@ def flows_lost_at(
     *,
     name_table,
     gbif_merge_df=None,
-    gbif_failed=(),
+    failed=None,
 ):
     """flow_lost_at of each of *seq_ids*, as {seq_id: (step, names)}, from
-    their flows (build_species_flows, same arguments)."""
+    their flows (build_species_flows, same arguments). A sequence whose MOL
+    BLAST search failed (in *failed*) is lost at "MOL failed" (FAILED_STEPS)."""
     flows = build_species_flows(
         seq_ids,
         ncbi_search_df,
@@ -1106,17 +1253,22 @@ def flows_lost_at(
         excluded,
         name_table=name_table,
         gbif_merge_df=gbif_merge_df,
-        gbif_failed=gbif_failed,
+        failed=failed,
     )
-    return {seq_id: flow_lost_at(links) for seq_id, links in flows.items()}
+    mol_failed = set((failed or {}).get("ncbi_search_failed", ()))
+    mol_step = FAILED_STEPS["ncbi_search_failed"].lost_at
+    return {
+        seq_id: (mol_step, set()) if seq_id in mol_failed else flow_lost_at(links)
+        for seq_id, links in flows.items()
+    }
 
 
 def flow_lost_at(links):
     """Where a sequence without a species lost its last ones, with the names
     that ended there. Curation when species it had were excluded by hand (the
     user's decision empties it, whatever its other candidates became); else,
-    when candidates still wait for a step (a failed GBIF search waits for GEO),
-    the first of those steps; else the flow's
+    when candidates still wait for a step (not run, or run again for its
+    failed queries), the first of those steps; else the flow's
     furthest loss (FLOW_NODES runs left to right): a sequence with some species
     HYPO did not confirm and others without a BOLD proxy lost its last chance
     at HYPO.

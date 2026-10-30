@@ -65,6 +65,7 @@ from .extra_pipeline import (
 
 from .hypo_pipeline import (
     count_hypo_searches,
+    failed_search_candidates,
     hypo_queries,
     hypo_check_queries,
     prepare_hypo_input,
@@ -149,6 +150,7 @@ __all__ = [
     "build_extra_summary",
     "build_extra_seq_summary",
     "count_hypo_searches",
+    "failed_search_candidates",
     "hypo_queries",
     "prepare_hypo_input",
     "run_hypo_search",

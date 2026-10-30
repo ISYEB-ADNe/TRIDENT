@@ -31,7 +31,7 @@ import trident.pipelines as pipe
 
 
 from trident.ui.ui import (
-    show_failed_items_banner,
+    ready,
     show_filter_success,
     lazy_expander,
     styled_or_plain,
@@ -293,20 +293,13 @@ def ncbi_search_workflow():
             job_kwargs={"params": current_params},
             new_string=f"Ready to analyze **{n_seqs}** sequences.",
             btn_key="ncbi_search_apply",
+            failed_key="ncbi_search_failed",
             logs_prefix="ncbi_",
             threaded=True,
             status_label=f"🔍 Running NCBI BLAST on **{n_seqs}** sequences...",
         )
 
     # Search overview and raw results
-    if mode == "IDENTICAL":
-        show_failed_items_banner(
-            st.session_state.ncbi_search_failed,
-            "sequence",
-            "sequences",
-            source="NCBI BLAST",
-            gives_up=True,
-        )
     if mode != "NEW":
         display_ncbi_search_overview()
 
@@ -1038,12 +1031,12 @@ def mol_analysis():
     ncbi_search_workflow()
 
     # Filtering Card
-    if st.session_state.ncbi_search_df is not None:
+    if ready("ncbi_search_df") is not None:
         st.divider()
         ncbi_filter_workflow()
 
     # Results Display
-    if st.session_state.mol_df is not None:
+    if ready("mol_df") is not None:
         st.divider()
         display_ncbi_results()
         next_step_button("Next: TAX ➔", "tax")

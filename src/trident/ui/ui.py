@@ -22,11 +22,11 @@ from PIL import Image
 
 from trident.clients.ncbi import BLAST_SLOW_THREADS
 from trident.core.constants import BLAST_DATABASE
-from trident.core.utils import pluralize
+from trident.core.utils import name_list
 from trident.core import stop
 from trident.core.database import get_connection
 from trident.pipelines.names import replace_source_rows, same_species_groups
-from trident.pipelines.results_pipeline import CHECK_HIT_NOTE
+from trident.pipelines.results_pipeline import CHECK_HIT_NOTE, FAILED_STEPS
 from trident.logging import get_log_level
 from trident.ui.defaults import (
     NCBI_GAP_MIN_TOP_DEFAULT,
@@ -379,6 +379,9 @@ class AppState:
     db_path: str = ""
     sequences_id: list[str] | None = None
     sequences_df: "pd.DataFrame | None" = None
+    # The failed items the user chose to go on without, by failed-list field
+    # (see held_steps): kept across step resets, cleared with the analysis.
+    continued_failures: dict[str, list] = field(default_factory=dict)
 
     # The *_logs fields hold each step's log lines, written and read by
     # prefix (StreamlitLogSink, display_run_button).
@@ -439,7 +442,8 @@ class AppState:
     hypo_logs: list[tuple[str, str]] = field(default_factory=list)
     hypo_search_flag: bool = False
     hypo_merge_params: dict[str, Any] = field(default_factory=dict)
-    hypo_search_failed: list[str] = field(default_factory=list)
+    # (seq_id, scientificName) candidates, as hypo_check_failed.
+    hypo_search_failed: list[tuple[str, str]] = field(default_factory=list)
     hypo_merge_df: "pd.DataFrame | None" = None
     hypo_filter_flag: bool = False
     hypo_filter_params: dict[str, Any] = field(default_factory=dict)
@@ -447,7 +451,7 @@ class AppState:
     hypo_check_logs: list[tuple[str, str]] = field(default_factory=list)
     hypo_check_flag: bool = False
     hypo_check_params: dict[str, Any] = field(default_factory=dict)
-    hypo_check_failed: list[str] = field(default_factory=list)
+    hypo_check_failed: list[tuple[str, str]] = field(default_factory=list)
     hypo_check_df: "pd.DataFrame | None" = None
     hypo_check_summary_df: "pd.DataFrame | None" = None
     hypo_params: dict[str, Any] = field(default_factory=dict)
@@ -553,6 +557,8 @@ def reset_state_after(key_name: str):
         if name in no_reset:
             continue
         st.session_state[name] = default[name]
+        # A step reset forgets that the user went on without its failures.
+        st.session_state.get("continued_failures", {}).pop(name, None)
         if name.endswith("_flag"):
             drop_jobs(name)
     for f in flds[start_idx:]:
@@ -687,11 +693,14 @@ def run_step_workflow(
     status_label: str = "",
     before_button: Callable[[], None] | None = None,
     stoppable: bool = True,
+    failed_key: str | None = None,
 ) -> str:
     """Handle execution + button for a pipeline step. Returns mode.
 
     A threaded step gets a stop button while it runs, unless not *stoppable*
-    (a local computation, which has no queries to keep).
+    (a local computation, which has no queries to keep). A search step names
+    the AppState field of its failed items (*failed_key*, see FAILED_STEPS):
+    their banner shows under the button whenever the step has a result.
     """
     mode = get_analysis_status(df_key, params_key, current_params, keys=compare_keys)
 
@@ -736,6 +745,10 @@ def run_step_workflow(
         else:
             # A stop clicked once the jobs had all finished came too late.
             st.session_state.get(STOPPED_STEPS, set()).discard(flag_key)
+            # The new run's failures are the user's to accept again; a
+            # stopped or failed run leaves the last ones, and the choice.
+            if failed_key:
+                st.session_state.continued_failures.pop(failed_key, None)
 
         st.session_state[flag_key] = False
         st.session_state["requested_tab"] = tab_id
@@ -754,6 +767,8 @@ def run_step_workflow(
     clicked, cache_mode = display_run_button(
         mode, new_string, btn_key=btn_key, logs_prefix=logs_prefix, starts=starts
     )
+    if failed_key and mode != "NEW":
+        show_failed_items_banner(failed_key)
     if clicked:
         # Only ERASE_SAVED forces a fresh run. Otherwise the step
         # reuses the items saved for its current settings and runs the others,
@@ -822,8 +837,72 @@ def next_step_button(label: str, tab_id: str):
             st.rerun()
 
 
+def failed_item_label(item) -> str:
+    """A failed item as the app shows it: a (sequence, species) candidate as
+    "sequence: species"."""
+    return ": ".join(map(str, item)) if isinstance(item, tuple) else str(item)
+
+
+# The AppState fields in pipeline order, by name.
+_FIELD_ORDER = {f.name: i for i, f in enumerate(fields(AppState))}
+
+
+def _accepted(name: str) -> bool:
+    """Whether the user went on without every failed item of *name* (a
+    failed-item field) still standing."""
+    failed = st.session_state.get(name) or []
+    accepted = (st.session_state.get("continued_failures") or {}).get(name)
+    return accepted is not None and set(failed) <= set(accepted)
+
+
+def held_steps(key: str) -> list[str]:
+    """The failed-item fields before *key* in AppState (the steps before it)
+    with failed items the user has not chosen to go on without: until they
+    are retried or accepted, nothing after them uses their results."""
+    return [
+        name
+        for name in FAILED_STEPS
+        if _FIELD_ORDER[name] < _FIELD_ORDER[key]
+        and st.session_state.get(name)
+        and not _accepted(name)
+    ]
+
+
+def ready(key: str):
+    """The session value *key*, or None while a step before it is held (see
+    held_steps)."""
+    return None if held_steps(key) else st.session_state.get(key)
+
+
+def continued_failures() -> dict[str, list]:
+    """The failed items the user went on without, by failed-item field, for
+    the steps whose failures still stand."""
+    return {
+        name: list(failed)
+        for name in FAILED_STEPS
+        if (failed := st.session_state.get(name)) and _accepted(name)
+    }
+
+
+def held_message(key: str, where: str) -> str | None:
+    """What waits for the first step held before *key*, and what to do (see
+    held_steps); None when no step is held. *where* says what waits."""
+    held = held_steps(key)
+    if not held:
+        return None
+    step = FAILED_STEPS[held[0]].step
+    return (
+        f"⚠️ Some queries of the {step} failed: {where}. Run that step again, "
+        "or go on with incomplete results on its tab."
+    )
+
+
 def require_prerequisite(key: str, message: str) -> bool:
-    """Check that a session state key exists, show info message if not."""
+    """Check that a session state key exists and no step before it is held,
+    show info message if not."""
+    if held := held_message(key, "this step waits for it"):
+        st.warning(held)
+        return False
     if st.session_state.get(key) is None:
         st.info(message)
         return False
@@ -835,7 +914,6 @@ def record_empty_step(
     params_key: str,
     build_empty: Callable[[], pd.DataFrame],
     *,
-    failed_key: str | None,
     params: dict | None = None,
 ) -> None:
     """Record the empty result of a step that has nothing to process.
@@ -844,21 +922,10 @@ def record_empty_step(
     pipelines' ``empty_*_results``). Once recorded, later tabs and Results see
     a finished, empty step rather than one not run yet. *params* are the
     settings recorded for the step; None (the default) shows it as skipped in
-    the dashboard. Recorded once; a change upstream resets it.
-
-    If queries of the previous step failed (*failed_key*), the empty input may
-    come from those failures: nothing is recorded, and the user is asked to
-    re-run that step. Pass None when the previous list is not empty.
+    the dashboard. Recorded once; a change upstream resets it. Called only
+    behind require_prerequisite or ready() (see held_steps), so an empty list
+    never comes from failed queries the user has not accepted.
     """
-    failed = (st.session_state.get(failed_key) or []) if failed_key else []
-    if failed:
-        query_word = pluralize(len(failed), "query")
-        st.warning(
-            f"⚠️ {len(failed)} {query_word} of the previous step failed, so its "
-            "list may be empty only because of them. Re-run that step to retry "
-            "them before going on."
-        )
-        return
     if st.session_state.get(df_key) is not None:
         return
     st.session_state[df_key] = build_empty()
@@ -866,37 +933,50 @@ def record_empty_step(
     reset_state_after(df_key)
 
 
-def show_failed_items_banner(
-    failed,
-    item: str = "item",
-    items: str = "items",
-    source: str = "",
-    gives_up: bool = False,
-) -> None:
-    """Warn about items whose query failed in the last run.
+def show_failed_items_banner(failed_key: str) -> None:
+    """Warn about items whose query failed in the last run of a step, with a
+    button to go on with incomplete results.
 
     Failed items are not cached (see ``failure_sink`` in ``save_to_db``), so a
-    plain re-run queries them again while everything else is reused.
-    *gives_up* says the source also fails a query it gave up waiting for (NCBI
-    BLAST jobs stuck in NCBI's queue).
+    run of the step asks for them again. Until then the next steps wait (see
+    held_steps), unless the user goes on with incomplete results, which
+    Results then lists.
     """
-    failed = list(failed or [])
+    failed = list(st.session_state.get(failed_key) or [])
     if not failed:
         return
-    shown = ", ".join(failed[:10])
-    if len(failed) > 10:
-        shown += f", ... (+{len(failed) - 10} more)"
-    request = f"the {source} request" if source else "the request"
-    label = pluralize(len(failed), item, items)
+    items = FAILED_STEPS[failed_key]
+    shown = name_list([failed_item_label(item) for item in failed], shown=10)
     outcome = (
-        "failed after retries or was given up" if gives_up else "failed after retries"
+        "failed after retries or was given up"
+        if items.gives_up
+        else "failed after retries"
     )
+    request = items.request or f"the {items.source} request"
+    head = (
+        f"⚠️ {len(failed)} {items.label(len(failed))} {items.lost}: {request} {outcome}"
+    )
+    if _accepted(failed_key):
+        st.warning(
+            f"{head}. You went on with incomplete results: Results lists "
+            f"them.\n\n{shown}"
+        )
+        return
     st.warning(
-        f"⚠️ {len(failed)} {label} could not be queried: {request} {outcome}, "
-        "so they were not saved. Run the step again to retry only these; the "
-        "rest is reused.\n\n"
-        f"{shown}"
+        f"{head}. The next steps wait until you run the step again, or go on "
+        f"with incomplete results.\n\n{shown}"
     )
+    if st.button(
+        "Go on with incomplete results",
+        key=f"continue_{failed_key}",
+        type="secondary",
+        help=(
+            "Go on with the results that came back: Results will be incomplete "
+            f"and will list the failed {items.label(len(failed))}."
+        ),
+    ):
+        st.session_state.continued_failures[failed_key] = failed
+        st.rerun()
 
 
 # Widget key of the selected sequence, shared by every tab's selector.

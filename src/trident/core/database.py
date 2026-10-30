@@ -806,11 +806,12 @@ class CacheStrategy(ABC):
 
 # Version of the results of the steps computed locally (FullCache, and
 # CustomCache with versioned=True). Their key is made of settings and data, not
-# code: bump it when a step's output columns change, so each step computes its
-# result again (locally) instead of returning one saved with the old columns.
+# code: bump it when a step's output columns or rows change, so each step
+# computes its result again (locally) instead of returning one saved by the
+# old code.
 # It is part of the step's params, so the later steps' keys follow. Searches
 # are not versioned: a bump never sends their requests again.
-RESULTS_VERSION = 1
+RESULTS_VERSION = 2
 
 
 class FullCache(CacheStrategy):

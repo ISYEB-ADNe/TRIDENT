@@ -15,8 +15,8 @@ from trident.core import config
 import trident.pipelines as pipe
 
 from trident.ui.ui import (
+    ready,
     record_empty_step,
-    show_failed_items_banner,
     lazy_expander,
     styled_or_plain,
     column_config,
@@ -215,7 +215,7 @@ def worms_search_workflow():
             pipe.prepare_worms_input(mol_df, st.session_state.name_table)
         )
 
-        mode = run_step_workflow(
+        run_step_workflow(
             df_key="tax_df",
             params_key="tax_params",
             flag_key="worms_search_flag",
@@ -229,17 +229,11 @@ def worms_search_workflow():
             job_kwargs={"params": current_params},
             new_string=f"Ready to expand **{unique_genera}** genera into full species lists.",
             btn_key="worms_search_apply",
+            failed_key="tax_failed",
             logs_prefix="worms_",
             threaded=True,
             status_label="🔍 Expanding genera from MOL list...",
         )
-        if mode == "IDENTICAL":
-            show_failed_items_banner(
-                st.session_state.tax_failed,
-                "name or genus",
-                "names or genera",
-                source="WoRMS",
-            )
 
 
 def render_worms_metrics():
@@ -566,7 +560,6 @@ def tax_analysis():
             "tax_df",
             "tax_params",
             lambda: pipe.empty_tax_results(st.session_state.mol_df),
-            failed_key="ncbi_search_failed",
         )
         return
 
@@ -574,9 +567,11 @@ def tax_analysis():
     worms_search_workflow()
 
     # Results Display
+    # The step's own list shows while its failures wait; GEO waits for them.
     if st.session_state.tax_df is not None:
         st.divider()
         display_worms_results()
-        next_step_button("Next: GEO ➔", "geo")
+        if ready("tax_df") is not None:
+            next_step_button("Next: GEO ➔", "geo")
 
     st.divider()

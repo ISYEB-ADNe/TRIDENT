@@ -22,9 +22,11 @@ from Bio.SeqRecord import SeqRecord
 import trident.clients.ncbi as ncbi
 import trident.pipelines.hypo_pipeline as hypo_pipeline
 from trident.core.database import get_connection
+from trident.core.utils import failed_items
 from trident.pipelines.names import build_name_table, gbif_name_rows
 from trident.pipelines.hypo_pipeline import (
     count_hypo_searches,
+    failed_search_candidates,
     hypo_check_queries,
     hypo_queries,
     prepare_hypo_input,
@@ -282,6 +284,71 @@ def test_finalize_after_a_check_that_found_nothing(monkeypatch):
     assert set(hypo_pipeline.HYPO_CHECK_COLUMNS) <= set(hypo_check_df.columns)
     assert list(out["scientificName"]) == ["Gadus morhua"]
     assert pd.isna(out.iloc[0]["hypo_check_identity"])
+
+
+def test_a_candidate_whose_check_failed_is_left_out_of_the_hypo_list(monkeypatch):
+    """A failed check is no check that found nothing: its candidate does not
+    become a hypothesis without a GenBank hit."""
+
+    def blast(batch, entrez_query=None, **kwargs):
+        return None if "Gadus ogac" in entrez_query else pd.DataFrame()
+
+    monkeypatch.setattr(ncbi, "submit_blast_batch", blast)
+    hypo_filter_df = pd.DataFrame(
+        {
+            "seq_id": ["t1", "t1"],
+            "scientificName": ["Gadus morhua", "Gadus ogac"],
+            "dna_sequence": ["ACGT", "ACGT"],
+            "proxy_identity": [95.0, 95.0],
+            "proxy_query_cover": [100.0, 100.0],
+        }
+    ).reindex(columns=hypo_pipeline.HYPO_HIT_COLUMNS)
+
+    hypo_check_df = inspect.unwrap(run_hypo_check)(hypo_filter_df)
+    out = _finalize(hypo_filter_df, hypo_check_df)
+
+    assert list(out["scientificName"]) == ["Gadus morhua"]
+
+
+def test_a_failed_proxy_search_names_the_candidates_of_that_proxy(
+    tmp_path, monkeypatch
+):
+    """A failed proxy search is reported as the candidates whose sequence
+    searched that BOLD record under that query, also when another of their
+    proxies was searched, not those of the same record under another query."""
+    query_a, query_b = '"Gadus morhua"[orgn]', '"Gadus chalcogrammus"[orgn]'
+
+    def blast(
+        batch, batch_id, circuit, progress_handler=None, entrez_query=None, **kwargs
+    ):
+        failed = [r.id for r in batch if r.id == "P1" and entrez_query == query_a]
+        return [], failed
+
+    monkeypatch.setattr(hypo_pipeline, "blast_batch", blast)
+    extra_df = pd.DataFrame(
+        {
+            "seq_id": ["t1", "t1", "t1", "t2"],
+            "scientificName": [
+                "Gadus ogac",
+                "Gadus ogac",
+                "Gadus macrocephalus",
+                "Gadus ogac",
+            ],
+            "proxy_id": ["P1", "P3", "P2", "P1"],
+            "proxy_sequence": ["ACGT", "GGCC", "TTGG", "ACGT"],
+        }
+    )
+    queries_df = pd.DataFrame(
+        {"seq_id": ["t1", "t2"], "entrez_query": [query_a, query_b]}
+    )
+    sequences = prepare_hypo_input(extra_df, queries_df)
+
+    df, _ = run_hypo_search(sequences, db_path=str(tmp_path / "hypo.db"))
+
+    failed = failed_items(df, whole=True)
+    assert failed_search_candidates(failed, extra_df, queries_df) == [
+        ("t1", "Gadus ogac")
+    ]
 
 
 # --- run_hypo_search: failure handling ---

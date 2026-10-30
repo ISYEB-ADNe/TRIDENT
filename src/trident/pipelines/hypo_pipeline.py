@@ -161,6 +161,21 @@ def prepare_hypo_input(extra_df, queries_df):
     return input_data
 
 
+def failed_search_candidates(failed, extra_df, queries_df) -> list[tuple]:
+    """The (seq_id, scientificName) candidates of the proxy searches that
+    failed: *failed* holds their cache items, (proxy record id, Entrez query),
+    as run_hypo_search reports them; a proxy record is the BOLD sequence of
+    every candidate whose sequence has that query."""
+    queries = _query_map(queries_df)
+    rows = extra_df.assign(
+        proxy_id=extra_df["proxy_id"].astype(str),
+        query=extra_df["seq_id"].map(queries),
+    )
+    keys = set(failed)
+    hit = rows[[key in keys for key in zip(rows["proxy_id"], rows["query"])]]
+    return list(dict.fromkeys(zip(hit["seq_id"], hit["scientificName"])))
+
+
 ### SEARCH ###
 
 
@@ -868,7 +883,9 @@ def finalize_hypo_results(
 
     Produces one row per (seq_id, scientificName) with the best NCBI check
     hit stats. Only species not already in MOL, so the final output can be
-    concatenated with geo_df to form the complete species list.
+    concatenated with geo_df to form the complete species list. Only the
+    candidates checked: one whose check failed is left out, as a failed check
+    would otherwise read as a check that found nothing.
 
     Args:
         hypo_filter_df: Filtered results from run_hypo_filter (has taxonomy from GEO).
@@ -899,9 +916,10 @@ def finalize_hypo_results(
         ],
     ).rename(columns=CHECK_HIT_COLUMNS)
 
-    # Keep best proxy hit per (seq_id, scientificName)
+    # Keep best proxy hit per (seq_id, scientificName), of the candidates checked
+    checked = hypo_check_df[["seq_id", "scientificName"]].drop_duplicates()
     hypo_df = top_hit_per_group(
-        hypo_filter_df,
+        hypo_filter_df.merge(checked, on=["seq_id", "scientificName"]),
         keys=["seq_id", "scientificName"],
         sort=["proxy_identity", "proxy_query_cover"],
     ).reset_index(drop=True)

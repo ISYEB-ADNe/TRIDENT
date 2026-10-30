@@ -24,6 +24,8 @@ from trident.core.utils import (
 from trident.pipelines.names import resolved_names, species_key, species_of
 
 from trident.pipelines.results_pipeline import (
+    FAILED_STEPS,
+    LOSS_REASONS,
     build_species_flows,
     plot_species_flow,
     species_flow_table,
@@ -41,6 +43,11 @@ from trident.ui.defaults import NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
 from trident.ui.geo import display_gbif_sequence_table
 from trident.ui.ui import (
     column_config,
+    continued_failures,
+    failed_item_label,
+    held_message,
+    held_steps,
+    ready,
     SELECTED_SEQUENCE_KEY,
     persist_value,
     save_widget,
@@ -136,13 +143,13 @@ FLOW_TABLES = [
 
 def _flow_tables():
     """The arguments of build_species_flows (and flows_lost_at) besides the
-    sequences, for the steps run."""
+    sequences, for the steps run and not held (see held_steps)."""
     state = st.session_state
     return {
-        **{key: state.get(key) for key in FLOW_TABLES},
+        **{key: ready(key) for key in FLOW_TABLES},
         # The GBIF search's session table is the merge of TAX with its counts.
         "gbif_merge_df": state.get("gbif_search_df"),
-        "gbif_failed": state.get("gbif_search_failed") or [],
+        "failed": continued_failures(),
         "excluded": state.get("excluded_results", []),
         "name_table": state.get("name_table"),
     }
@@ -153,16 +160,21 @@ def _lost_at(seq_ids):
     table changes: rebuilding a flow per sequence on every rerun takes seconds
     on thousands of sequences. Steps replace their tables, never edit them, so
     the same objects mean the same data. An exclusion changes only its own
-    sequence's flow."""
+    sequence's flow, and the failures gone on without are compared by value."""
     state = st.session_state
     tables = [
-        state.get(key)
-        for key in [*FLOW_TABLES, "gbif_search_df", "gbif_search_failed", "name_table"]
+        *(ready(key) for key in FLOW_TABLES),
+        *(state.get(key) for key in ["gbif_search_df", "name_table"]),
     ]
+    failed = continued_failures()
     excluded = set(state.get("excluded_results", []))
     memo = state.get("lost_at_memo")
-    if memo is None or any(old is not new for old, new in zip(memo["tables"], tables)):
-        memo = {"tables": tables, "excluded": excluded, "lost": {}}
+    if (
+        memo is None
+        or memo["failed"] != failed
+        or any(old is not new for old, new in zip(memo["tables"], tables))
+    ):
+        memo = {"tables": tables, "failed": failed, "excluded": excluded, "lost": {}}
         state.lost_at_memo = memo
     lost = memo["lost"]
     for key in memo["excluded"] ^ excluded:
@@ -529,6 +541,7 @@ def show_assignments(assignments, curated_df, threshold):
 LOST_AT_TABLES = {
     "MOL Filter": ("ncbi_search_df", "This sequence's NCBI hits:"),
     "TAX": ("mol_df", "This sequence's MOL hits:"),
+    "TAX failed": ("mol_df", "This sequence's MOL hits:"),
     "GEO match": (
         "tax_df",
         "This sequence's candidates with no confident GBIF match (also listed "
@@ -536,6 +549,18 @@ LOST_AT_TABLES = {
     ),
     "GEO failed": ("tax_df", "This sequence's candidates whose GBIF search failed:"),
     "EXTRA": ("geo_df", "This sequence's candidates added by TAX:"),
+    "EXTRA failed": (
+        "geo_df",
+        "This sequence's candidates added by TAX whose BOLD search failed:",
+    ),
+    "HYPO search failed": (
+        "geo_df",
+        "This sequence's candidates added by TAX whose HYPO BLAST search failed:",
+    ),
+    "HYPO check failed": (
+        "geo_df",
+        "This sequence's candidates added by TAX whose HYPO check failed:",
+    ),
     "EXTRA not run": ("geo_df", "This sequence's candidates added by TAX:"),
     "HYPO": ("geo_df", "The candidates added by TAX that HYPO tested:"),
     "HYPO not run": ("geo_df", "This sequence's candidates added by TAX:"),
@@ -609,7 +634,10 @@ def show_species_flow(seq_id):
     state = st.session_state
     links = build_species_flows([seq_id], **_flow_tables())[seq_id]
     if not links:
-        st.info("No NCBI hit for this sequence.")
+        if seq_id in continued_failures().get("ncbi_search_failed", []):
+            st.info(f"{LOSS_REASONS['MOL failed']}.")
+        else:
+            st.info("No NCBI hit for this sequence.")
         return
     st.caption(
         "Candidate species of this sequence at each step. Hover over a box or "
@@ -944,6 +972,17 @@ def show_exports(curated_df):
                 "second follows Darwin Core and the FAIRe taxa table, ready for "
                 "a GBIF submission."
             )
+            if continued_failures():
+                st.caption(
+                    "⚠️ They leave out the failed queries you went on without "
+                    "(listed at the top of the page)."
+                )
+            if held := held_steps("excluded_results"):
+                st.caption(
+                    f"⚠️ They leave out the {FAILED_STEPS[held[0]].step} and "
+                    "the steps after it, which wait for its failed queries (see "
+                    "the top of the page)."
+                )
             export_cols = [c for c in EXPORT_COLS if c in curated_df.columns]
             dl1, dl2 = st.columns(2)
             # Built when clicked, from the results shown now.
@@ -1030,24 +1069,52 @@ def show_exports(curated_df):
 # -------------------------------------------------------------------
 
 
+def show_failures_notice():
+    """Say which step waits for its failed queries (Results leaves it out, and
+    the steps after it), and which failed items the user went on without.
+    Returns whether a step waits."""
+    held = held_message(
+        "excluded_results", "Results leaves out that step and the ones after it"
+    )
+    if held:
+        st.warning(held)
+    continued = continued_failures()
+    if continued:
+        lines = "\n".join(
+            f"- {FAILED_STEPS[name].step}: "
+            f"{name_list([failed_item_label(item) for item in failed])}"
+            for name, failed in continued.items()
+        )
+        st.warning(
+            "⚠️ These results are incomplete: they leave out queries that "
+            "failed, as you chose to go on without them. Run their step again "
+            f"to complete the results.\n\n{lines}"
+        )
+    return held is not None
+
+
 def results_main():
     """Render the Results tab."""
     st.title("📦 Analysis Results")
     st.divider()
+    held = show_failures_notice()
 
-    if st.session_state.get("geo_df") is None:
-        st.info(
-            "📊 No results yet. Complete at least steps 1–3 "
-            "(MOL → TAX → GEO) to see results."
-        )
+    geo_df = ready("geo_df")
+    if geo_df is None:
+        # A held step was run: the notice above says what it waits for.
+        if not held:
+            st.info(
+                "📊 No results yet. Complete at least steps 1–3 "
+                "(MOL → TAX → GEO) to see results."
+            )
         show_exports(None)
         return
 
     results_df = build_results_df(
         sequences_df=st.session_state.sequences_df,
-        geo_df=st.session_state.geo_df,
-        mol_df=st.session_state.mol_df,
-        hypo_df=st.session_state.get("hypo_df"),
+        geo_df=geo_df,
+        mol_df=ready("mol_df"),
+        hypo_df=ready("hypo_df"),
         name_table=st.session_state.get("name_table"),
     )
     if results_df.empty:

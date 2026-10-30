@@ -301,20 +301,20 @@ def describe_settings(params: dict) -> str:
     )
 
 
-def failed_items(df) -> list[str]:
+def failed_items(df, whole: bool = False) -> list:
     """Items whose query failed in the call that returned *df*.
 
     Read from ``df.attrs["failed_items"]``, set by ``save_to_db``. Empty when
     *df* is missing or did not come from a cached step. An item reported as a
-    full cache key (a tuple) is shown by its first value, e.g. the sequence id.
+    full cache key (a tuple) is given by its first value, e.g. the sequence id,
+    or whole if *whole*.
     """
     if df is None:
         return []
-    names = (
-        str(x[0] if isinstance(x, tuple) else x)
-        for x in df.attrs.get("failed_items", [])
-    )
-    return list(dict.fromkeys(names))
+    items = df.attrs.get("failed_items", [])
+    if not whole:
+        items = (str(x[0] if isinstance(x, tuple) else x) for x in items)
+    return list(dict.fromkeys(items))
 
 
 class StepLog:

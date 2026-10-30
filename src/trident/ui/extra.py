@@ -23,9 +23,9 @@ from trident.core.utils import (
     species_for_sequences,
 )
 from trident.ui.ui import (
+    ready,
     RETRY_EMPTY,
     record_empty_step,
-    show_failed_items_banner,
     show_filter_success,
     lazy_expander,
     COL,
@@ -128,10 +128,6 @@ def bold_search_workflow():
                 "extra_df",
                 "extra_params",
                 lambda: pipe.empty_extra_results(st.session_state.geo_df),
-                # GBIF failures matter only if they may have emptied GEO.
-                failed_key=(
-                    "gbif_search_failed" if st.session_state.geo_df.empty else None
-                ),
             )
             return
 
@@ -173,6 +169,7 @@ def bold_search_workflow():
             job_kwargs={"params": current_params},
             new_string=f"Ready to query BOLD for **{species_to_query}** species.",
             btn_key="bold_search_apply",
+            failed_key="bold_search_failed",
             logs_prefix="bold_",
             threaded=True,
             status_label=f"🗺️ Running BOLD search for **{species_to_query}** species...",
@@ -180,11 +177,8 @@ def bold_search_workflow():
 
     # Raw Results Preview
     if mode != "NEW" and st.session_state.bold_search_df is not None:
-        # Both banners describe the last run, so only while its settings hold.
+        # The banner describes the last run, so only while its settings hold.
         if mode == "IDENTICAL":
-            show_failed_items_banner(
-                st.session_state.bold_search_failed, "species", "species", source="BOLD"
-            )
             show_species_without_sequences_banner()
         n_sequences = len(with_sequences(st.session_state.bold_search_df))
         with lazy_expander(
@@ -458,7 +452,6 @@ def bold_filter_workflow():
                 "extra_df",
                 "extra_params",
                 lambda: pipe.empty_extra_results(st.session_state.geo_df),
-                failed_key="bold_search_failed",
                 # BOLD was queried: record its settings, not "skipped".
                 params=st.session_state.bold_search_params,
             )
@@ -746,12 +739,12 @@ def extra_analysis():
     bold_search_workflow()
 
     # BOLD Data Filtering
-    if st.session_state.bold_search_df is not None:
+    if ready("bold_search_df") is not None:
         st.divider()
         bold_filter_workflow()
 
     # Results Display
-    extra_df = st.session_state.extra_df
+    extra_df = ready("extra_df")
     if extra_df is not None:
         st.divider()
         if not extra_df.empty:

@@ -12,6 +12,7 @@ from trident.clients import bold, ncbi, worms
 from trident.pipelines.extra_pipeline import EXTRA_COLUMNS
 from trident.pipelines.geo_pipeline import GEO_LIST_COLUMNS
 from trident.pipelines.hypo_pipeline import (
+    HYPO_CHECK_COLUMNS,
     HYPO_COLUMNS,
     HYPO_SEARCH_COLUMNS,
 )
@@ -100,9 +101,13 @@ def _lists():
     )[HYPO_SEARCH_COLUMNS]
     hypo_merge, _ = pipe.run_hypo_merge(search, extra, queries, extra_params={})
     hypo_filter, _ = pipe.run_hypo_filter(hypo_merge)
-    # The check, as the app gets it when nothing was checked
-    no_check, _ = pipe.run_hypo_check(hypo_filter.iloc[:0])
-    hypo, _ = pipe.finalize_hypo_results(hypo_filter, no_check)
+    # The check of the candidate, as run_hypo_check saves one without a hit
+    no_hit = (
+        hypo_filter[["seq_id", "scientificName", "dna_sequence"]]
+        .assign(hit_found=False)
+        .reindex(columns=HYPO_CHECK_COLUMNS)
+    )
+    hypo, _ = pipe.finalize_hypo_results(hypo_filter, no_hit)
     return mol, tax, geo, extra, hypo
 
 

@@ -78,7 +78,7 @@ def _app_config():
 def get_tab_label(tab_id: str) -> str:
     """Builds tab labels with dynamic checkmarks."""
     name, state_key = TAB_CONFIG.get(tab_id, (tab_id, None))
-    is_complete = state_key and st.session_state.get(state_key) is not None
+    is_complete = state_key and ui.ready(state_key) is not None
     return f"{'✅ ' if is_complete else ''}{name}"
 
 

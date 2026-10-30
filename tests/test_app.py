@@ -70,6 +70,60 @@ def test_an_analysis_starts_only_once_a_contact_email_is_set(tmp_path, monkeypat
     assert not at.exception
 
 
+def test_a_step_with_failed_queries_holds_the_next_ones_until_accepted():
+    """The steps after a search with failed queries do not use its results
+    until it is run again or the user goes on with incomplete results, which
+    Results then lists; a new run that fails holds them again."""
+
+    def page():
+        import pandas as pd
+        import streamlit as st
+
+        from trident.ui.results import show_failures_notice
+        from trident.ui.ui import (
+            init_session_state,
+            require_prerequisite,
+            run_step_workflow,
+        )
+
+        def search(*, force_rerun, retry_empty):
+            st.session_state.runs = st.session_state.get("runs", 0) + 1
+            st.session_state.ncbi_search_df = pd.DataFrame({"seq_id": ["m1"]})
+            st.session_state.ncbi_search_params = {}
+            st.session_state.ncbi_search_failed = (
+                ["m2"] if st.session_state.runs == 1 else ["m3"]
+            )
+            st.session_state.mol_df = pd.DataFrame({"seq_id": ["m1"]})
+
+        init_session_state()
+        run_step_workflow(
+            df_key="ncbi_search_df",
+            params_key="ncbi_search_params",
+            flag_key="ncbi_search_flag",
+            tab_id="mol",
+            compare_keys=[],
+            current_params={},
+            job_fn=search,
+            new_string="",
+            btn_key="search",
+            failed_key="ncbi_search_failed",
+        )
+        st.session_state.tax_opens = require_prerequisite("mol_df", "no MOL list")
+        show_failures_notice()
+
+    at = AppTest.from_function(page)
+    at.run()
+    at.button(key="search_0").click().run()
+    assert at.session_state["tax_opens"] is False
+    at.button(key="continue_ncbi_search_failed").click().run()
+    assert at.session_state["tax_opens"] is True
+    listed = [w.value for w in at.warning if "These results are incomplete" in w.value]
+    assert listed and "m2" in listed[0]
+    at.button(key="search_1").click().run()
+    assert at.session_state["tax_opens"] is False
+    assert not at.exception
+
+
 def test_changed_settings_rerun_a_step_from_its_cache_unless_erased():
     """A step run after its settings changed keeps the results saved for its
     settings: only "Erase saved results" forces it to compute everything
