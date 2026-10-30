@@ -11,7 +11,7 @@ taxa (run_higher_taxa_lookup), saved per name like the other steps' searches.
     exclusion_keys(df) → Series ("{seq_id}||{scientificName}" per row, as exclusions store it)
     filter_excluded_results(results_df, excluded) → DataFrame (excluded species rows dropped)
     build_assignments(curated_df, threshold, query_cover, lost_at) → DataFrame (one row per sequence)
-    add_check_hit(df) → DataFrame
+    add_check_result(df, ncbi_search_df, ...) → DataFrame (the HYPO check's result per candidate)
     add_low_identity_warning(df, threshold) → DataFrame
     best_identity_per_sequence(df, query_cover) → DataFrame (identity and via per sequence)
     flag_low_identity(df, threshold, best_identity) → DataFrame
@@ -26,6 +26,7 @@ taxa (run_higher_taxa_lookup), saved per name like the other steps' searches.
 from collections.abc import Callable
 from typing import NamedTuple
 
+import numpy as np
 import pandas as pd
 from loguru import logger
 
@@ -35,6 +36,13 @@ from trident.clients.worms import (
     get_aphia_records,
     pick_record,
     worms_search_url,
+)
+from trident.clients.ncbi import filter_blast_results
+from trident.core.constants import (
+    NCBI_GAP_MIN_TOP,
+    NCBI_GAP_SIZE,
+    NCBI_METHOD,
+    NCBI_QUERY_COVER,
 )
 from trident.core.database import PartialCache, save_to_db
 from trident.core.http import create_session
@@ -60,8 +68,32 @@ from trident.pipelines.names import (
 # species' CO1 proxy matched, and the sequence's MOL identity to it.
 VIA_COLS = ["proxy_hit_species", "via_mol_identity"]
 
-# What the hypo_check_hit flag means (see add_check_hit).
-CHECK_HIT_NOTE = "HYPO species whose marker the HYPO check found in GenBank"
+# The HYPO check's result for a HYPO candidate (see add_check_result).
+CHECK_NOT_FOUND = "no hit in GenBank"
+CHECK_MATCHES = "matches"
+CHECK_DIFFERS = "differs"
+CHECK_PARTIAL = "partial hit"
+# What each result means, the one definition the app's notes, legends, help
+# texts and tabs use.
+CHECK_NOTES = {
+    CHECK_NOT_FOUND: "HYPO species with no check hit in GenBank",
+    CHECK_MATCHES: "HYPO species whose check hit the MOL filter would keep",
+    CHECK_DIFFERS: "HYPO species whose check hit the MOL identity filter would drop",
+    CHECK_PARTIAL: "HYPO species whose check hit covers only part of the sequence",
+}
+
+# The columns of a HYPO candidate its check result is worked out from
+# (add_check_result).
+CHECK_INPUT_COLUMNS = [
+    "seq_id",
+    "scientificName",
+    "hypo_check_identity",
+    "hypo_check_query_cover",
+]
+
+# The check results Results flags or marks for review, by their column in
+# build_assignments.
+CHECK_FLAGS = {"check_differs": CHECK_DIFFERS, "check_partial": CHECK_PARTIAL}
 
 # Why a sequence ends without a species, by the step that lost it (flow_lost_at).
 LOSS_REASONS = {
@@ -195,20 +227,106 @@ EXPORT_COLS = [
     "mol_hit_url",
     "proxy_url",
     "hypo_check_hit_url",
+    "hypo_check_result",
 ]
 
 
-def add_check_hit(df):
-    """Flag (hypo_check_hit) the HYPO species whose target marker the HYPO
-    check found in GenBank: a hit in hypo_check_identity, empty otherwise.
+def add_check_result(
+    df,
+    ncbi_search_df,
+    query_cover=NCBI_QUERY_COVER,
+    gap_size=NCBI_GAP_SIZE,
+    method=NCBI_METHOD,
+    gap_min_top=NCBI_GAP_MIN_TOP,
+    threshold=None,
+    hypo=None,
+):
+    """The HYPO check's result (hypo_check_result) of each HYPO candidate, from
+    its best check hit (hypo_check_identity, hypo_check_query_cover), see
+    CHECK_NOTES:
 
-    A hypothetical species is one whose marker is absent from GenBank, so any
-    check hit puts it up for review, whatever its identity or cover.
+    - no hit in GenBank: the check found none;
+    - partial hit: the hit covers less than *query_cover* (or its cover is
+      unknown);
+    - matches: the MOL filter (filter_blast_results, with the MOL settings)
+      keeps the hit when it is added to the sequence's BLAST hits
+      (*ncbi_search_df*), and the hit is at or above *threshold*, the low
+      identity threshold when the MOL step enforces it (None otherwise);
+    - differs: the hit covers enough, but the MOL filter would drop it on
+      identity (its gap or similarity range, or the enforced threshold).
+
+    The check's E-value is looser than the MOL search's, so a matching hit is
+    not always one the MOL search could have returned. *hypo* marks the HYPO
+    rows (by default those of validation_step HYPO, or every row of a table
+    without it); the others get no result.
     """
-    df["hypo_check_hit"] = pd.to_numeric(
-        df["hypo_check_identity"], errors="coerce"
-    ).notna()
+    if hypo is None:
+        hypo = (
+            df["validation_step"].eq("HYPO")
+            if "validation_step" in df.columns
+            else pd.Series(True, index=df.index)
+        )
+    # By position: the index of *df* need not be unique.
+    identity = pd.to_numeric(df["hypo_check_identity"], errors="coerce").to_numpy()
+    cover = pd.to_numeric(df["hypo_check_query_cover"], errors="coerce").to_numpy()
+    hypo = hypo.to_numpy(dtype=bool)
+    found = hypo & ~np.isnan(identity)
+    full = found & (cover >= query_cover)
+    kept = _kept_by_mol_filter(
+        df["seq_id"].to_numpy()[full],
+        identity[full],
+        cover[full],
+        ncbi_search_df,
+        query_cover=query_cover,
+        gap_size=gap_size,
+        method=method,
+        gap_min_top=gap_min_top,
+    )
+    if threshold is not None:
+        kept = kept & (identity[full] >= threshold)
+    result = np.full(len(df), pd.NA, dtype=object)
+    result[hypo & ~found] = CHECK_NOT_FOUND
+    result[found & ~full] = CHECK_PARTIAL
+    result[full] = np.where(kept, CHECK_MATCHES, CHECK_DIFFERS)
+    df["hypo_check_result"] = result
     return df
+
+
+# The name of a check hit added to a sequence's BLAST hits (_kept_by_mol_filter).
+_CHECK_HIT = "\x00check hit"
+
+
+def _kept_by_mol_filter(seq_ids, identity, cover, ncbi_search_df, **settings):
+    """Whether the MOL filter keeps each check hit (*identity*, *cover*, for
+    the sequence of *seq_ids*: arrays of the same length) added to its
+    sequence's BLAST hits, as a boolean array. Each hit gets its own copy of
+    its sequence's hits covering enough (the others the filter drops at
+    once), under its position as seq_id, and all are filtered in one call."""
+    if not len(seq_ids):
+        return np.zeros(0, dtype=bool)
+    if ncbi_search_df is None:
+        raise ValueError(
+            "Judging HYPO check hits needs ncbi_search_df, the MOL search's hits"
+        )
+    columns = ["seq_id", "scientificName", "identity_percentage", "query_cover"]
+    hits = ncbi_search_df.loc[ncbi_search_df["seq_id"].isin(set(seq_ids)), columns]
+    hits = hits.assign(
+        identity_percentage=pd.to_numeric(hits["identity_percentage"], errors="coerce"),
+        query_cover=pd.to_numeric(hits["query_cover"], errors="coerce"),
+    )
+    # The gap and the range depend on identities only: one hit per identity.
+    hits = hits[hits["query_cover"] >= settings["query_cover"]].drop_duplicates(
+        ["seq_id", "identity_percentage"]
+    )
+    keys = pd.DataFrame({"key": np.arange(len(seq_ids)).astype(str), "seq_id": seq_ids})
+    checks = keys.assign(
+        scientificName=_CHECK_HIT, identity_percentage=identity, query_cover=cover
+    )
+    copies = pd.concat([keys.merge(hits, on="seq_id"), checks], ignore_index=True)
+    copies["seq_id"] = copies.pop("key")
+    kept = filter_blast_results(copies, **settings)
+    kept_keys = set(kept.loc[kept["scientificName"] == _CHECK_HIT, "seq_id"])
+    return keys["key"].isin(kept_keys).to_numpy()
 
 
 def add_low_identity_warning(df, threshold, identity_col="mol_identity"):
@@ -319,7 +437,17 @@ def _build_hypo_part(hypo_df, geo_df, mol_df, name_table):
 
 
 @preserve_sequence_order("seq_id", "sequences_df")
-def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None, *, name_table):
+def build_results_df(
+    sequences_df,
+    geo_df,
+    mol_df,
+    hypo_df=None,
+    *,
+    name_table,
+    ncbi_search_df=None,
+    mol_settings=None,
+    check_results=None,
+):
     """Build combined results DataFrame from MOL+GEO and HYPO species.
 
     Progressive: works with just geo_df + mol_df, adds HYPO rows when available.
@@ -331,6 +459,13 @@ def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None, *, name_table):
         mol_df: MOL results (NCBI BLAST hits).
         hypo_df: HYPO results (optional, proxy-validated species).
         name_table: See build_name_table, to match MOL names on their species.
+        ncbi_search_df: The MOL search's hits, and *mol_settings* the MOL
+            filter's settings (add_check_result's arguments, its defaults when
+            None), which judge the HYPO check's hits: ncbi_search_df is
+            required once a HYPO row's check found a hit covering enough.
+        check_results: The HYPO check's result of each HYPO candidate, by
+            (seq_id, scientificName), already judged (the app keeps them):
+            used instead of judging them again.
     """
     parts = [
         _select_columns(
@@ -371,7 +506,27 @@ def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None, *, name_table):
         ].drop_duplicates(subset="seq_id")
         results = pd.concat([results, empty_rows], ignore_index=True)
 
-    return add_check_hit(results)
+    if check_results is None:
+        return add_check_result(results, ncbi_search_df, **(mol_settings or {}))
+    return lookup_check_results(results, check_results)
+
+
+def lookup_check_results(df, check_results):
+    """*df* with the HYPO check's result of each HYPO row (validation_step
+    HYPO, or every row of a table without it) taken from *check_results*,
+    already worked out by (seq_id, scientificName) (see add_check_result)."""
+    hypo = (
+        df["validation_step"].eq("HYPO")
+        if "validation_step" in df.columns
+        else pd.Series(True, index=df.index)
+    )
+    keys = zip(df["seq_id"], df["scientificName"])
+    return df.assign(
+        hypo_check_result=[
+            check_results.get(key, pd.NA) if is_hypo else pd.NA
+            for key, is_hypo in zip(keys, hypo)
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -583,7 +738,9 @@ def build_assignments(
 
     Returns:
         resolve_sequences' columns plus best_identity, best_via, low_identity,
-        paths (validation steps), hypo_check_hit, lost_at and note.
+        paths (validation steps), check_differs and check_partial (a HYPO
+        species of the sequence with that check result, see
+        add_check_result), lost_at and note.
     """
     table = resolve_sequences(curated_df)
     species_rows = curated_df.dropna(subset=["scientificName"])
@@ -596,8 +753,10 @@ def build_assignments(
     table["paths"] = table["seq_id"].map(
         by_seq["validation_step"].agg(lambda s: " + ".join(sorted(s.unique())))
     )
-    check_hit = table["seq_id"].map(by_seq["hypo_check_hit"].any())
-    table["hypo_check_hit"] = check_hit.fillna(False).astype(bool)
+    counts = pd.crosstab(species_rows["seq_id"], species_rows["hypo_check_result"])
+    for column, value in CHECK_FLAGS.items():
+        has = counts[value] > 0 if value in counts else pd.Series(dtype=bool)
+        table[column] = table["seq_id"].map(has).fillna(False).astype(bool)
 
     unassigned = table.loc[table["n_species"] == 0, "seq_id"].tolist()
     lost = lost_at(unassigned) if unassigned else {}
@@ -614,11 +773,13 @@ def build_assignments(
         if row["low_identity"]:
             via = f" (via {row['best_via']})" if pd.notna(row["best_via"]) else ""
             note.append(f"best identity below {threshold}%{via}")
-        if row["hypo_check_hit"]:
-            note.append(CHECK_HIT_NOTE)
+        for column, value in CHECK_FLAGS.items():
+            if row[column]:
+                note.append(CHECK_NOTES[value])
         if pd.isna(row["taxonRank"]) and not row["species_level"]:
             note.append("no shared taxon" if row["n_species"] > 1 else "rank unknown")
-        notes.append(", ".join(note))
+        # "; ": the check notes hold commas of their own.
+        notes.append("; ".join(note))
     table["note"] = notes
     return table
 

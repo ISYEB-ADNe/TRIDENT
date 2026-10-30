@@ -26,11 +26,21 @@ from trident.core.utils import name_list
 from trident.core import stop
 from trident.core.database import get_connection
 from trident.pipelines.names import replace_source_rows, same_species_groups
-from trident.pipelines.results_pipeline import CHECK_HIT_NOTE, FAILED_STEPS
+from trident.pipelines.results_pipeline import (
+    CHECK_DIFFERS,
+    CHECK_MATCHES,
+    CHECK_NOTES,
+    CHECK_PARTIAL,
+    CHECK_INPUT_COLUMNS,
+    FAILED_STEPS,
+    add_check_result,
+    lookup_check_results,
+)
 from trident.logging import get_log_level
 from trident.ui.defaults import (
     NCBI_GAP_MIN_TOP_DEFAULT,
     NCBI_GAP_SIZE_DEFAULT,
+    NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT,
     NCBI_METHOD_DEFAULT,
     NCBI_QUERY_COVER_DEFAULT,
 )
@@ -255,10 +265,13 @@ COL = {
         "Check Query Cover (%)", "Query cover of that hit."
     ),
     "hypo_check_hit_url": _link("NCBI Link"),
-    "hypo_check_hit": _Check(
-        "Marker in GenBank",
-        help="The HYPO check found the species' target marker in GenBank, "
-        "although a hypothetical species has none: check it.",
+    "hypo_check_result": _Text(
+        "HYPO Check",
+        help=" ".join(
+            f"{result[0].upper()}{result[1:]}: {note}."
+            for result, note in CHECK_NOTES.items()
+        )
+        + " The MOL filter is the same as in MOL for this sequence.",
     ),
     # Results
     "validation_step": _Text(
@@ -359,10 +372,7 @@ BLAST_HELP = {
 }
 
 # Shown above the BLAST settings: the database is fixed, not a setting.
-BLAST_DATABASE_CAPTION = (
-    f"Searches NCBI's {BLAST_DATABASE} database (Core Nucleotide), the default "
-    "of the NCBI BLAST website."
-)
+BLAST_DATABASE_CAPTION = f"Searches NCBI's {BLAST_DATABASE} database (Core Nucleotide)."
 
 # --------------------------------------------------------------------
 # SESSION STATE MANAGEMENT
@@ -463,6 +473,9 @@ class AppState:
     # Results' lost-at steps and the tables they came from (see _lost_at in
     # results.py); any reset drops it, and with it the old tables.
     lost_at_memo: dict[str, Any] | None = None
+    # The HYPO check's results and what they came from (see
+    # hypo_check_results).
+    check_result_memo: dict[str, Any] | None = None
 
     # reset=False: not a pipeline output, so reset_state_after leaves it intact
     # (it is the cross-tab widget persistence store).
@@ -1384,14 +1397,90 @@ def highlight_low_identity(row):
     return [style] * len(row)
 
 
-# The legend of the rows highlight_check_hit colours.
-CHECK_HIT_LEGEND = f":orange[■] {CHECK_HIT_NOTE}"
+# The label of each HYPO check result where Results counts, filters and
+# excludes it, the result's own words (see CHECK_NOTES).
+CHECK_LABELS = {result: f"HYPO check: {result}" for result in CHECK_NOTES}
+
+# The colour of the rows of each HYPO check result with a hit (see
+# add_check_result): the background, and the legend's square.
+CHECK_COLOURS = {
+    CHECK_DIFFERS: ("#ffe0b2", "orange"),
+    CHECK_PARTIAL: ("#e8dff5", "violet"),
+    CHECK_MATCHES: ("#c8e6c9", "green"),
+}
 
 
-def highlight_check_hit(row):
-    """Apply highlight style for HYPO species with a check hit (see add_check_hit)."""
-    style = "background-color: #ffe0b2;" if row.get("hypo_check_hit", False) else ""
+def check_legends(df) -> list[str]:
+    """The legend of each HYPO check result highlight_check_result colours in
+    *df*."""
+    results = set(df["hypo_check_result"].dropna()) if len(df) else set()
+    return [
+        f":{square}[■] {CHECK_NOTES[result]}"
+        for result, (_, square) in CHECK_COLOURS.items()
+        if result in results
+    ]
+
+
+def highlight_check_result(row):
+    """Colour a HYPO species' row by its check result (see CHECK_COLOURS)."""
+    colour = CHECK_COLOURS.get(row.get("hypo_check_result"))
+    style = f"background-color: {colour[0]};" if colour else ""
     return [style] * len(row)
+
+
+def hypo_check_results() -> dict:
+    """The HYPO check's result of each candidate of the HYPO list, by
+    (seq_id, scientificName), judged by the MOL filter of the current results
+    (add_check_result). Kept until the HYPO list, the MOL search's hits or the
+    MOL settings change: a judgement filters a copy of its sequence's hits for
+    every candidate, and the HYPO tab and Results show the results on every
+    rerun."""
+    state = st.session_state
+    hypo_df, hits, settings = state.hypo_df, state.ncbi_search_df, check_settings()
+    if hypo_df is None:
+        return {}
+    memo = state.check_result_memo
+    if (
+        memo is None
+        or memo["hypo"] is not hypo_df
+        or memo["hits"] is not hits
+        or memo["settings"] != settings
+    ):
+        judged = add_check_result(
+            hypo_df.reindex(columns=CHECK_INPUT_COLUMNS), hits, **settings
+        )
+        results = dict(
+            zip(
+                zip(judged["seq_id"], judged["scientificName"]),
+                judged["hypo_check_result"],
+            )
+        )
+        memo = {"hypo": hypo_df, "hits": hits, "settings": settings, "results": results}
+        state.check_result_memo = memo
+    return memo["results"]
+
+
+def with_check_result(df):
+    """*df* (rows of the HYPO list's candidates) with the HYPO check's result
+    of each (see hypo_check_results)."""
+    return lookup_check_results(df, hypo_check_results())
+
+
+def stored_low_identity_threshold() -> float:
+    """The MOL step's low identity threshold, as the current results used it."""
+    stored = (st.session_state.get("mol_params") or {}).get(
+        "ncbi_low_identity_threshold"
+    )
+    return coerce_stored_value(stored, float(NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT))
+
+
+def check_settings():
+    """The MOL settings that judge a HYPO check hit (add_check_result): the
+    filter's, and the low identity threshold when the MOL step enforces it."""
+    stored = st.session_state.get("mol_params") or {}
+    enforced = coerce_stored_value(stored.get("ncbi_enforce_low_identity"), False)
+    threshold = stored_low_identity_threshold() if enforced else None
+    return {**mol_filter_settings(), "threshold": threshold}
 
 
 def mol_query_cover():

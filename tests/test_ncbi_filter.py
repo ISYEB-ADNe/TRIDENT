@@ -96,3 +96,17 @@ def test_gap_found_keeps_the_hits_above_it_else_similarity_is_used():
     assert methods == {"s1": "barcoding_gap", "s2": "similarity"}
     s1 = out[out["seq_id"] == "s1"]["identity_percentage"]
     assert sorted(s1) == [98.0, 99.0]
+
+
+def test_the_gap_is_found_whatever_order_the_hits_come_in():
+    """The hits of a sequence need not be sorted: a hit added after the
+    others is placed by its identity before the gap is read."""
+    df = _hits(
+        [
+            ("s1", 100.0, 100, "A"),
+            ("s1", 95.0, 100, "C"),
+            ("s1", 99.0, 100, "B"),
+        ]
+    )
+    out = filter_blast_results(df, query_cover=90, method="barcoding_gap", gap_size=2)
+    assert sorted(out["scientificName"]) == ["A", "B"]

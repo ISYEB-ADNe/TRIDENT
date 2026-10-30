@@ -3,8 +3,8 @@ HYPO pipeline: the hypothetical species.
 
 GEO species BLAST did not find whose CO1 proxy (a BOLD sequence) hits a MOL
 species of the sequence at the proxy identity or above. The HYPO check then
-looks for their target marker in GenBank and flags those it finds
-(results_pipeline.add_check_hit).
+looks for their target marker in GenBank; Results judges its hits against the
+sequence's MOL filter (results_pipeline.add_check_result).
 
 Steps:
     0. hypo_queries             Entrez query of each seq_id (steps 1 and 3)

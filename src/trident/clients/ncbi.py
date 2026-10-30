@@ -1249,7 +1249,10 @@ def filter_blast_results(
         ValueError: If method is not 'barcoding_gap' or 'similarity'.
     """
     original_rows = len(df)
-    df = df[df["query_cover"] >= query_cover]
+    # The gap is read from each sequence's hits best first (compute_barcoding_gap).
+    df = df[df["query_cover"] >= query_cover].sort_values(
+        ["seq_id", "identity_percentage"], ascending=[True, False], kind="stable"
+    )
     logger.debug(
         f"Query cover filter (≥{query_cover}%): {original_rows} → {len(df)} rows"
     )

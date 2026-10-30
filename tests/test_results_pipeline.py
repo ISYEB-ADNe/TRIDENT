@@ -9,7 +9,7 @@ from trident.pipelines.results_pipeline import (
     EXPORT_COLS,
     build_assignments,
     build_results_df,
-    CHECK_HIT_NOTE,
+    CHECK_NOTES,
     flow_lost_at,
     flows_lost_at,
     filter_excluded_results,
@@ -124,7 +124,12 @@ class TestBuildResultsDf:
             {"seq_id": ["s3", "s2", "s1"], "dna_sequence": ["TTTT", "GCTA", "ATCG"]}
         )
         result = build_results_df(
-            sequences_df, geo_df, mol_df, hypo_df=hypo_df, name_table=None
+            sequences_df,
+            geo_df,
+            mol_df,
+            hypo_df=hypo_df,
+            name_table=None,
+            ncbi_search_df=mol_df,
         )
         assert set(EXPORT_COLS) <= set(result.columns)
         assert result["seq_id"].tolist() == ["s3", "s2", "s2", "s1", "s1"]
@@ -150,7 +155,12 @@ class TestBuildResultsDf:
         self, sequences_df, geo_df, mol_df, hypo_df
     ):
         result = build_results_df(
-            sequences_df, geo_df, mol_df, hypo_df=hypo_df, name_table=None
+            sequences_df,
+            geo_df,
+            mol_df,
+            hypo_df=hypo_df,
+            name_table=None,
+            ncbi_search_df=mol_df,
         )
         hypo = result[result["validation_step"] == "HYPO"]
         assert hypo["scientificName"].tolist() == ["SpecD"]
@@ -208,33 +218,88 @@ def test_export_names_a_species_by_the_ncbi_names_of_its_mol_hits(sequences_df):
     )
 
 
-# --- check_hit flag ---
+# --- HYPO check result ---
 
 
-def test_any_hypo_check_hit_is_flagged(sequences_df, geo_df, mol_df):
-    """A hypothetical species has no marker in GenBank, so any check hit flags
-    it, whatever its identity or cover; MOL+GEO species and empty sequences
-    are never flagged."""
-    hypo_df = pd.DataFrame(
+def _check_results(hypo_rows, **mol_settings):
+    """The HYPO check result of each species of *hypo_rows* (seq_id, name,
+    check identity, check cover) and of the MOL+GEO species, by name. s1's
+    hits are 100, 99.6 then 95 (a barcoding gap under 99.6); s2's are 100,
+    99, 98, 97 then 95 (a gap under 97)."""
+    ncbi_search_df = pd.DataFrame(
         {
-            "seq_id": ["s1", "s2", "s2"],
-            "scientificName": ["SpecX", "SpecY", "SpecZ"],
-            "proxy_hit_species": ["SpecA", "SpecC", "SpecC"],
-            "hypo_check_identity": [80.0, None, 100.0],
-            "hypo_check_query_cover": [60.0, None, 100.0],
+            "seq_id": ["s1"] * 3 + ["s2"] * 5,
+            "scientificName": ["A", "B", "Z", "C", "D", "E", "F", "Y"],
+            "identity_percentage": [100.0, 99.6, 95.0, 100, 99, 98, 97, 95],
+            "query_cover": 100.0,
         }
     )
-    result = build_results_df(
-        sequences_df, geo_df, mol_df, hypo_df=hypo_df, name_table=None
+    mol_df = ncbi_search_df[ncbi_search_df["scientificName"].isin(list("ABCDEF"))]
+    hypo_df = pd.DataFrame(
+        hypo_rows,
+        columns=[
+            "seq_id",
+            "scientificName",
+            "hypo_check_identity",
+            "hypo_check_query_cover",
+        ],
+    ).assign(proxy_hit_species="A")
+    results = build_results_df(
+        pd.DataFrame({"seq_id": ["s1", "s2"]}),
+        mol_df[["seq_id", "scientificName"]].assign(in_mol=True),
+        mol_df,
+        hypo_df=hypo_df,
+        name_table=None,
+        ncbi_search_df=ncbi_search_df,
+        mol_settings=mol_settings,
     )
-    flagged = result.loc[result["hypo_check_hit"], "scientificName"].tolist()
-    assert sorted(flagged) == ["SpecX", "SpecZ"]
+    return results.set_index("scientificName")["hypo_check_result"]
+
+
+def test_a_full_cover_check_hit_is_judged_by_the_mol_filter_run_with_it():
+    """A check hit covering the MOL query cover matches when the sequence's
+    MOL filter, run on its hits with the check hit added, keeps it (98.9%
+    under a MOL list down to 99.6%); it differs when the filter drops it: at
+    exactly the gap size under the lowest MOL hit (97.6%), when it fills the
+    gap so that the filter falls back to the similarity range (95.5%), or
+    under an enforced low identity threshold."""
+    rows = [
+        ("s1", "Close", 98.9, 100.0),
+        ("s1", "AtGap", 97.6, 100.0),
+        ("s2", "InGap", 95.5, 100.0),
+    ]
+    assert _check_results(rows)[["Close", "AtGap", "InGap"]].tolist() == [
+        "matches",
+        "differs",
+        "differs",
+    ]
+    assert _check_results(rows, threshold=99.0)["Close"] == "differs"
+
+
+def test_a_check_hit_under_the_mol_cover_is_a_partial_hit_and_judges_nothing():
+    """Any check hit says the marker is in GenBank, but one covering less than
+    the MOL query cover (100% over 28%), or of unknown cover, is a partial
+    hit; no hit is "no hit in GenBank"; MOL+GEO species get no result."""
+    results = _check_results(
+        [
+            ("s1", "Short", 100.0, 28.0),
+            ("s1", "NoCover", 99.0, None),
+            ("s1", "Absent", None, None),
+        ]
+    )
+    assert results[["Short", "NoCover", "Absent"]].tolist() == [
+        "partial hit",
+        "partial hit",
+        "no hit in GenBank",
+    ]
+    assert results[list("ABCDEF")].isna().all()
 
 
 def test_assignment_notes_say_what_to_check_and_where_a_sequence_lost_its_species():
-    """An assigned sequence has no note; one below the identity threshold or
-    with a HYPO check hit says so; one without a species gets the reason of
-    the step where it lost its last one, or "no candidate left"."""
+    """An assigned sequence has no note; one below the identity threshold, or
+    with a HYPO species whose check hit differs or is a partial hit, says so;
+    one without a species gets the reason of the step where it lost its last
+    one, or "no candidate left"."""
     sequences_df = pd.DataFrame(
         {
             "seq_id": ["s1", "s2", "s3", "s4"],
@@ -261,18 +326,23 @@ def test_assignment_notes_say_what_to_check_and_where_a_sequence_lost_its_specie
     )
     hypo_df = pd.DataFrame(
         {
-            "seq_id": ["s2"],
-            "scientificName": ["Salmo trutta"],
+            "seq_id": ["s2", "s2"],
+            "scientificName": ["Salmo trutta", "Salmo obtusirostris"],
             "taxonRank": "Species",
-            "genus": ["Salmo"],
-            "specificEpithet": ["trutta"],
-            "proxy_hit_species": ["Salmo salar"],
-            "hypo_check_identity": [92.0],
-            "hypo_check_query_cover": [100],
+            "genus": ["Salmo", "Salmo"],
+            "specificEpithet": ["trutta", "obtusirostris"],
+            "proxy_hit_species": ["Salmo salar", "Salmo salar"],
+            "hypo_check_identity": [92.0, 100.0],
+            "hypo_check_query_cover": [100, 30],
         }
     )
     results = build_results_df(
-        sequences_df, geo_df, mol_df, hypo_df=hypo_df, name_table=None
+        sequences_df,
+        geo_df,
+        mol_df,
+        hypo_df=hypo_df,
+        name_table=None,
+        ncbi_search_df=mol_df,
     )
     lost = {"s3": ("GEO", {"Gadus ogac"}), "s4": (None, set())}
 
@@ -283,7 +353,10 @@ def test_assignment_notes_say_what_to_check_and_where_a_sequence_lost_its_specie
     notes = build_assignments(results, 97, 90, lost_at).set_index("seq_id")["note"]
     assert notes.to_dict() == {
         "s1": "",
-        "s2": f"best identity below 97%, {CHECK_HIT_NOTE}",
+        "s2": (
+            f"best identity below 97%; {CHECK_NOTES['differs']}; "
+            f"{CHECK_NOTES['partial hit']}"
+        ),
         "s3": "no candidate recorded in the area (GEO)",
         "s4": "no candidate left",
     }

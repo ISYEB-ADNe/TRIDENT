@@ -167,7 +167,7 @@ The settings of each step are detailed below. Defaults are those used by the app
 
 | Setting | Default | Meaning |
 |---|---|---|
-| BLAST database | core_nt (fixed) | NCBI's Core Nucleotide database, the default of NCBI's BLAST website; it keeps the mitochondrial records. Each GenBank record gives one hit, its best alignment. |
+| BLAST database | core_nt (fixed) | NCBI's Core Nucleotide database; it keeps the mitochondrial records. Each GenBank record gives one hit, its best alignment. |
 | Max hits per query | 500 | Upper bound on the BLAST hits returned per sequence (up to 1000). |
 | E-value exponent | 20 (1e-20) | Hits with a higher e-value are not returned. |
 | Query cover (%) | 90 | Minimum query cover of a hit; removes short partial hits. |
@@ -231,7 +231,7 @@ The settings of each step are detailed below. Defaults are those used by the app
 | Proxy identity (%) | 95 | A proxy hit on a MOL species of the sequence at or above this identity makes the species hypothetical. |
 | HYPO check E-value exponent | 3 (1e-3) | E-value limit of the HYPO check. |
 
-Each proxy is BLAST-searched against GenBank, restricted to the MOL species of its sequence, and its hits are filtered by identity and query cover. The HYPO check then BLAST-searches each sequence against GenBank restricted to its hypothetical species, looking for their target marker; a species whose marker it finds is flagged.
+Each proxy is BLAST-searched against GenBank, restricted to the MOL species of its sequence, and its hits are filtered by identity and query cover. The HYPO check then BLASTs each sequence against the GenBank records of its HYPO species. Its best hit gives one of four results: **no hit in GenBank**; **matches** (the MOL filter would keep the hit); **differs** (the MOL identity filter would drop it: species flagged in Results); **partial hit** (the hit covers only part of the sequence: species marked for review in Results). The MOL filter is the same as in MOL for the sequence.
 
 </details>
 

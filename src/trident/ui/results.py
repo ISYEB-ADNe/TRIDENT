@@ -37,9 +37,10 @@ from trident.pipelines.results_pipeline import (
     build_gbif_export_df,
     build_assignments,
     flag_low_identity,
-    CHECK_HIT_NOTE,
+    CHECK_DIFFERS,
+    CHECK_NOTES,
+    CHECK_PARTIAL,
 )
-from trident.ui.defaults import NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
 from trident.ui.geo import display_gbif_sequence_table
 from trident.ui.ui import (
     column_config,
@@ -53,10 +54,13 @@ from trident.ui.ui import (
     save_widget,
     styled_or_plain,
     highlight_low_identity,
-    highlight_check_hit,
+    CHECK_LABELS,
+    check_legends,
+    highlight_check_result,
     highlight_empty_sequence,
-    CHECK_HIT_LEGEND,
+    hypo_check_results,
     mol_query_cover,
+    stored_low_identity_threshold,
     sequence_selector,
     display_same_species,
     same_species_as,
@@ -84,6 +88,7 @@ CANDIDATE_COLS = [
     "mol_identity",
     "mol_query_cover",
     "mol_hit_url",
+    "hypo_check_result",
     "hypo_check_identity",
     "hypo_check_query_cover",
     "hypo_check_hit_url",
@@ -121,8 +126,9 @@ FILTERS = [
     "Species level",
     "Higher rank",
     "Unassigned",
-    "HYPO check",
     "Low identity",
+    CHECK_LABELS[CHECK_DIFFERS],
+    CHECK_LABELS[CHECK_PARTIAL],
 ]
 
 # --------------------------------------------------------------------
@@ -201,16 +207,15 @@ def _filtered_seq_ids(assignments, choice):
         "Higher rank": (n_species > 0) & ~species_level,
         "Unassigned": n_species == 0,
         "Low identity": assignments["low_identity"],
-        "HYPO check": assignments["hypo_check_hit"],
+        CHECK_LABELS[CHECK_DIFFERS]: assignments["check_differs"],
+        CHECK_LABELS[CHECK_PARTIAL]: assignments["check_partial"],
     }.get(choice)
     return assignments["seq_id"] if mask is None else assignments.loc[mask, "seq_id"]
 
 
 def _default_threshold():
     """The MOL filter's low identity warning, so both steps flag alike."""
-    stored = st.session_state.get("mol_params") or {}
-    value = stored.get("ncbi_low_identity_threshold")
-    return int(float(value)) if value else NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
+    return int(stored_low_identity_threshold())
 
 
 def _threshold_slider():
@@ -261,7 +266,7 @@ def _apply_keep_edits(editor_key, row_keys):
 def _toggle_bulk(name, keys):
     """Exclude a group of candidates at once, or restore the ones that group's
     button excluded. Candidates excluded by hand stay excluded, and so do the
-    ones the other button also excluded."""
+    ones another button also excluded."""
     excluded = set(st.session_state.excluded_results)
     bulk = dict(st.session_state.bulk_excluded)
     if name in bulk:
@@ -306,7 +311,7 @@ def show_summary(assignments, curated_df, results_df, threshold):
     unassigned = assignments[n_species == 0]
 
     st.markdown("**Sequences**")
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("Total", len(assignments))
     c2.metric(
         "Species level",
@@ -327,18 +332,25 @@ def show_summary(assignments, curated_df, results_df, threshold):
         help="Sequences without a candidate species.",
     )
     c5.metric(
-        "HYPO check",
-        int(assignments["hypo_check_hit"].sum()),
-        help=(
-            "Sequences with a HYPO species whose marker the HYPO check found in "
-            "GenBank, although a hypothetical species has no marker in GenBank: "
-            "check them and keep or exclude the species."
-        ),
-    )
-    c6.metric(
         f"Identity < {threshold}%",
         int(assignments["low_identity"].sum()),
         help="Sequences whose best NCBI identity is below the threshold.",
+    )
+    c6.metric(
+        CHECK_LABELS[CHECK_DIFFERS],
+        int(assignments["check_differs"].sum()),
+        help=(
+            f"Sequences with a {CHECK_NOTES[CHECK_DIFFERS]}. Check them and keep "
+            "or exclude the species."
+        ),
+    )
+    c7.metric(
+        CHECK_LABELS[CHECK_PARTIAL],
+        int(assignments["check_partial"].sum()),
+        help=(
+            f"Sequences with a {CHECK_NOTES[CHECK_PARTIAL]}. Check them and keep "
+            "or exclude the species."
+        ),
     )
     if not higher.empty:
         ranks = pd.Series(
@@ -381,9 +393,10 @@ def show_summary(assignments, curated_df, results_df, threshold):
         "HYPO",
         steps.get("HYPO", 0),
         help=(
-            "Hypothetical species: validated through their BOLD CO1 proxy (HYPO "
-            "settings); the HYPO check flags those whose marker GenBank holds. A "
-            "species can be MOL+GEO for one sequence and HYPO for another."
+            "HYPO species: validated through their BOLD CO1 proxy (HYPO settings). "
+            "Those whose check hit the MOL identity filter would drop are flagged; "
+            "those whose check hit covers only part of the sequence are marked for "
+            "review."
         ),
     )
     c4.metric(
@@ -427,7 +440,7 @@ def _bulk_button(col, name, rows, label, what, criterion):
     done = st.session_state.bulk_excluded.get(name)
     if done is not None:
         excluded = set(st.session_state.excluded_results)
-        label = f"Restore the {len(set(done) & excluded)} {what} excluded"
+        label = f"Restore the {len(set(done) & excluded)} excluded {what}"
     col.button(
         label,
         key=f"exclude_{name}",
@@ -443,33 +456,28 @@ def _bulk_button(col, name, rows, label, what, criterion):
     )
 
 
+def _from_sequences(n: int, kind: str = "") -> str:
+    """ "from 3 low identity sequences", or "from 1 low identity sequence"."""
+    return f"from {n} {kind} {pluralize(n, 'sequence')}".replace("  ", " ")
+
+
 def show_bulk_buttons(assignments, curated_df, threshold):
-    """Two buttons excluding at once what a filter flags: the flagged HYPO
-    species, or every candidate of the low identity sequences (which then
-    become unassigned). A second click restores what the button excluded."""
+    """Buttons excluding at once what a filter flags: every candidate of the
+    low identity sequences (which then become unassigned), the HYPO species
+    whose check hit differs, or those with a partial check hit. A second click
+    restores what the button excluded."""
     species_rows = curated_df.dropna(subset=["scientificName"])
-    flagged = species_rows[species_rows["hypo_check_hit"]]
+    check = species_rows["hypo_check_result"]
     low = assignments.loc[assignments["low_identity"], "seq_id"]
     low_rows = species_rows[species_rows["seq_id"].isin(low)]
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     _bulk_button(
         col1,
-        "HYPO check",
-        flagged,
-        label=f"Exclude the {len(flagged)} flagged HYPO species",
-        what="flagged HYPO species",
-        criterion=(
-            "Excludes each HYPO species whose marker the HYPO check found in "
-            "GenBank, whatever the identity or cover of the hit."
-        ),
-    )
-    _bulk_button(
-        col2,
         "Low identity",
         low_rows,
         label=(
-            f"Exclude all {len(low_rows)} candidates of the {low.nunique()} "
-            "low identity sequences"
+            f"Exclude all {len(low_rows)} {pluralize(len(low_rows), 'candidate')} "
+            f"{_from_sequences(low.nunique(), 'low identity')}"
         ),
         what="low identity candidates",
         criterion=(
@@ -478,6 +486,18 @@ def show_bulk_buttons(assignments, curated_df, threshold):
             "sequences become unassigned."
         ),
     )
+    for col, result in ((col2, CHECK_DIFFERS), (col3, CHECK_PARTIAL)):
+        what = f'"{result}" HYPO species'
+        rows = species_rows[check == result]
+        n_seqs = rows["seq_id"].nunique()
+        _bulk_button(
+            col,
+            CHECK_LABELS[result],
+            rows,
+            label=f"Exclude the {len(rows)} {what} {_from_sequences(n_seqs)}",
+            what=what,
+            criterion=f"Excludes each {CHECK_NOTES[result]}.",
+        )
 
 
 def show_assignments(assignments, curated_df, threshold):
@@ -494,7 +514,8 @@ def show_assignments(assignments, curated_df, threshold):
             key=FILTER_KEY,
             format_func=lambda c: f"{c} ({counts[c]})",
             help=(
-                f"HYPO check: {CHECK_HIT_NOTE}. "
+                f"{CHECK_LABELS[CHECK_DIFFERS]}, a {CHECK_NOTES[CHECK_DIFFERS]}. "
+                f"{CHECK_LABELS[CHECK_PARTIAL]}, a {CHECK_NOTES[CHECK_PARTIAL]}. "
                 f"Low identity: best NCBI identity below {threshold}%."
             ),
         )
@@ -725,13 +746,12 @@ def _show_candidates(results_df, assignments, threshold, selected_seq):
     legends = ["Uncheck Keep to exclude a candidate from this sequence."]
     if table["low_identity_warning"].any():
         legends.append(f":red[■] Best identity below {threshold}%")
-    if table["hypo_check_hit"].any():
-        legends.append(CHECK_HIT_LEGEND)
-    st.caption(" · ".join(legends))
+    legends += check_legends(table)
+    st.caption("  \n".join(legends))
 
     editor_key = f"keep_{selected_seq}_{st.session_state.get('_keep_version', 0)}"
     st.data_editor(
-        styled_or_plain(table, highlight_check_hit, highlight_low_identity),
+        styled_or_plain(table, highlight_check_result, highlight_low_identity),
         width="stretch",
         hide_index=True,
         key=editor_key,
@@ -759,6 +779,7 @@ def _species_breakdown_columns(sp_df, is_hypo):
         "proxy_identity",
         "proxy_query_cover",
         "geo_occurrences",
+        "hypo_check_result",
     ]
     if sp_df["hypo_check_identity"].notna().any():
         shown += ["hypo_check_identity", "hypo_check_query_cover"]
@@ -871,11 +892,13 @@ def show_results_per_species(results_df, assignments, threshold, same_species):
             if step_df.empty:
                 continue
             st.markdown(f"#### {step} Sequences")
+            if legends := check_legends(step_df):
+                st.caption("  \n".join(legends))
             shown = _species_breakdown_columns(step_df, is_hypo)
             st.dataframe(
                 styled_or_plain(
                     flag_low_identity(step_df, threshold, best_identity),
-                    highlight_check_hit,
+                    highlight_check_result,
                     highlight_low_identity,
                 ),
                 width="stretch",
@@ -886,28 +909,17 @@ def show_results_per_species(results_df, assignments, threshold, same_species):
             _show_all_hits_expander(selected_species, is_hypo=is_hypo)
 
 
-def show_curated_results(curated_df, assignments, threshold):
+def show_curated_results(curated_df):
     """Every kept candidate of every sequence: the rows the CSV export writes."""
     with st.container(border=True):
         st.markdown("### ✅ Curated results")
-        table = flag_low_identity(
-            curated_df, threshold, assignments.set_index("seq_id")["best_identity"]
-        )
+        # Flags are handled above (filters, buttons): only empty sequences show.
         legends = ["One row per sequence and kept candidate species."]
-        if table["low_identity_warning"].any():
-            legends.append(f":red[■] Best identity below {threshold}%")
-        if table["hypo_check_hit"].any():
-            legends.append(CHECK_HIT_LEGEND)
-        if table["scientificName"].isna().any():
+        if curated_df["scientificName"].isna().any():
             legends.append(":gray[■] No species assigned")
-        st.caption(" · ".join(legends))
+        st.caption("  \n".join(legends))
         st.dataframe(
-            styled_or_plain(
-                table,
-                highlight_check_hit,
-                highlight_low_identity,
-                highlight_empty_sequence,
-            ),
+            styled_or_plain(curated_df, highlight_empty_sequence),
             width="stretch",
             hide_index=True,
             column_order=["seq_id", *CANDIDATE_COLS],
@@ -1116,6 +1128,8 @@ def results_main():
         mol_df=ready("mol_df"),
         hypo_df=ready("hypo_df"),
         name_table=st.session_state.get("name_table"),
+        # Judged once for the HYPO tab and kept, not on every rerun here.
+        check_results=hypo_check_results() if ready("hypo_df") is not None else None,
     )
     if results_df.empty:
         st.info("📊 No results available.")
@@ -1134,7 +1148,7 @@ def results_main():
 
     show_assignments(assignments, curated_df, threshold)
     show_sequence_detail(results_df, assignments, threshold)
-    show_curated_results(curated_df, assignments, threshold)
+    show_curated_results(curated_df)
     show_results_per_species(
         results_df,
         assignments,

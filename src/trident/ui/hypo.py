@@ -1,6 +1,5 @@
 """HYPO tab: the proxy search, its filter, the HYPO check and the HYPO list."""
 
-import pandas as pd
 import streamlit as st
 
 
@@ -14,7 +13,14 @@ from trident.core.utils import (
     species_for_sequences,
 )
 import trident.pipelines as pipe
-from trident.pipelines.results_pipeline import add_check_hit
+from trident.pipelines.results_pipeline import (
+    CHECK_DIFFERS,
+    CHECK_INPUT_COLUMNS,
+    CHECK_MATCHES,
+    CHECK_NOT_FOUND,
+    CHECK_NOTES,
+    CHECK_PARTIAL,
+)
 
 from trident.ui.ui import (
     ready,
@@ -38,9 +44,10 @@ from trident.ui.ui import (
     run_step_workflow,
     next_step_button,
     require_prerequisite,
-    highlight_check_hit,
-    CHECK_HIT_LEGEND,
+    check_legends,
+    highlight_check_result,
     mol_query_cover,
+    with_check_result,
 )
 
 from trident.ui.defaults import (
@@ -622,6 +629,22 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
     logsink.close()
 
 
+# The tabs of the check results, by HYPO check result (see CHECK_NOTES for
+# what each means), with what Results does with it.
+CHECK_TABS = {
+    CHECK_MATCHES: ("Matches", ""),
+    CHECK_DIFFERS: (
+        "Differs",
+        "Species flagged in Results.",
+    ),
+    CHECK_PARTIAL: (
+        "Partial hit",
+        "Species marked for review in Results.",
+    ),
+    CHECK_NOT_FOUND: ("No hit in GenBank", ""),
+}
+
+
 def hypo_check_display():
     res_df = st.session_state.hypo_check_df
     summary_df = st.session_state.hypo_check_summary_df
@@ -631,50 +654,45 @@ def hypo_check_display():
         else:
             st.info("No check results to show.")
         return
-    n_found = res_df[res_df["hit_found"]]["scientificName"].nunique()
-    n_not_found = res_df[~res_df["hit_found"]]["scientificName"].nunique()
-
-    tab_summary, tab_no_hits, tab_full = st.tabs(
+    summary = with_check_result(
+        summary_df.rename(
+            columns={
+                "identity_percentage": "hypo_check_identity",
+                "query_cover": "hypo_check_query_cover",
+            }
+        )
+    )
+    by_result = {
+        result: summary[summary["hypo_check_result"] == result] for result in CHECK_TABS
+    }
+    tabs = st.tabs(
         [
-            f"Marker found in GenBank ({n_found})",
-            f"Marker not found ({n_not_found})",
+            *(f"{label} ({len(by_result[r])})" for r, (label, _) in CHECK_TABS.items()),
             "Raw BLAST Data",
         ]
     )
-    with tab_summary:
-        found_df = summary_df[summary_df["n_hits"] > 0]
-
-        st.caption("Best check hit of each species.")
-        shown = [
-            "seq_id",
-            "scientificName",
-            "n_hits",
-            "identity_percentage",
-            "query_cover",
-            "hit_url",
-        ]
-        st.dataframe(
-            found_df,
-            width="stretch",
-            hide_index=True,
-            column_order=shown,
-            column_config=column_config(shown),
-        )
-
-    with tab_no_hits:
-        st.caption(
-            "The check found no hit in GenBank for these species, as expected for "
-            "a hypothetical species."
-        )
-        shown = ["seq_id", "scientificName"]
-        st.dataframe(
-            summary_df[summary_df["n_hits"] == 0],
-            width="stretch",
-            hide_index=True,
-            column_order=shown,
-            column_config=column_config(shown),
-        )
-    with tab_full:
+    for tab, (result, (_, consequence)) in zip(tabs, CHECK_TABS.items()):
+        with tab:
+            caption = f"{CHECK_NOTES[result]}. {consequence}".strip()
+            if result != CHECK_NOT_FOUND:
+                caption += " Best check hit of each sequence and species."
+            st.caption(caption)
+            shown = ["seq_id", "scientificName"]
+            if result != CHECK_NOT_FOUND:
+                shown += [
+                    "n_hits",
+                    "hypo_check_identity",
+                    "hypo_check_query_cover",
+                    "hit_url",
+                ]
+            st.dataframe(
+                by_result[result],
+                width="stretch",
+                hide_index=True,
+                column_order=shown,
+                column_config=column_config(shown),
+            )
+    with tabs[-1]:
         shown = [
             "seq_id",
             "scientificName",
@@ -700,9 +718,7 @@ def hypo_final_check_workflow():
     with st.container(border=True):
         st.markdown("### 🔬 HYPO Check")
         st.caption(
-            "BLAST each sequence against GenBank under the names of its hypothetical "
-            "species: a hit means GenBank holds the target marker for that species, "
-            "and Results flags it."
+            "BLAST each sequence against the GenBank records of its HYPO species."
         )
 
         # Parameter Inputs
@@ -801,12 +817,18 @@ def display_hypo_sequence_metrics(seq_df):
 
 
 def display_hypo_sequence_table(seq_df):
-    display_df = add_check_hit(seq_df.copy())
-    if display_df["hypo_check_hit"].any():
-        st.caption(CHECK_HIT_LEGEND)
-    shown = ["scientificName", "taxonURL", *RANK_COLUMNS, "scientificNameAuthorship"]
+    display_df = with_check_result(seq_df)
+    if legends := check_legends(display_df):
+        st.caption("  \n".join(legends))
+    shown = [
+        "scientificName",
+        "hypo_check_result",
+        "taxonURL",
+        *RANK_COLUMNS,
+        "scientificNameAuthorship",
+    ]
     st.dataframe(
-        styled_or_plain(display_df, highlight_check_hit),
+        styled_or_plain(display_df, highlight_check_result),
         width="stretch",
         hide_index=True,
         column_order=shown,
@@ -842,29 +864,24 @@ def display_hypo_summary():
         .reset_index(name="proxy_hit_species")
     )
 
-    # NCBI check marker status
-    check_cols = ["seq_id", "scientificName", "hypo_check_identity"]
-    check_status = hypo_df[[c for c in check_cols if c in hypo_df.columns]].copy()
-    for col in check_cols[2:]:
-        if col not in check_status.columns:
-            check_status[col] = pd.NA
-    check_status = add_check_hit(check_status)
+    # The HYPO check's result of each candidate
+    check_status = with_check_result(hypo_df.reindex(columns=CHECK_INPUT_COLUMNS))
 
     summary = proxies.merge(check_status, on=["seq_id", "scientificName"], how="left")
-    summary["hypo_check_hit"] = summary["hypo_check_hit"].fillna(False)
 
-    if summary["hypo_check_hit"].any():
-        st.caption(CHECK_HIT_LEGEND)
+    if legends := check_legends(summary):
+        st.caption("  \n".join(legends))
 
     shown = [
         "seq_id",
         "scientificName",
         "proxy_hit_species",
-        "hypo_check_hit",
+        "hypo_check_result",
         "hypo_check_identity",
+        "hypo_check_query_cover",
     ]
     st.dataframe(
-        styled_or_plain(summary, highlight_check_hit),
+        styled_or_plain(summary, highlight_check_result),
         width="stretch",
         hide_index=True,
         column_order=shown,
