@@ -63,7 +63,7 @@ uv sync
 uv run trident
 ```
 
-The app opens in your browser. Set your contact email in the **Settings** panel on first launch.
+The app opens in your browser. Set your contact email in the **Settings** panel on first launch: an analysis can only be started or opened once it is set.
 
 <details>
 <summary><strong>Detailed installation guide (click to expand)</strong></summary>

@@ -2,6 +2,7 @@
 repository's .streamlit/secrets.toml."""
 
 import os
+import re
 import tomllib
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
@@ -138,6 +139,15 @@ def results_dir() -> Path:
 def contact_email() -> str | None:
     """Return the configured contact email."""
     return get(CONTACT_EMAIL)
+
+
+# An address with one @ and a dot after it: catches a typo, not a dead address.
+_EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+
+
+def is_email(value: str | None) -> bool:
+    """Whether *value* looks like an email address."""
+    return bool(value and _EMAIL.fullmatch(value.strip()))
 
 
 def user_agent(email: str | None = None) -> str:

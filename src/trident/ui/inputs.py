@@ -11,7 +11,12 @@ from loguru import logger
 
 import trident.pipelines as pipe
 from trident.clients.fasta import load_fasta, records_to_dataframe
-from trident.core.config import is_streamlit_cloud, results_dir, source_root
+from trident.core.config import (
+    contact_email,
+    is_streamlit_cloud,
+    results_dir,
+    source_root,
+)
 from trident.core.database import table_exists, check_schema_version, get_connection
 from trident.core.utils import pluralize
 from trident.ui.ui import (
@@ -515,7 +520,13 @@ def upload_and_start_analysis():
 
 def _analysis_choices():
     """The ways to start or open an analysis, the most common first: a file,
-    a saved analysis, then the example."""
+    a saved analysis, then the example. Only once a contact email is set:
+    without it, NCBI and the other services get anonymous requests."""
+    if not contact_email():
+        st.warning(
+            "Enter your contact email in Settings above to start or open an analysis."
+        )
+        return
     handle_file_upload()
     open_saved_analysis()
     load_example_button()

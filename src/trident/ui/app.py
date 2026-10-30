@@ -33,7 +33,10 @@ def _app_config():
     else:
         st.session_state.setdefault("_settings_email", "")
 
-    email_missing = not email_is_preset and not st.session_state.get("_settings_email")
+    # A preset address is trusted; a typed one must look like an address.
+    email_missing = not email_is_preset and not config.is_email(
+        st.session_state.get("_settings_email")
+    )
 
     label = "Settings" if not email_missing else "⚠️ Settings: contact email required"
     with st.expander(label, expanded=email_missing):
@@ -42,14 +45,17 @@ def _app_config():
             key="_settings_email",
             disabled=email_is_preset,
             help=(
-                "Sent with every request to NCBI, GBIF, WoRMS and BOLD, so they "
-                "can reach you about heavy use (NCBI asks for it). "
+                "Required to start or open an analysis. Sent with every request "
+                "to NCBI, GBIF, WoRMS and BOLD, so they can reach you about heavy "
+                "use (NCBI asks for it). "
                 "Pre-fill via CONTACT_EMAIL in .streamlit/secrets.toml."
             ),
         )
-        if not email_is_preset and email:
-            config.set(config.CONTACT_EMAIL, email)
+        if not email_is_preset and config.is_email(email):
+            config.set(config.CONTACT_EMAIL, email.strip())
             reload_ncbi_credentials()
+        elif not email_is_preset and email:
+            st.error("Enter a full email address, like name@example.org.")
 
         current_level = get_log_level()
         level = st.selectbox(

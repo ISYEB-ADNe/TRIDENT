@@ -50,6 +50,26 @@ def test_every_tab_of_a_new_analysis_opens_without_error(tmp_path, monkeypatch):
     assert attempts == []
 
 
+def test_an_analysis_starts_only_once_a_contact_email_is_set(tmp_path, monkeypatch):
+    """The Start tab offers no file, saved analysis or example until Settings
+    holds an address: a typo is refused."""
+    monkeypatch.delenv("CONTACT_EMAIL", raising=False)
+    monkeypatch.setattr(config, "_repo_secrets", lambda: {})
+    at = AppTest.from_file(str(APP), default_timeout=60)
+    at.secrets["RESULTS_DIR"] = str(tmp_path)
+    at.run()
+
+    def offers_example():
+        return any(b.label.startswith("Try the example") for b in at.button)
+
+    assert not offers_example()
+    at.text_input(key="_settings_email").input("name@example").run()
+    assert not offers_example()
+    at.text_input(key="_settings_email").input("name@example.org").run()
+    assert offers_example()
+    assert not at.exception
+
+
 def test_changed_settings_rerun_a_step_from_its_cache_unless_erased():
     """A step run after its settings changed keeps the results saved for its
     settings: only "Erase saved results" forces it to compute everything
