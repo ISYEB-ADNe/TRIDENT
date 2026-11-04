@@ -1,6 +1,7 @@
 """FASTA I/O: load, build and serialize FASTA sequences via Biopython."""
 
 import io
+from collections import Counter
 from typing import Any
 
 import pandas as pd
@@ -8,6 +9,28 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from loguru import logger
+
+from trident.core.utils import pluralize
+
+
+class RepeatedSequenceNames(ValueError):
+    """A FASTA whose sequences do not all have their own name: every step
+    keys a sequence by it, so two sharing one would be merged."""
+
+    SHOWN = 5  # names listed; the others are counted
+
+    def __init__(self, repeated: dict[str, int]):
+        self.repeated = repeated
+        names = ", ".join(
+            f"{name or '(empty header)'} ({n} sequences)"
+            for name, n in list(repeated.items())[: self.SHOWN]
+        )
+        if (more := len(repeated) - self.SHOWN) > 0:
+            names += f" and {more} more {pluralize(more, 'name')}"
+        super().__init__(
+            f"Some sequences share a name: {names}. A sequence is named by its "
+            "header up to the first space or tab; give each its own name."
+        )
 
 
 def load_fasta(fasta_file: Any) -> list[SeqRecord]:
@@ -19,9 +42,17 @@ def load_fasta(fasta_file: Any) -> list[SeqRecord]:
 
     Returns:
         List of SeqRecord objects parsed from the FASTA source.
+
+    Raises:
+        RepeatedSequenceNames: two or more sequences share a name (the header
+            up to its first space or tab).
     """
     display_name = getattr(fasta_file, "name", "buffer")
     sequences = list(SeqIO.parse(fasta_file, "fasta"))
+    counts = Counter(seq.id for seq in sequences)
+    repeated = {name: n for name, n in counts.items() if n > 1}
+    if repeated:
+        raise RepeatedSequenceNames(repeated)
 
     if not sequences:
         logger.debug(f"No sequences found in {display_name}")

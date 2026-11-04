@@ -10,6 +10,9 @@ Exploration:
     build_ncbi_search_overview(ncbi_search_df, sequences_df, max_hits)
     build_mol_summary(mol_df, sequences_df, ncbi_filter_df)
     build_mol_sequence_report(mol_df, seq_id, ncbi_search_df, ...)
+
+The BLAST jobs send the contact email set with ncbi.set_ncbi_email (a script
+calls ncbi.setup_ncbi_credentials() once first; without it they are anonymous).
 """
 
 from collections.abc import Callable

@@ -97,7 +97,8 @@ def test_edited_fasta_under_a_saved_name_starts_a_new_analysis(tmp_path, monkeyp
 
 
 def test_unreadable_fasta_is_reported_and_saves_nothing(tmp_path, monkeypatch):
-    """A file that is not UTF-8, not FASTA or without sequences shows an error
+    """A file that is not UTF-8, not FASTA, without sequences or with two
+    sequences under one name (the header up to its first space or tab) shows an error
     instead of a traceback, and leaves no analysis behind."""
     monkeypatch.setenv("RESULTS_DIR", str(tmp_path))
 
@@ -106,11 +107,13 @@ def test_unreadable_fasta_is_reported_and_saves_nothing(tmp_path, monkeypatch):
 
         _start_fasta_analysis("bad.fasta", data)
 
-    for data in [b">m1 \xe9t\xe9\nACGT\n", b"notes\n>m1\nACGT\n", b""]:
+    repeated = b">m1 site A\nACGT\n>m1 site B\nGGTT\n>m2\nACGA\n"
+    for data in [b">m1 \xe9t\xe9\nACGT\n", b"notes\n>m1\nACGT\n", b"", repeated]:
         at = AppTest.from_function(page, args=(data,))
         at.run()
         assert not at.exception, data
         assert len(at.error) == 1, data
+    assert "m1 (2 sequences)" in at.error[0].value
     assert list(tmp_path.iterdir()) == []
 
 

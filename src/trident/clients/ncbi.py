@@ -9,7 +9,6 @@ import threading
 import time
 import zipfile
 from collections.abc import Callable
-from functools import wraps
 from typing import NamedTuple
 
 import pandas as pd
@@ -43,53 +42,22 @@ from trident.core.utils import (
 
 
 def set_ncbi_email(email: str | None) -> None:
-    """Set ``Blast.email``, sent with each BLAST job (a process-level global)."""
-    if not email:
-        return
-    Blast.email = email
-    logger.debug(f"NCBI contact email set: {email}")
+    """Set ``Blast.email``, sent with each BLAST job (a process-level global);
+    no email sends the jobs without one. The only way the BLAST email is set:
+    the app calls it before each BLAST job with the session's address,
+    notebooks and scripts once through ``setup_ncbi_credentials``."""
+    Blast.email = email or None
+    if email:
+        logger.debug(f"NCBI contact email set: {email}")
+    else:
+        logger.debug("No contact email: NCBI requests are anonymous")
 
 
 def setup_ncbi_credentials() -> None:
-    """Configure Biopython with the contact email from ``core.config``.
-
-    Sets ``Blast.email``. Optional but recommended: NCBI may throttle anonymous
-    requests.
-    """
-    email = config.contact_email()
-
-    if not email:
-        logger.debug("CONTACT_EMAIL not set: NCBI requests will be anonymous")
-    else:
-        set_ncbi_email(email)
-
-
-_ncbi_credentials_loaded = False
-# The parallel BLAST batches all call a require_ncbi_auth function at once.
-_ncbi_credentials_lock = threading.Lock()
-
-
-def reload_ncbi_credentials() -> None:
-    """Force re-reading credentials from config (e.g. after Settings change)."""
-    global _ncbi_credentials_loaded
-    with _ncbi_credentials_lock:
-        setup_ncbi_credentials()
-        _ncbi_credentials_loaded = True
-
-
-def require_ncbi_auth(func: Callable) -> Callable:
-    """Decorator that loads NCBI credentials once before the first call."""
-
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        global _ncbi_credentials_loaded
-        with _ncbi_credentials_lock:
-            if not _ncbi_credentials_loaded:
-                setup_ncbi_credentials()
-                _ncbi_credentials_loaded = True
-        return func(*args, **kwargs)
-
-    return wrapper
+    """Give NCBI the configured contact email (``core.config``), for notebooks
+    and scripts: call it once before the BLAST steps. Optional but
+    recommended: NCBI may throttle anonymous requests."""
+    set_ncbi_email(config.contact_email())
 
 
 ### BATCH UTILITIES ###
@@ -532,9 +500,10 @@ def _blast_request(**params) -> requests.Response:
     response = requests.post(
         NCBI_BLAST_URL,
         data=params,
-        # Blast.email rather than the config: jobs run in threads that cannot
-        # read the email set in Settings (session state).
-        headers={"User-Agent": config.user_agent(Blast.email)},
+        # Blast.email only, never the configured one: jobs run in threads that
+        # cannot read the email set in Settings (session state), and a field
+        # the user cleared must send no address.
+        headers={"User-Agent": config.user_agent(Blast.email, fallback=False)},
         timeout=BLAST_TIMEOUT,
     )
     response.raise_for_status()
@@ -692,7 +661,6 @@ class BlastCircuit:
                     )
 
 
-@require_ncbi_auth
 def submit_blast_batch(
     batch: list[SeqRecord],
     entrez_query: str | None = None,

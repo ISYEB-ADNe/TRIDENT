@@ -6,7 +6,6 @@ Run with: uv run trident  (or: streamlit run src/trident/ui/app.py)
 import streamlit as st
 from trident.ui import ui
 from trident.core import config
-from trident.clients.ncbi import reload_ncbi_credentials
 from trident.logging import LOG_LEVELS, get_log_level, set_log_level, setup_logging
 
 # Tab configuration: (Display Name, Session State Key)
@@ -24,26 +23,18 @@ TAB_CONFIG = {
 
 def _app_config():
     """Settings panel: an expander, open when the email is missing."""
-    email_from_config = config.get(config.CONTACT_EMAIL)
-    email_is_preset = bool(email_from_config)
-
-    # Initialize the widget key from preset or stored value
-    if email_is_preset:
-        st.session_state.setdefault("_settings_email", email_from_config)
-    else:
-        st.session_state.setdefault("_settings_email", "")
-
-    # A preset address is trusted; a typed one must look like an address.
-    email_missing = not email_is_preset and not config.is_email(
-        st.session_state.get("_settings_email")
+    # Pre-filled from a preset (secrets or environment), always editable: the
+    # address typed wins for the session.
+    st.session_state.setdefault(
+        "_settings_email", config.get(config.CONTACT_EMAIL) or ""
     )
+    email_missing = not config.is_email(st.session_state.get("_settings_email"))
 
     label = "Settings" if not email_missing else "⚠️ Settings: contact email required"
     with st.expander(label, expanded=email_missing):
         email = st.text_input(
             "Contact email",
             key="_settings_email",
-            disabled=email_is_preset,
             help=(
                 "Required to start or open an analysis. Sent with every request "
                 "to NCBI, GBIF, WoRMS and BOLD, so they can reach you about heavy "
@@ -51,11 +42,14 @@ def _app_config():
                 "Pre-fill via CONTACT_EMAIL in .streamlit/secrets.toml."
             ),
         )
-        if not email_is_preset and config.is_email(email):
+        # Each BLAST job sets its own email from the session (set_ncbi_email).
+        if config.is_email(email):
             config.set(config.CONTACT_EMAIL, email.strip())
-            reload_ncbi_credentials()
-        elif not email_is_preset and email:
-            st.error("Enter a full email address, like name@example.org.")
+        else:
+            # A cleared or mistyped field holds no address, preset or not.
+            config.set(config.CONTACT_EMAIL, "")
+            if email:
+                st.error("Enter a full email address, like name@example.org.")
 
         current_level = get_log_level()
         level = st.selectbox(

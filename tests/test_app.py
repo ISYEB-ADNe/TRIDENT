@@ -6,6 +6,8 @@ by hand."""
 import socket
 from pathlib import Path
 
+import pytest
+
 from streamlit.testing.v1 import AppTest
 
 from trident.core import config
@@ -16,7 +18,19 @@ from trident.ui.ui import ERASE_SAVED
 APP = Path(__file__).parents[1] / "src" / "trident" / "ui" / "app.py"
 
 
-def test_every_tab_of_a_new_analysis_opens_without_error(tmp_path, monkeypatch):
+@pytest.fixture
+def no_presets(monkeypatch, tmp_path):
+    """No contact email preset in the environment or the repository's
+    secrets file, and the analyses saved in *tmp_path* (an exported
+    RESULTS_DIR would come before the test's secrets)."""
+    monkeypatch.delenv("CONTACT_EMAIL", raising=False)
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "_repo_secrets", lambda: {})
+
+
+def test_every_tab_of_a_new_analysis_opens_without_error(
+    tmp_path, monkeypatch, no_presets
+):
     """No tab sends a request when it opens: every connection is refused and
     recorded, whatever client makes it."""
     attempts = []
@@ -26,19 +40,14 @@ def test_every_tab_of_a_new_analysis_opens_without_error(tmp_path, monkeypatch):
         raise ConnectionError("network blocked in tests")
 
     monkeypatch.setattr(socket.socket, "connect", refuse)
-    # No contact email from the environment or the repository's secrets file.
-    monkeypatch.delenv("CONTACT_EMAIL", raising=False)
-    monkeypatch.setattr(config, "_repo_secrets", lambda: {})
-    results = tmp_path / "results"
-    results.mkdir()
-    monkeypatch.setenv("RESULTS_DIR", str(results))
     fasta = tmp_path / "demo.fasta"
     fasta.write_text(">m1\nACGTACGTAC\n>m2\nGGGTTTAAAC\n")
-    run_fasta_workflow(str(fasta), db_path=str(results / "demo.db"))
+    run_fasta_workflow(str(fasta), db_path=str(tmp_path / "demo.db"))
 
     at = AppTest.from_file(str(APP), default_timeout=60)
-    # Replaces the secrets Streamlit would read from .streamlit/secrets.toml.
-    at.secrets["RESULTS_DIR"] = str(results)
+    # Replaces the secrets Streamlit would read from .streamlit/secrets.toml,
+    # which may hold a contact email.
+    at.secrets["RESULTS_DIR"] = str(tmp_path)
     at.session_state["analysis_name"] = "demo"
     at.run()
     assert at.session_state["sequences_df"]["seq_id"].tolist() == ["m1", "m2"]
@@ -50,12 +59,12 @@ def test_every_tab_of_a_new_analysis_opens_without_error(tmp_path, monkeypatch):
     assert attempts == []
 
 
-def test_an_analysis_starts_only_once_a_contact_email_is_set(tmp_path, monkeypatch):
+def test_an_analysis_starts_only_once_a_contact_email_is_set(tmp_path, no_presets):
     """The Start tab offers no file, saved analysis or example until Settings
     holds an address: a typo is refused."""
-    monkeypatch.delenv("CONTACT_EMAIL", raising=False)
-    monkeypatch.setattr(config, "_repo_secrets", lambda: {})
     at = AppTest.from_file(str(APP), default_timeout=60)
+    # Replaces the secrets Streamlit would read from .streamlit/secrets.toml,
+    # which may hold a contact email.
     at.secrets["RESULTS_DIR"] = str(tmp_path)
     at.run()
 
@@ -67,6 +76,30 @@ def test_an_analysis_starts_only_once_a_contact_email_is_set(tmp_path, monkeypat
     assert not offers_example()
     at.text_input(key="_settings_email").input("name@example.org").run()
     assert offers_example()
+    assert not at.exception
+
+
+def test_a_preset_email_only_fills_the_field_in(tmp_path, no_presets):
+    """An address from the secrets is shown but stays editable: the one typed
+    is the session's (the Parameters tab names it), and a cleared field holds
+    none (the Start tab asks for one again)."""
+    at = AppTest.from_file(str(APP), default_timeout=60)
+    at.secrets["RESULTS_DIR"] = str(tmp_path)  # replaces the real secrets
+    at.secrets["CONTACT_EMAIL"] = "preset@example.org"
+    at.run()
+
+    def shown_email():
+        at.session_state["requested_tab"] = "parameters"
+        at.run()
+        rows = at.dataframe[0].value
+        return rows.set_index("Parameter").loc["Contact Email", "Value"]
+
+    field = at.text_input(key="_settings_email")
+    assert field.value == "preset@example.org" and not field.disabled
+    field.input("mine@example.org").run()
+    assert shown_email() == "mine@example.org"
+    at.text_input(key="_settings_email").input("").run()
+    assert any("contact email required" in e.label for e in at.expander)
     assert not at.exception
 
 

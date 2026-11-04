@@ -1,6 +1,6 @@
 [project]
 name = "trident"
-version = "0.1.0"
+version = "0.2.0.dev0"
 description = "Taxonomic Resolution and IDentification using Environmental dNa Traces"
 readme = "README.md"
 authors = [
@@ -49,4 +49,6 @@ dev = [
 [tool.codespell]
 # Domain false positives: OTU (Operational Taxonomic Unit, as in "(M)OTU/ASV").
 ignore-words-list = "OTU"
-skip = "*.ipynb,uv.lock,*.lock,./results,./data"
+# Paths as codespell walks them: "./x" from the repository root (CI), "x" when
+# given as an argument (codespell src tests).
+skip = "*.ipynb,uv.lock,*.lock,./results,./data,./tests/fixtures,tests/fixtures"

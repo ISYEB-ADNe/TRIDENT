@@ -105,7 +105,7 @@ This creates a virtual environment and installs everything needed.
 uv run trident
 ```
 
-Set your contact email in the **Settings** panel on first launch, or pre-fill it in `.streamlit/secrets.toml`:
+Set your contact email in the **Settings** panel on first launch, or pre-fill it in `.streamlit/secrets.toml` (the field stays editable; the address typed is used for the session):
 
 ```toml
 CONTACT_EMAIL = "your-email@example.com"
@@ -121,7 +121,7 @@ Each analysis is saved as a `.db` file in the `results/` folder of TRIDENT, what
 
 ## How to use the app
 
-1. **Start Analysis**: Upload a FASTA file of your MOTU/ASV sequences (`.fasta`, `.fa`, `.fas`, `.txt`). Click **Process FASTA**, then **Proceed to MOL**.
+1. **Start Analysis**: Upload a FASTA file of your MOTU/ASV sequences (`.fasta`, `.fa`, `.fas`, `.txt`). Each sequence needs its own name: TRIDENT names a sequence by its header up to the first space or tab, and refuses a file where two share one. Click **Process FASTA**, then **Next: MOL**.
 2. **Run each step in order**: Open MOL, TAX, GEO, EXTRA, HYPO one at a time. Each tab has its own settings; review them, then run the step. A ✅ on the tab means the step is done.
 3. **Set your study area in GEO**: Enter the latitude and longitude of your site and one or more extents (km). Species with too few occurrences in the filtering area are left out.
 4. **Results**: The Results tab opens once MOL, TAX and GEO are done; EXTRA and HYPO add the hypothetical species. It shows a summary, the assignment of each sequence (its species, or the lowest taxon its candidate species share), the candidate species of a sequence with the step where each other species was lost, and the curated results, where you can leave out a species by hand.
@@ -141,7 +141,7 @@ A hosted demo is live on Streamlit Cloud: <https://trident-nxanjv7pk4z2fnkyulzvw
 
 ## Example
 
-`example/example.fasta` holds the 4 Svalbard MOTUs of the paper's worked example (16S, Vert16S primers). Click "Try the example" on the Start tab for a quick end-to-end demo of the pipeline: it also sets the GEO area to the sampling site (latitude 78.5, longitude 14.5, extents 250 and 500 km). If you upload the file instead, enter these values in the GEO step.
+`example/example.fasta` holds the 4 Svalbard MOTUs of the paper's worked example (16S, Vert16S primers). Click "Try the example" on the Start tab for a quick end-to-end demo of the pipeline: it also sets the GEO area to the sampling site (latitude 78.5, longitude 14.5, extents 250 and 500 km) and the GEO filtering area to 250 km. If you upload the file instead, enter these values in the GEO step.
 
 <details>
 <summary><strong>Run the example as a notebook (advanced)</strong></summary>

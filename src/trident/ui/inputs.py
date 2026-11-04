@@ -10,7 +10,11 @@ import streamlit as st
 from loguru import logger
 
 import trident.pipelines as pipe
-from trident.clients.fasta import load_fasta, records_to_dataframe
+from trident.clients.fasta import (
+    RepeatedSequenceNames,
+    load_fasta,
+    records_to_dataframe,
+)
 from trident.core.config import (
     contact_email,
     is_streamlit_cloud,
@@ -104,6 +108,9 @@ def _start_fasta_analysis(file_name: str, data: bytes, settings: dict | None = N
         st.error(
             f"❌ {file_name} is not UTF-8 text: save it as UTF-8 and upload it again."
         )
+        return
+    except RepeatedSequenceNames as e:
+        st.error(f"❌ {file_name}: {e}")
         return
     except ValueError as e:
         st.error(

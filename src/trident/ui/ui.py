@@ -819,6 +819,12 @@ def display_run_button(
             key=f"{btn_key}_cache_mode",
             label_visibility="collapsed",
         )
+    if cache_mode == ERASE_SAVED:
+        st.caption(
+            "⚠️ Deletes the results saved for these settings when you run it, "
+            "before the new ones are made: a run that fails or is stopped does "
+            "not bring them back."
+        )
     return clicked, cache_mode
 
 
@@ -1183,7 +1189,11 @@ class StreamlitLogSink:
         self.container = container
         self.prefix = prefix
         self.log_queue = queue.Queue()
-        self._allowed_threads: set[int] = {threading.get_ident()}
+        # Thread objects by ident: an ident is reused once its thread ends, by
+        # any session's thread, so only a thread still alive is accepted.
+        self._allowed_threads: dict[int, threading.Thread] = {
+            threading.get_ident(): threading.current_thread()
+        }
         # Unique per sink (id() can be reused once a sink is freed).
         self._tag = uuid.uuid4().hex
 
@@ -1217,7 +1227,10 @@ class StreamlitLogSink:
             return  # already taken over, by an earlier job of the same step
         # Accept the job's records before closing old, so none falls between.
         self._tag = old._tag
-        self._allowed_threads |= old._allowed_threads
+        # This sink's own threads come first (thread_filter drops ended ones).
+        # A copy: a job of the old run may still register a thread.
+        for ident, thread in list(old._allowed_threads.items()):
+            self._allowed_threads.setdefault(ident, thread)
         # The abandoned run may still be polling old: stop it draining.
         old._taken_over = True
         old.close()
@@ -1227,7 +1240,7 @@ class StreamlitLogSink:
 
     def allow_current_thread(self):
         """Register the calling thread so this sink accepts its log messages."""
-        self._allowed_threads.add(threading.get_ident())
+        self._allowed_threads[threading.get_ident()] = threading.current_thread()
 
     def thread_filter(self, record):
         """Loguru filter: accept only 'trident' messages from registered
@@ -1236,7 +1249,8 @@ class StreamlitLogSink:
             return False
         if record["extra"].get("log_sink") == self._tag:
             return True
-        return record["thread"].id in self._allowed_threads
+        thread = self._allowed_threads.get(record["thread"].id)
+        return thread is not None and thread.is_alive()
 
     def wrap(self, fn, before=None):
         """Return a wrapper that registers its thread before calling *fn*.

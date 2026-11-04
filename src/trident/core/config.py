@@ -1,5 +1,7 @@
-"""Centralized configuration: resolves values from st.secrets, env vars, or the
-repository's .streamlit/secrets.toml."""
+"""Centralized configuration: resolves a value from the one set in the app for
+the session, env vars, st.secrets, or the repository's .streamlit/secrets.toml,
+in that order. A worker thread of the app reads the last three; notebooks and
+scripts read env vars and secrets.toml."""
 
 import os
 import re
@@ -77,38 +79,35 @@ def _repo_secrets() -> dict:
 
 
 def get(key: str, default: str | None = None) -> str | None:
-    """Get a config value: st.secrets → session_state → env var → the
-    repository's secrets.toml → default."""
-    if _in_streamlit_run():
-        try:
-            import streamlit as st
+    """Get a config value: the session's (set in the app) → env var →
+    st.secrets → the repository's secrets.toml → default. A value the session
+    set, even empty (a cleared field), wins over the presets in the script
+    thread; worker threads have no session, so the app passes them what they
+    need (the user agent, the BLAST email)."""
+    if not _in_streamlit_run():
+        return os.environ.get(key, _repo_secrets().get(key, default))
+    import streamlit as st
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
 
-            from streamlit.runtime.scriptrunner import get_script_run_ctx
-
-            # st.secrets raises without a secrets file: checked on its own, or
-            # the session state below would be skipped too.
-            try:
-                if key in st.secrets:
-                    return st.secrets[key]
-            except Exception:
-                pass
-            # Session state belongs to a script run: worker threads (step jobs,
-            # BLAST batches) have none, and reading it there only logs warnings.
-            if get_script_run_ctx(suppress_warning=True) is not None:
-                val = st.session_state.get(f"_config_{key}")
-                if val:
-                    return val
-        except Exception:
-            pass
+    # Session state belongs to a script run: worker threads (step jobs, BLAST
+    # batches) have none, and reading it there only logs warnings.
+    if get_script_run_ctx(suppress_warning=True) is not None:
+        if f"_config_{key}" in st.session_state:
+            return st.session_state[f"_config_{key}"] or default
     if key in os.environ:
         return os.environ[key]
+    try:
+        # st.secrets raises without a secrets file.
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
     return _repo_secrets().get(key, default)
 
 
 def set(key: str, value: str) -> None:
-    """Store a config value in session state (and env when running locally)."""
-    if not is_streamlit_cloud():
-        os.environ[key] = value
+    """Store a config value for the session (in its session state): a new
+    session starts again from the presets."""
     if _in_streamlit_run():
         try:
             import streamlit as st
@@ -150,8 +149,9 @@ def is_email(value: str | None) -> bool:
     return bool(value and _EMAIL.fullmatch(value.strip()))
 
 
-def user_agent(email: str | None = None) -> str:
-    """Return a User-Agent string, e.g. 'trident/<version> (user@example.com)'."""
-    email = email or contact_email()
+def user_agent(email: str | None = None, fallback: bool = True) -> str:
+    """Return a User-Agent string, e.g. 'trident/<version> (user@example.com)':
+    with *email*, else (*fallback*) the configured contact email."""
+    email = email or (contact_email() if fallback else None)
     base = f"{APP_NAME}/{app_version()}"
     return f"{base} ({email})" if email else base

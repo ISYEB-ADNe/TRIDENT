@@ -418,3 +418,80 @@ def test_blast_is_sent_the_bases_and_the_hits_keep_the_sequence_as_given(
     df, _ = run_ncbi_search([SeqRecord(Seq(given), id="s0")], num_threads=1)
     assert sent == ["ACGTACGTNACGT"]
     assert df["dna_sequence"].unique().tolist() == [given]
+
+
+def test_a_search_asks_ncbi_for_its_settings_through_either_client(
+    ncbi_fake, monkeypatch
+):
+    """Whichever client sends it (TRIDENT's, or Biopython's qblast with
+    BLAST_CLIENT=qblast), a MOL search asks for blastn against core_nt with
+    the E-value of its exponent and its hit limit."""
+    asked = []
+    fake_post = ncbi.requests.post
+
+    def post(url, data, **kwargs):
+        if data["CMD"] == "Put":
+            asked.append(
+                {k: data[k] for k in ("PROGRAM", "DATABASE", "EXPECT", "HITLIST_SIZE")}
+            )
+        return fake_post(url, data, **kwargs)
+
+    class FakeQblast:
+        def __init__(self, **kwargs):
+            asked.append(
+                {
+                    "PROGRAM": kwargs["program"],
+                    "DATABASE": kwargs["database"],
+                    "EXPECT": kwargs["expect"],
+                    "HITLIST_SIZE": kwargs["hitlist_size"],
+                }
+            )
+
+        def __enter__(self):
+            ncbi_fake.queries["Q"] = ["s0"]  # read by the faked archive reader
+            return SimpleNamespace(read=lambda: b"PKQ")
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(ncbi.requests, "post", post)
+    monkeypatch.setattr(ncbi.Blast, "qblast", FakeQblast)
+    expected = {
+        "PROGRAM": "blastn",
+        "DATABASE": "core_nt",
+        "EXPECT": 1e-12,
+        "HITLIST_SIZE": 77,
+    }
+    for client in ("", "qblast"):
+        monkeypatch.setenv("BLAST_CLIENT", client)
+        asked.clear()
+        run_ncbi_search(
+            [SeqRecord(Seq("ACGT"), id="s0")],
+            num_threads=1,
+            ev_exponent=12,
+            max_hits=77,
+        )
+        assert asked == [expected], client
+
+
+def test_a_search_sends_ncbi_only_the_email_it_was_given(url_api_fake, monkeypatch):
+    """The BLAST email is the one set for the job (the session's in the app):
+    with none, NCBI gets no address, whatever the configured one."""
+    monkeypatch.setenv("CONTACT_EMAIL", "configured@example.org")
+    monkeypatch.setattr(ncbi.Blast, "email", None)
+    sent = []
+    fake_post = ncbi.requests.post
+
+    def post(url, data, **kwargs):
+        sent.append((data.get("email"), kwargs["headers"]["User-Agent"]))
+        return fake_post(url, data, **kwargs)
+
+    monkeypatch.setattr(ncbi.requests, "post", post)
+    ncbi.set_ncbi_email("lab@example.org")
+    ncbi._run_blast_job_once(">s0\nACGT\n", 1e-10, 10, None)
+    assert sent[0][0] == "lab@example.org" and "(lab@example.org)" in sent[0][1]
+
+    sent.clear()
+    ncbi.set_ncbi_email(None)
+    ncbi._run_blast_job_once(">s0\nACGT\n", 1e-10, 10, None)
+    assert all(email is None and "@" not in agent for email, agent in sent)
