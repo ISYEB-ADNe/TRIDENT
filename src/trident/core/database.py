@@ -347,9 +347,7 @@ def _after_deleting(conn: sqlite3.Connection) -> None:
         used = [
             f'SELECT CAST("{col}" AS INTEGER) FROM {table} WHERE "{col}" IS NOT NULL'
             for (table,) in tables
-            for col in _sequence_columns(
-                table, [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
-            )
+            for col in _sequence_columns(table, table_columns(conn, table))
         ]
         where = f" WHERE id NOT IN ({' UNION '.join(used)})" if used else ""
         conn.execute(f"DELETE FROM {_SEQUENCE_STORE}{where}")
@@ -495,6 +493,21 @@ def table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     return cursor.fetchone() is not None
 
 
+def table_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
+    """The column names of *table_name*, in order; empty when it does not exist."""
+    return [row[1] for row in conn.execute(f"PRAGMA table_info({table_name})")]
+
+
+def load_sequences(db_path: str | Path) -> pd.DataFrame:
+    """The input sequences of the analysis at *db_path*: seq_id, seq_length
+    and dna_sequence. Raises a database error when the file holds no
+    TRIDENT sequences table."""
+    with get_connection(db_path) as conn:
+        return pd.read_sql(
+            "SELECT seq_id, seq_length, dna_sequence FROM sequences", conn
+        )
+
+
 def _index_run_id(conn: sqlite3.Connection, table_name: str) -> None:
     """Index the run_id of *table_name*, if it exists: each cached item is
     read by its run_id, which would otherwise scan the whole table."""
@@ -520,7 +533,7 @@ def _load_cached_items(
     if not run_ids or not table_exists(conn, table_name):
         return pd.DataFrame()
     in_ids = "run_id IN (SELECT value FROM json_each(?))"
-    columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table_name})")]
+    columns = table_columns(conn, table_name)
     kinds_sql = ", ".join(f'group_concat(DISTINCT typeof("{col}"))' for col in columns)
     kinds = conn.execute(
         f"SELECT run_id, {kinds_sql} FROM {table_name} WHERE {in_ids} GROUP BY run_id",
@@ -560,12 +573,10 @@ def _add_missing_columns(
     conn: sqlite3.Connection, table_name: str, df: pd.DataFrame
 ) -> None:
     """Add columns present in *df* but missing from the table schema."""
-    cursor = conn.execute(f"PRAGMA table_info({table_name})")
-    rows = cursor.fetchall()
-    if not rows:
+    existing_cols = set(table_columns(conn, table_name))
+    if not existing_cols:
         return  # Table doesn't exist yet; to_sql will create it
 
-    existing_cols = {row[1] for row in rows}
     for col in df.columns:
         if col not in existing_cols:
             conn.execute(f'ALTER TABLE {table_name} ADD COLUMN "{col}"')
@@ -1269,8 +1280,7 @@ def _empty_run_ids(
     inputs_table = f"{table_name}_inputs"
     if not table_exists(conn, inputs_table):
         return []
-    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})")}
-    if columns:
+    if table_columns(conn, table_name):
         filled = f" AND r.{result_col} IS NOT NULL" if result_col else ""
         cursor = conn.execute(
             f"SELECT i.run_id FROM {inputs_table} i "

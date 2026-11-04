@@ -781,14 +781,7 @@ def _geo_sequence_labels():
     in_geo = pd.MultiIndex.from_frame(df[pair]).isin(
         pd.MultiIndex.from_frame(st.session_state.geo_df[pair])
     )
-    local = df[
-        in_geo
-        & (
-            df["geo_extent"].map(get_extent_column_name)
-            == get_extent_column_name(target_extent)
-        )
-        & (df["geo_occurrences"] >= min_occ)
-    ]
+    local = df[in_geo & pipe.geo_filter_mask(df, target_extent, min_occ)]
     local_count = local.groupby("seq_id")["scientificName"].nunique()
 
     area = area_label(params["gbif_filter_extent"], params.get("gbif_area"))

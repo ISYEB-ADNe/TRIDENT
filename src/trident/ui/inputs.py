@@ -17,7 +17,12 @@ from trident.core.config import (
     results_dir,
     source_root,
 )
-from trident.core.database import table_exists, check_schema_version, get_connection
+from trident.core.database import (
+    check_schema_version,
+    get_connection,
+    load_sequences,
+    table_exists,
+)
 from trident.core.utils import pluralize
 from trident.ui.ui import (
     column_config,
@@ -164,8 +169,7 @@ def _holds_sequences(db_path: Path, seqs_df: pd.DataFrame) -> bool:
     if not _has_sequences(db_path):
         return False
     try:
-        with get_connection(db_path) as conn:
-            saved = pd.read_sql("SELECT seq_id, dna_sequence FROM sequences", conn)
+        saved = load_sequences(db_path)
     except (sqlite3.DatabaseError, pd.errors.DatabaseError):
         return False  # not a TRIDENT sequences table
     columns = ["seq_id", "dna_sequence"]
@@ -343,10 +347,7 @@ def _auto_restore_from_db():
 
     with st.spinner("Opening the analysis...", show_time=True):
         try:
-            with get_connection(db_path) as conn:
-                seqs_df = pd.read_sql(
-                    "SELECT seq_id, seq_length, dna_sequence FROM sequences", conn
-                )
+            seqs_df = load_sequences(db_path)
 
             if not seqs_df.empty:
                 st.session_state.sequences_df = seqs_df

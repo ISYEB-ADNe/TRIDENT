@@ -398,6 +398,16 @@ def run_gbif_merge(
 ### FILTER PIPELINE ###
 
 
+def geo_filter_mask(df: pd.DataFrame, extent, min_occurrences: int) -> pd.Series:
+    """The GEO filter: rows of *df* (geo_extent, geo_occurrences) at *extent*
+    with at least *min_occurrences*. Extents are compared by name: 250, 250.0
+    and "250" (as saved) are the same extent."""
+    in_extent = df["geo_extent"].map(get_extent_column_name) == get_extent_column_name(
+        extent
+    )
+    return in_extent & (df["geo_occurrences"] >= min_occurrences)
+
+
 @save_to_db(
     "gbif_filter",
     cache=FullCache(
@@ -442,13 +452,9 @@ def run_gbif_filter(
         )
 
     # 2. Filter rows
-    # Compared by name: 250, 250.0 and "250" (as saved) are the same extent.
-    in_extent = gbif_merge_df["geo_extent"].map(
-        get_extent_column_name
-    ) == get_extent_column_name(extent)
-    mask = in_extent & (gbif_merge_df["geo_occurrences"] >= min_occurrences)
-
-    filtered_df = gbif_merge_df[mask].copy()
+    filtered_df = gbif_merge_df[
+        geo_filter_mask(gbif_merge_df, extent, min_occurrences)
+    ].copy()
 
     # 3. Cleanup
     filtered_df = filtered_df[GEO_LIST_COLUMNS]

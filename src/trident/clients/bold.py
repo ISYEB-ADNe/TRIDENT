@@ -10,7 +10,7 @@ from loguru import logger
 
 from trident.clients.fasta import clean_sequence
 from trident.core import stop
-from trident.core.http import create_session, with_optional_session
+from trident.core.http import with_optional_session
 from trident.core.utils import (
     count_phrase,
     StepLog,
@@ -437,6 +437,7 @@ def outcomes_by_species(bold_search_df: pd.DataFrame) -> pd.Series:
     )
 
 
+@with_optional_session(retries=5, backoff_factor=0.5)
 def get_records_from_species_list(
     species_list: list[str],
     other_names: dict[str, list[tuple[str, str]]] | None = None,
@@ -473,10 +474,6 @@ def get_records_from_species_list(
         the usable sequences of each species, or one row with the reason it
         has none (bold_outcome).
     """
-    active_session = session or create_session(
-        retries=5, backoff_factor=0.5, user_agent=user_agent
-    )
-
     all_records = []
     failed_species = []
     log = StepLog("BOLD search", len(species_list), "species")
@@ -487,7 +484,7 @@ def get_records_from_species_list(
                 rows = _search_species(
                     species,
                     (other_names or {}).get(species, []),
-                    active_session,
+                    session,
                     keep_only_COI5P,
                     keep_ncbi,
                     rate_limit_delay,
@@ -529,10 +526,6 @@ def get_records_from_species_list(
         # Rate limiting
         if i < len(species_list) - 1 and rate_limit_delay > 0:
             stop.wait(rate_limit_delay)
-
-    # Only close if created internally
-    if session is None:
-        active_session.close()
 
     bold_df = (
         pd.concat(all_records, ignore_index=True)

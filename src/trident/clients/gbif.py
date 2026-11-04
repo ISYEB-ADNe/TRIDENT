@@ -16,7 +16,7 @@ from loguru import logger
 
 from trident.core.constants import GBIF_CONFIDENCE
 from trident.core import stop
-from trident.core.http import create_session, request_label
+from trident.core.http import create_session, request_label, with_optional_session
 from trident.core.utils import (
     StepLog,
     as_ids,
@@ -225,6 +225,7 @@ def _match_error(name: str, error: Exception) -> dict:
     }
 
 
+@with_optional_session(retries=3, backoff_factor=1.0)
 def _match_single_taxon_name(
     name: str,
     worms_id: str | None = None,
@@ -256,11 +257,8 @@ def _match_single_taxon_name(
     if worms_id:
         params["scientificNameID"] = worms_lsid(worms_id)
 
-    own_session = session is None
     try:
-        stop.check_stop()  # a stopped step builds no session for nothing
-        if own_session:
-            session = create_session(user_agent=user_agent)
+        stop.check_stop()
         response = session.get(
             "https://api.gbif.org/v2/species/match", params=params, timeout=15
         )
@@ -300,10 +298,6 @@ def _match_single_taxon_name(
 
     except Exception as e:
         return _match_error(name, e)
-
-    finally:
-        if own_session and session is not None:
-            session.close()
 
 
 def gbif_search_url(name: str) -> str:
@@ -357,11 +351,11 @@ def match_taxon_names(
         return local.session
 
     def match(name):
-        # Once stopped, no session: the match raises its own stop
-        session = None if stop.stop_requested() else thread_session()
+        # Once stopped, each match fails at once without a request
+        # (stop.check_stop), and stop.log_filter drops its log lines.
         with log.query(name):
             result = _match_single_taxon_name(
-                name, worms_ids.get(name), session=session, user_agent=user_agent
+                name, worms_ids.get(name), session=thread_session()
             )
         match_type = str(result.get("matchType", "")).lower()
         check = f"check: {gbif_search_url(name)}"

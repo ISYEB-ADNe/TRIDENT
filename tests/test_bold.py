@@ -142,12 +142,13 @@ def test_a_name_the_preprocessor_rejects_is_queried_as_written():
     assert in_bold and len(records) == 8
 
 
-def test_each_queried_species_gets_its_sequences_or_why_it_has_none(monkeypatch):
+def test_each_queried_species_gets_its_sequences_or_why_it_has_none():
     # Larus pipixcan is a name BOLD does not know: its preprocessor answers
     # with a search of record IDs, which _BoldSession refuses to query.
-    monkeypatch.setattr(bold, "create_session", lambda **k: _BoldSession())
     species = ["Leucophaeus pipixcan", "Chaetodon leucopleura", "Larus pipixcan"]
-    df, failed = get_records_from_species_list(species, rate_limit_delay=0)
+    df, failed = get_records_from_species_list(
+        species, rate_limit_delay=0, session=_BoldSession()
+    )
 
     assert failed == []
     assert outcomes_by_species(df).to_dict() == {
@@ -160,14 +161,13 @@ def test_each_queried_species_gets_its_sequences_or_why_it_has_none(monkeypatch)
     assert set(sequences["scientificName"]) == {"Leucophaeus pipixcan"}
 
 
-def test_a_species_bold_files_under_another_name_is_found_under_it(monkeypatch):
+def test_a_species_bold_files_under_another_name_is_found_under_it():
     # WoRMS accepts Larus pipixcan, which BOLD does not know; GBIF (and BOLD)
     # call it Leucophaeus pipixcan. The other GBIF names stand for other
     # species, so they are never searched: Chroicocephalus saundersi is
     # another WoRMS species, Larus genei is the NCBI name of Chroicocephalus
     # genei (a made-up lump, to test the rule), and GBIF lumps Larus
     # novaehollandiae and Larus scopulinus as Chroicocephalus novaehollandiae.
-    monkeypatch.setattr(bold, "create_session", lambda **k: _BoldSession())
     gbif = {
         "Larus pipixcan": "Leucophaeus pipixcan",
         "Larus saundersi": "Chroicocephalus saundersi",
@@ -207,7 +207,7 @@ def test_a_species_bold_files_under_another_name_is_found_under_it(monkeypatch):
     assert other_names == {"Larus pipixcan": [("Leucophaeus pipixcan", "gbif")]}
 
     df, failed = get_records_from_species_list(
-        ["Larus pipixcan"], other_names, rate_limit_delay=0
+        ["Larus pipixcan"], other_names, rate_limit_delay=0, session=_BoldSession()
     )
     assert failed == []
     assert outcomes_by_species(df).to_dict() == {"Larus pipixcan": bold.SEQUENCES}

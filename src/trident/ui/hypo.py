@@ -25,7 +25,6 @@ from trident.pipelines.results_pipeline import (
 from trident.ui.ui import (
     ready,
     RANK_COLUMNS,
-    coerce_stored_value,
     record_empty_step,
     show_filter_success,
     lazy_expander,
@@ -38,6 +37,9 @@ from trident.ui.ui import (
     persist_value,
     save_widget,
     StreamlitLogSink,
+    blast_speed_settings,
+    stored_value,
+    count_progress,
     run_with_progress,
     reset_state_after,
     sequence_selector,
@@ -51,7 +53,6 @@ from trident.ui.ui import (
 
 from trident.ui.defaults import (
     HYPO_GIVE_UP_MINUTES_DEFAULT,
-    BLAST_GIVE_UP_MINUTES_MIN,
     BLAST_MAX_THREADS,
     HYPO_MAX_HITS_DEFAULT,
     HYPO_EV_EXPONENT_DEFAULT,
@@ -167,46 +168,12 @@ def display_hypo_parameters():
         active_ntop = stored.get("hypo_ntop", "None")
         st.caption(f"Active in results: **{active_ntop}**")
 
-    # --- Row 2: Advanced Settings  ---
-    with st.expander(
-        "🛠️ Advanced Search Settings",
-        expanded=False,
-    ):
-        st.markdown(
-            "These settings affect processing speed but not biological results, and should be left at default values most of the time."
-        )
-        tcol1, tcol2, tcol3 = st.columns(3)
-
-        with tcol1:
-            persist_value("hypo_batch_size", HYPO_BATCH_SIZE_DEFAULT)
-            batch_size = st.number_input(
-                "Batch size",
-                1,
-                100,
-                help=BLAST_HELP["batch_size"],
-                key="hypo_batch_size",
-            )
-            save_widget("hypo_batch_size")
-        with tcol2:
-            persist_value("hypo_num_threads", HYPO_NUM_THREADS_DEFAULT)
-            threads = st.number_input(
-                "Parallel threads",
-                1,
-                BLAST_MAX_THREADS,
-                help=BLAST_HELP["n_threads"],
-                key="hypo_num_threads",
-            )
-            save_widget("hypo_num_threads")
-        with tcol3:
-            persist_value("hypo_give_up", HYPO_GIVE_UP_MINUTES_DEFAULT)
-            give_up = st.number_input(
-                "Give up after (min)",
-                BLAST_GIVE_UP_MINUTES_MIN,
-                None,  # no upper limit: a job waiting longer is still polled
-                help=BLAST_HELP["give_up"],
-                key="hypo_give_up",
-            )
-            save_widget("hypo_give_up")
+    batch_size, threads, give_up = blast_speed_settings(
+        "hypo",
+        HYPO_BATCH_SIZE_DEFAULT,
+        HYPO_NUM_THREADS_DEFAULT,
+        HYPO_GIVE_UP_MINUTES_DEFAULT,
+    )
 
     return max_hits, ev_exponent, identity_cutoff, ntop, batch_size, threads, give_up
 
@@ -227,14 +194,13 @@ def hypo_search_job(
     progress_info = {"current": 0, "total": 0}
 
     # 3. Search (background thread for progress tracking)
-    def _poll():
-        curr, total = progress_info["current"], progress_info["total"]
-        if total > 0:
-            percent = min(curr / total, 1.0)
-            progress_bar.progress(
-                percent,
-                text=f"Search: {curr} / {total} BOLD sequences blasted...",
-            )
+    _poll = count_progress(
+        progress_bar,
+        progress_info,
+        lambda curr, total: (
+            f"Search: {curr}/{total} BOLD {pluralize(total, 'sequence')} blasted..."
+        ),
+    )
 
     hypo_search_df, hypo_search_params = run_with_progress(
         logsink.wrap(pipe.run_hypo_search, before=lambda: set_ncbi_email(email)),
@@ -575,14 +541,13 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
     progress_info = {"current": 0, "total": total_sequences}
 
     # Check (background thread for progress tracking)
-    def _poll():
-        curr, total = progress_info["current"], progress_info["total"]
-        if total > 0:
-            percent = min(curr / total, 1.0)
-            progress_bar.progress(
-                percent,
-                text=f"Check: {curr} / {total} sequence checks done...",
-            )
+    _poll = count_progress(
+        progress_bar,
+        progress_info,
+        lambda curr, total: (
+            f"Check: {curr}/{total} sequence {pluralize(total, 'check')} done..."
+        ),
+    )
 
     # Save check results
     hypo_check_df, hypo_check_params = run_with_progress(
@@ -726,20 +691,12 @@ def hypo_final_check_workflow():
             "hypo_check_ev_exponent": ev_exponent,
             # The search's "Parallel Threads" setting also applies to the check.
             "num_threads": min(
-                coerce_stored_value(
-                    st.session_state._widget_overrides.get(
-                        "hypo_num_threads", HYPO_NUM_THREADS_DEFAULT
-                    ),
-                    HYPO_NUM_THREADS_DEFAULT,
-                ),
+                stored_value("hypo_num_threads", HYPO_NUM_THREADS_DEFAULT),
                 BLAST_MAX_THREADS,
             ),
             # And so does its "Give up after" setting.
-            "give_up_minutes": coerce_stored_value(
-                st.session_state._widget_overrides.get(
-                    "hypo_give_up", HYPO_GIVE_UP_MINUTES_DEFAULT
-                ),
-                HYPO_GIVE_UP_MINUTES_DEFAULT,
+            "give_up_minutes": stored_value(
+                "hypo_give_up", HYPO_GIVE_UP_MINUTES_DEFAULT
             ),
         }
         st.divider()

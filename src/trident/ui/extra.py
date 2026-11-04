@@ -36,6 +36,7 @@ from trident.ui.ui import (
     persist_value,
     save_widget,
     StreamlitLogSink,
+    count_progress,
     run_with_progress,
     reset_state_after,
     sequence_selector,
@@ -67,14 +68,11 @@ def bold_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     progress_info = {"current": 0, "total": total_names}
 
     # Background Execution
-    def _poll():
-        curr, total = progress_info["current"], progress_info["total"]
-        if total > 0:
-            percent = min(curr / total, 1.0)
-            progress_bar.progress(
-                percent,
-                text=f"Queried {curr}/{total} species from BOLD...",
-            )
+    _poll = count_progress(
+        progress_bar,
+        progress_info,
+        lambda curr, total: f"Queried {curr}/{total} species from BOLD...",
+    )
 
     bold_search_df, bold_search_params = run_with_progress(
         logsink.wrap(pipe.run_bold_search),
@@ -356,14 +354,11 @@ def bold_filter_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     progress_info = {"current": 0, "total": total_species}
 
     # Background Execution
-    def _poll():
-        curr, total = progress_info["current"], progress_info["total"]
-        if total > 0:
-            percent = min(curr / total, 1.0)
-            progress_bar.progress(
-                percent,
-                text=f"Filtering: {curr}/{total} species...",
-            )
+    _poll = count_progress(
+        progress_bar,
+        progress_info,
+        lambda curr, total: f"Filtering: {curr}/{total} species...",
+    )
 
     bold_filter_df, bold_filter_params = run_with_progress(
         logsink.wrap(pipe.run_bold_filter),

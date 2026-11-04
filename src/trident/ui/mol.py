@@ -47,6 +47,8 @@ from trident.ui.ui import (
     reset_state_after,
     highlight_low_identity,
     StreamlitLogSink,
+    blast_speed_settings,
+    count_progress,
     run_with_progress,
     sequence_selector,
     run_step_workflow,
@@ -55,8 +57,6 @@ from trident.ui.ui import (
 
 from trident.ui.defaults import (
     BLAST_GIVE_UP_MINUTES_DEFAULT,
-    BLAST_GIVE_UP_MINUTES_MIN,
-    BLAST_MAX_THREADS,
     NCBI_MAX_HITS_DEFAULT,
     NCBI_MAX_HITS_LIMIT,
     NCBI_EV_EXPONENT_DEFAULT,
@@ -164,46 +164,12 @@ def display_ncbi_parameters():
                 "or less."
             )
 
-    # --- Row 2: Advanced Settings  ---
-    with st.expander(
-        "🛠️ Advanced Search Settings",
-        expanded=False,
-    ):
-        st.markdown(
-            "These settings affect processing speed but not biological results, and should be left at default values most of the time."
-        )
-        tcol1, tcol2, tcol3 = st.columns(3)
-
-        with tcol1:
-            persist_value("ncbi_batch_size", NCBI_BATCH_SIZE_DEFAULT)
-            batch_size = st.number_input(
-                "Batch size",
-                1,
-                100,
-                help=BLAST_HELP["batch_size"],
-                key="ncbi_batch_size",
-            )
-            save_widget("ncbi_batch_size")
-        with tcol2:
-            persist_value("ncbi_num_threads", NCBI_NUM_THREADS_DEFAULT)
-            threads = st.number_input(
-                "Parallel threads",
-                1,
-                BLAST_MAX_THREADS,
-                help=BLAST_HELP["n_threads"],
-                key="ncbi_num_threads",
-            )
-            save_widget("ncbi_num_threads")
-        with tcol3:
-            persist_value("ncbi_give_up", BLAST_GIVE_UP_MINUTES_DEFAULT)
-            give_up = st.number_input(
-                "Give up after (min)",
-                BLAST_GIVE_UP_MINUTES_MIN,
-                None,  # no upper limit: a job waiting longer is still polled
-                help=BLAST_HELP["give_up"],
-                key="ncbi_give_up",
-            )
-            save_widget("ncbi_give_up")
+    batch_size, threads, give_up = blast_speed_settings(
+        "ncbi",
+        NCBI_BATCH_SIZE_DEFAULT,
+        NCBI_NUM_THREADS_DEFAULT,
+        BLAST_GIVE_UP_MINUTES_DEFAULT,
+    )
 
     return max_hits, ev_exponent, batch_size, threads, give_up
 
@@ -219,18 +185,15 @@ def ncbi_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
     email = config.contact_email()
     total_sequences = len(sequences)
     progress_info = {"current": 0, "total": total_sequences}
-    progress_placeholder = st.empty()
 
     # 3. Run NCBI search in a background thread
-    def _poll():
-        curr_seq, total = progress_info["current"], progress_info["total"]
-        if total > 0:
-            percent = min(curr_seq / total, 1.0)
-            progress_bar.progress(
-                percent,
-                text=f"Search: {curr_seq}/{total} "
-                f"{pluralize(total, 'sequence')} blasted...",
-            )
+    _poll = count_progress(
+        progress_bar,
+        progress_info,
+        lambda curr, total: (
+            f"Search: {curr}/{total} {pluralize(total, 'sequence')} blasted..."
+        ),
+    )
 
     ncbi_search_df, ncbi_search_params = run_with_progress(
         logsink.wrap(pipe.run_ncbi_search, before=lambda: set_ncbi_email(email)),
@@ -251,7 +214,6 @@ def ncbi_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
 
     # Final UI update before clearing
     progress_bar.empty()
-    progress_placeholder.empty()
 
     st.session_state.ncbi_search_df = ncbi_search_df
     st.session_state.ncbi_search_params = ncbi_search_params

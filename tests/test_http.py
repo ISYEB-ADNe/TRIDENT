@@ -1,6 +1,7 @@
 """Per-call retries (``retry_call``): the call is re-run after each delay and
 only the last failure is raised. A stopped step sends nothing and is not
-retried."""
+retried. A function taking an optional session gets one built for the call
+unless given one."""
 
 import threading
 import time
@@ -8,7 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 import trident.core.stop as stop
-from trident.core.http import create_session, retry_call
+import trident.core.http as http
+from trident.core.http import create_session, retry_call, with_optional_session
 
 
 @pytest.fixture
@@ -82,3 +84,34 @@ def test_stop_ends_a_request_waiting_to_be_retried():
         start = time.monotonic()
         retry.sleep(response)
     assert time.monotonic() - start < 1
+
+
+def test_a_session_is_built_for_the_call_only_when_none_is_given(monkeypatch):
+    """Given by position or by keyword, the caller's session is used as is;
+    otherwise one is built with the call's user agent and closed after it."""
+    built = []
+
+    class FakeSession:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    def fake_create_session(**kwargs):
+        built.append(kwargs["user_agent"])
+        return FakeSession()
+
+    monkeypatch.setattr(http, "create_session", fake_create_session)
+
+    @with_optional_session()
+    def fetch(name, session=None, user_agent=None):
+        return session
+
+    mine = FakeSession()
+    assert fetch("a", mine) is mine
+    assert fetch("a", session=mine) is mine
+    assert built == []
+
+    own = fetch("a", None, "trident-test")
+    assert built == ["trident-test"]
+    assert own.closed and not mine.closed

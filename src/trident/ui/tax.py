@@ -20,6 +20,7 @@ from trident.ui.ui import (
     styled_or_plain,
     column_config,
     StreamlitLogSink,
+    count_progress,
     run_with_progress,
     reset_state_after,
     highlight_in_mol,
@@ -72,13 +73,13 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
     ncbi_taxids = pipe.prepare_resolution_taxids(mol_df)
     res_info = {"current": 0, "total": len(res_names)}
 
-    def _res_poll():
-        curr, total = res_info["current"], res_info["total"]
-        if total > 0:
-            progress_bar.progress(
-                min(curr / total, 1.0),
-                text=f"Name check: {curr}/{total} MOL {pluralize(total, 'name')}",
-            )
+    _res_poll = count_progress(
+        progress_bar,
+        res_info,
+        lambda curr, total: (
+            f"Name check: {curr}/{total} MOL {pluralize(total, 'name')}"
+        ),
+    )
 
     resolution_df, _ = run_with_progress(
         logsink.wrap(pipe.run_name_resolution),
@@ -103,14 +104,13 @@ def worms_search_job(*, force_rerun, retry_empty=False, status, progress_bar, pa
     progress_info = {"current": 0, "total": total_names}
 
     # 3. Background Execution
-    def _poll():
-        curr, total = progress_info["current"], progress_info["total"]
-        if total > 0:
-            percent = min(curr / total, 1.0)
-            progress_bar.progress(
-                percent,
-                text=f"Search: {curr}/{total} {pluralize(total, 'genus')} expanded",
-            )
+    _poll = count_progress(
+        progress_bar,
+        progress_info,
+        lambda curr, total: (
+            f"Search: {curr}/{total} {pluralize(total, 'genus')} expanded"
+        ),
+    )
 
     worms_search_df, worms_search_params = run_with_progress(
         logsink.wrap(pipe.run_worms_search),

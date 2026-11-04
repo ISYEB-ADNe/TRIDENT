@@ -1,10 +1,9 @@
-"""The low identity warnings of the results pipeline: the Results tab's (by
-each sequence's best identity) and the notebook's (by row)."""
+"""The low identity warning of the Results tab: by each sequence's best
+identity."""
 
 import pandas as pd
 
 from trident.pipelines.results_pipeline import (
-    add_low_identity_warning,
     best_identity_per_sequence,
     flag_low_identity,
 )
@@ -54,22 +53,3 @@ def test_a_sequence_is_flagged_by_the_best_identity_of_its_species():
         "s4": False,
         "s5": True,
     }
-
-
-def test_a_row_is_flagged_only_when_its_identity_is_below_the_threshold():
-    """Strictly below: a row at the threshold, without identity, or with one
-    that is not a number is not flagged; identities read back as text count
-    as numbers."""
-    df = pd.DataFrame(
-        {"mol_identity": [99.0, 93.0, 97.0, pd.NA, "95.5", "98", "not_a_number"]}
-    )
-    result = add_low_identity_warning(df, threshold=97)
-    assert result["low_identity_warning"].tolist() == [
-        False,
-        True,
-        False,
-        False,
-        True,
-        False,
-        False,
-    ]

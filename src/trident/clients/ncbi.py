@@ -94,43 +94,19 @@ def require_ncbi_auth(func: Callable) -> Callable:
 
 
 def create_sequence_batches(
-    sequences: list[SeqRecord],
-    batch_size: int | None = None,
-    n_batches: int | None = None,
-) -> list[list[SeqRecord]]:
-    """Split a sequence list into evenly-sized batches for parallel processing.
+    sequences: list[SeqRecord] | pd.DataFrame, batch_size: int = 50
+) -> list:
+    """Split *sequences* (a list, or a DataFrame by rows) into batches of at
+    most *batch_size*, as few as that allows.
 
     Batches are balanced: any remainder is distributed one element at a time
     across the first batches, so sizes differ by at most 1.
-
-    Provide either batch_size OR n_batches, not both. If neither is given,
-    defaults to batch_size=50.
-
-    Args:
-        sequences: List of sequences to split.
-        batch_size: Target size of each batch.
-        n_batches: Desired number of batches.
-
-    Returns:
-        List of batches, each batch being a sublist of sequences.
-
-    Raises:
-        ValueError: If both batch_size and n_batches are provided.
     """
-    if batch_size is not None and n_batches is not None:
-        raise ValueError("Provide either batch_size or n_batches, not both")
-
     total = len(sequences)
     if total == 0:
         return []
-
-    if n_batches is None:
-        if batch_size is None:
-            batch_size = 50
-        n_batches = (total + batch_size - 1) // batch_size
-
-    base_size = total // n_batches
-    remainder = total % n_batches
+    n_batches = (total + batch_size - 1) // batch_size
+    base_size, remainder = divmod(total, n_batches)
 
     batches = []
     start = 0

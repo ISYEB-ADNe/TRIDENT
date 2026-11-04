@@ -20,6 +20,7 @@ rather than cached as empty (see ``trident.core.database.save_to_db``).
 
 import contextlib
 import contextvars
+import inspect
 from functools import wraps
 from typing import Callable
 
@@ -176,8 +177,10 @@ def with_optional_session(
     Per-request retry level (see the module docstring). If the caller passes
     ``session=...``, that session is used as is, with its own retry settings;
     otherwise a temporary one is built with ``create_session(retries,
-    backoff_factor)`` and closed after the call. Passing one session to many
-    calls reuses its connection pool.
+    backoff_factor)``, with the call's ``user_agent`` if it has one, and
+    closed after the call. ``session`` and ``user_agent`` may be passed by
+    position or by keyword. Passing one session to many calls reuses its
+    connection pool.
 
     The retries happen inside each ``session.get``: the wrapped function only
     sees the final response, or the exception once retries are exhausted. It
@@ -192,23 +195,25 @@ def with_optional_session(
     """
 
     def decorator(func: Callable) -> Callable:
+        signature = inspect.signature(func)
+
         @wraps(func)
         def wrapper(*args, **kwargs):
-            session: requests.Session | None = kwargs.get("session")
-            created_here = session is None
-
+            # Bound by name: session and user_agent may come by position.
+            call = signature.bind(*args, **kwargs)
+            created_here = call.arguments.get("session") is None
             if created_here:
-                session = create_session(
+                call.arguments["session"] = create_session(
                     retries=retries,
                     backoff_factor=backoff_factor,
+                    user_agent=call.arguments.get("user_agent"),
                 )
-                kwargs["session"] = session
 
             try:
-                return func(*args, **kwargs)
+                return func(*call.args, **call.kwargs)
             finally:
                 if created_here:
-                    session.close()
+                    call.arguments["session"].close()
 
         return wrapper
 

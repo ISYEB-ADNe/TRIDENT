@@ -12,7 +12,6 @@ taxa (run_higher_taxa_lookup), saved per name like the other steps' searches.
     filter_excluded_results(results_df, excluded) → DataFrame (excluded species rows dropped)
     build_assignments(curated_df, threshold, query_cover, lost_at) → DataFrame (one row per sequence)
     add_check_result(df, ncbi_search_df, ...) → DataFrame (the HYPO check's result per candidate)
-    add_low_identity_warning(df, threshold) → DataFrame
     best_identity_per_sequence(df, query_cover) → DataFrame (identity and via per sequence)
     flag_low_identity(df, threshold, best_identity) → DataFrame
     build_species_flow(seq_id, ..., name_table) → list of (source, target, names) links
@@ -327,17 +326,6 @@ def _kept_by_mol_filter(seq_ids, identity, cover, ncbi_search_df, **settings):
     kept = filter_blast_results(copies, **settings)
     kept_keys = set(kept.loc[kept["scientificName"] == _CHECK_HIT, "seq_id"])
     return keys["key"].isin(kept_keys).to_numpy()
-
-
-def add_low_identity_warning(df, threshold, identity_col="mol_identity"):
-    """Flag rows where identity is present and below threshold."""
-    df[identity_col] = pd.to_numeric(df[identity_col], errors="coerce")
-    # `lt` returns False (not NA) for NaN, and `&` of two boolean Series is
-    # always a clean boolean, so no fillna is needed.
-    df["low_identity_warning"] = (
-        df[identity_col].lt(threshold) & df[identity_col].notna()
-    )
-    return df
 
 
 def best_identity_per_sequence(df, query_cover):

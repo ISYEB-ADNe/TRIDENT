@@ -24,7 +24,7 @@ from trident.clients.ncbi import BLAST_SLOW_THREADS
 from trident.core.constants import BLAST_DATABASE
 from trident.core.utils import name_list
 from trident.core import stop
-from trident.core.database import get_connection
+from trident.core.database import get_connection, table_columns
 from trident.pipelines.names import replace_source_rows, same_species_groups
 from trident.pipelines.results_pipeline import (
     CHECK_DIFFERS,
@@ -38,6 +38,8 @@ from trident.pipelines.results_pipeline import (
 )
 from trident.logging import get_log_level
 from trident.ui.defaults import (
+    BLAST_GIVE_UP_MINUTES_MIN,
+    BLAST_MAX_THREADS,
     NCBI_GAP_MIN_TOP_DEFAULT,
     NCBI_GAP_SIZE_DEFAULT,
     NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT,
@@ -357,7 +359,7 @@ BLAST_HELP = {
         "a user to a slower queue. A search too heavy for NCBI is split into "
         "smaller ones; if many batches fail, lower the batch size."
     ),
-    "n_threads": (
+    "num_threads": (
         "Number of BLAST searches run at NCBI at the same time. More can speed up "
         "large inputs, but NCBI throttles heavy use, so too many can make batches "
         "fail. A search left waiting at NCBI makes way for another one, up to "
@@ -534,11 +536,15 @@ def persist_value(key: str, default):
     widget is already on screen, the key exists and this is a no-op.
     """
     if key not in st.session_state:
-        overrides = st.session_state._widget_overrides
-        if key in overrides:
-            st.session_state[key] = coerce_stored_value(overrides[key], default)
-        else:
-            st.session_state[key] = default
+        st.session_state[key] = stored_value(key, default)
+
+
+def stored_value(key: str, default):
+    """The value last set in widget *key* (saved by ``save_widget``) with the
+    type of *default*, or *default*; also read while the widget is not on
+    screen."""
+    overrides = st.session_state._widget_overrides
+    return coerce_stored_value(overrides[key], default) if key in overrides else default
 
 
 def save_widget(key: str):
@@ -547,6 +553,60 @@ def save_widget(key: str):
     Call AFTER creating the widget.
     """
     st.session_state._widget_overrides[key] = st.session_state[key]
+
+
+def blast_speed_settings(prefix: str, batch_size: int, threads: int, give_up: int):
+    """The "Advanced Search Settings" expander of a BLAST search (MOL, HYPO).
+
+    Widgets ``{prefix}_batch_size``, ``{prefix}_num_threads`` and
+    ``{prefix}_give_up``, seeded with the given defaults. Returns the batch
+    size, the parallel threads and the minutes before giving up.
+    """
+
+    def speed_input(name, label, low, high, default):
+        key = f"{prefix}_{name}"
+        persist_value(key, default)
+        value = st.number_input(label, low, high, help=BLAST_HELP[name], key=key)
+        save_widget(key)
+        return value
+
+    with st.expander("🛠️ Advanced Search Settings", expanded=False):
+        st.markdown(
+            "These settings affect processing speed but not biological results, "
+            "and should be left at default values most of the time."
+        )
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            batch_size = speed_input("batch_size", "Batch size", 1, 100, batch_size)
+        with col2:
+            threads = speed_input(
+                "num_threads", "Parallel threads", 1, BLAST_MAX_THREADS, threads
+            )
+        with col3:
+            # No upper limit: a job waiting longer is still polled.
+            give_up = speed_input(
+                "give_up",
+                "Give up after (min)",
+                BLAST_GIVE_UP_MINUTES_MIN,
+                None,
+                give_up,
+            )
+    return batch_size, threads, give_up
+
+
+def count_progress(progress_bar, progress_info: dict, text: Callable[[int, int], str]):
+    """An ``on_poll`` for ``run_with_progress`` drawing a count job's progress.
+
+    *progress_info* holds the job's ``current`` and ``total``; *text* turns
+    them into the bar's text. Nothing is drawn while the total is unknown (0).
+    """
+
+    def poll():
+        curr, total = progress_info["current"], progress_info["total"]
+        if total > 0:
+            progress_bar.progress(min(curr / total, 1.0), text=text(curr, total))
+
+    return poll
 
 
 def reset_state_after(key_name: str):
@@ -1579,8 +1639,7 @@ def get_recent_param_sets(db_path, table_name, columns, limit=5, only=None):
     try:
         with get_connection(db_path) as conn:
             # A table without one of these columns predates that setting: no preset
-            info = conn.execute(f"PRAGMA table_info({table_name})")
-            stored = {row[1] for row in info}
+            stored = set(table_columns(conn, table_name))
             if stored and not set(columns) | set(only) <= stored:
                 logger.debug(f"No presets from {table_name}: written before {columns}")
                 return []

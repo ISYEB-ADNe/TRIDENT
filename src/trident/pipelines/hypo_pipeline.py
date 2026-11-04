@@ -700,7 +700,8 @@ def run_hypo_check(
     hypothetical species, under all their names; any hit (hit_found) means
     GenBank holds the target marker for that species.
     The sequences of one species share its Entrez query, so they are sent
-    together, in batches of *batch_size*: NCBI returns the hits of each
+    together, in batches of at most *batch_size* (balanced, see
+    ``create_sequence_batches``): NCBI returns the hits of each
     sequence apart, *hitlist_size* hits per sequence. All batches run as one
     parallel BLAST run (``run_blast_pool``).
 
@@ -736,11 +737,11 @@ def run_hypo_check(
     # Each check is saved as its input row (seq_id, dna_sequence, species) with
     # its hits added.
     batches = [
-        (sci_name, group.iloc[i : i + batch_size])
+        (sci_name, batch)
         for sci_name, group in sequences_df.groupby(
             "scientificName", sort=False, dropna=False
         )
-        for i in range(0, len(group), batch_size)
+        for batch in create_sequence_batches(group, batch_size)
     ]
     n_species = sequences_df["scientificName"].nunique(dropna=False)
     log.batches(len(batches), "one or more per species", of=f"{n_species} species")
