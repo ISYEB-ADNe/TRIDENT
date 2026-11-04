@@ -11,6 +11,7 @@ from loguru import logger
 from trident.clients.fasta import clean_sequence
 from trident.core import stop
 from trident.core.http import with_optional_session
+from trident.core.constants import BOLD_KEEP_ONLY_COI5P, BOLD_KEEP_NCBI
 from trident.core.utils import (
     count_phrase,
     StepLog,
@@ -183,7 +184,9 @@ SPECIES_NAME = "species name"
 
 
 def _filter_records(
-    records: list[dict], keep_only_COI5P: bool = True, keep_ncbi: bool = False
+    records: list[dict],
+    keep_only_COI5P: bool = BOLD_KEEP_ONLY_COI5P,
+    keep_ncbi: bool = BOLD_KEEP_NCBI,
 ) -> tuple[list[dict], str | None]:
     """The records the search keeps, and the outcome of the filter that left
     none (None when some are kept).
@@ -209,7 +212,9 @@ def _filter_records(
 
 
 def _clean_records(
-    records: list[dict], keep_only_COI5P: bool = True, keep_ncbi: bool = False
+    records: list[dict],
+    keep_only_COI5P: bool = BOLD_KEEP_ONLY_COI5P,
+    keep_ncbi: bool = BOLD_KEEP_NCBI,
 ) -> tuple[pd.DataFrame, str | None]:
     """The raw BOLD API records the search keeps (_filter_records) as a
     DataFrame of BOLD_RECORD_COLUMNS, and the outcome of the filter that left
@@ -443,8 +448,8 @@ def get_records_from_species_list(
     other_names: dict[str, list[tuple[str, str]]] | None = None,
     rate_limit_delay: float = 10.0,
     session: requests.Session | None = None,
-    keep_only_COI5P: bool = True,
-    keep_ncbi: bool = False,
+    keep_only_COI5P: bool = BOLD_KEEP_ONLY_COI5P,
+    keep_ncbi: bool = BOLD_KEEP_NCBI,
     progress_handler: dict | object | None = None,
     user_agent: str | None = None,
     result_sink: Callable | None = None,

@@ -28,7 +28,12 @@ from trident.core.utils import (
     notify_progress,
     normalize_name,
 )
-from trident.core.constants import BOLD_SIMILARITY
+from trident.core.constants import (
+    BOLD_SIMILARITY,
+    BOLD_KEEP_ONLY_COI5P,
+    BOLD_KEEP_NCBI,
+    BOLD_LONGEST_N,
+)
 from trident.core.database import (
     save_to_db,
     PartialCache,
@@ -137,8 +142,8 @@ def prepare_bold_other_names(
 def run_bold_search(
     species_list: list[str],
     other_names: dict[str, list[tuple[str, str]]] | None = None,
-    keep_only_COI5P: bool = True,
-    keep_ncbi: bool = False,
+    keep_only_COI5P: bool = BOLD_KEEP_ONLY_COI5P,
+    keep_ncbi: bool = BOLD_KEEP_NCBI,
     progress_handler: dict | object | None = None,
     user_agent: str | None = None,
     failure_sink: list | None = None,
@@ -231,7 +236,7 @@ def _bold_filter_rebuild(input_selected, original_inputs):
 )
 def run_bold_filter(
     bold_search_df: pd.DataFrame,
-    longest_n: int | None = None,
+    longest_n: int | None = BOLD_LONGEST_N,
     similarity: float = BOLD_SIMILARITY,
     bold_search_params: dict | None = None,
     progress_handler: dict | None = None,

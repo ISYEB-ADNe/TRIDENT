@@ -9,6 +9,7 @@ from loguru import logger
 
 from trident.core import stop
 from trident.core.http import create_session, with_optional_session
+from trident.core.constants import WORMS_MARINE_ONLY
 from trident.core.utils import (
     StepLog,
     drop_subgenus,
@@ -322,7 +323,7 @@ def get_children_by_aphia_id(
     aphia_id: int,
     session: requests.Session | None = None,
     timeout: int = 20,
-    marine_only: bool = True,
+    marine_only: bool = WORMS_MARINE_ONLY,
 ) -> list[dict]:
     """Retrieve all child taxa under an AphiaID with pagination.
 
@@ -506,7 +507,7 @@ def get_species_from_genus_list(
     accepted_only: bool = True,
     progress_handler: dict | object | None = None,
     user_agent: str | None = None,
-    marine_only: bool = True,
+    marine_only: bool = WORMS_MARINE_ONLY,
     result_sink: Callable | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Retrieve and consolidate WoRMS species for a list of genera.

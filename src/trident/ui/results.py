@@ -50,8 +50,7 @@ from trident.ui.ui import (
     held_steps,
     ready,
     SELECTED_SEQUENCE_KEY,
-    persist_value,
-    save_widget,
+    setting_widget,
     styled_or_plain,
     highlight_low_identity,
     CHECK_LABELS,
@@ -227,12 +226,14 @@ def _threshold_slider():
         st.session_state._flag_identity_seed = default
         st.session_state[THRESHOLD_KEY] = default
         st.session_state._widget_overrides[THRESHOLD_KEY] = default
-    persist_value(THRESHOLD_KEY, default)
-    threshold = st.slider(
-        "Flag sequences whose best identity is below (%)",
+    threshold = setting_widget(
+        st.slider,
+        THRESHOLD_KEY,
+        default,
         50,
         100,
-        key=THRESHOLD_KEY,
+        label="Flag sequences whose best identity is below (%)",
+        caption=False,
         help=(
             "Starts at the MOL filter's low identity warning. A sequence whose "
             "best NCBI identity is below it is flagged; nothing is removed. A "
@@ -240,7 +241,6 @@ def _threshold_slider():
             "species its CO1 proxy hit."
         ),
     )
-    save_widget(THRESHOLD_KEY)
     return threshold
 
 
@@ -507,11 +507,13 @@ def show_assignments(assignments, curated_df, threshold):
         counts = {
             choice: len(_filtered_seq_ids(assignments, choice)) for choice in FILTERS
         }
-        persist_value(FILTER_KEY, "All")
-        choice = st.segmented_control(
-            "Show",
+        choice = setting_widget(
+            st.segmented_control,
+            FILTER_KEY,
+            "All",
             FILTERS,
-            key=FILTER_KEY,
+            label="Show",
+            caption=False,
             format_func=lambda c: f"{c} ({counts[c]})",
             help=(
                 f"{CHECK_LABELS[CHECK_DIFFERS]}, a {CHECK_NOTES[CHECK_DIFFERS]}. "
@@ -519,7 +521,6 @@ def show_assignments(assignments, curated_df, threshold):
                 f"Low identity: best NCBI identity below {threshold}%."
             ),
         )
-        save_widget(FILTER_KEY)
         # Clicking the active button deselects it: show everything then.
         choice = choice or "All"
         show_bulk_buttons(assignments, curated_df, threshold)

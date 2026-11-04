@@ -42,8 +42,9 @@ from trident.ui.ui import (
     param_preset_selector,
     coerce_stored_value,
     mol_filter_settings,
-    persist_value,
-    save_widget,
+    setting_widget,
+    style_slider,
+    ev_exponent_widget,
     reset_state_after,
     highlight_low_identity,
     StreamlitLogSink,
@@ -115,40 +116,24 @@ def display_ncbi_parameters():
 
     stored = st.session_state.ncbi_search_params
 
-    default_hits = stored.get("ncbi_max_hits") or NCBI_MAX_HITS_DEFAULT
-    default_ev_exponent = stored.get("ncbi_ev_exponent") or NCBI_EV_EXPONENT_DEFAULT
-
     # --- Row 1: Primary Scientific Parameters ---
     col1, col2 = st.columns(2)
 
     with col1:
-        persist_value("ncbi_max_hits", int(default_hits))
-        max_hits = st.number_input(
-            SETTING_LABELS["ncbi_max_hits"],
+        max_hits = setting_widget(
+            st.number_input,
+            "ncbi_max_hits",
+            NCBI_MAX_HITS_DEFAULT,
             1,
             NCBI_MAX_HITS_LIMIT,
+            applied=stored,
             help=BLAST_HELP["max_hits"],
-            key="ncbi_max_hits",
         )
-        save_widget("ncbi_max_hits")
-        active_hits = stored.get("ncbi_max_hits", "None")
-        st.caption(f"Active in results: **{active_hits}**")
 
     with col2:
-        persist_value("ncbi_ev_exponent", int(default_ev_exponent))
-        ev_exponent = st.number_input(
-            f"{SETTING_LABELS['ncbi_ev_exponent']} ($10^{{-x}}$)",
-            0,
-            50,
-            help=BLAST_HELP["ev_exponent"],
-            key="ncbi_ev_exponent",
+        ev_exponent = ev_exponent_widget(
+            "ncbi_ev_exponent", NCBI_EV_EXPONENT_DEFAULT, 50, stored
         )
-        save_widget("ncbi_ev_exponent")
-        active_ev = stored.get("ncbi_ev_exponent", "None")
-        threshold_str = (
-            f"(threshold: $10^{{-{active_ev}}}$)" if active_ev != "None" else ""
-        )
-        st.caption(f"Active in results: **{active_ev}** {threshold_str}")
 
     sequences_df = st.session_state.get("sequences_df")
     if sequences_df is not None and ev_exponent > SHORT_SEQUENCE_EV_EXPONENT:
@@ -312,7 +297,9 @@ def ncbi_filter_controls():
             + f", low identity: {p['ncbi_low_identity_threshold']}%"
             + (
                 " (enforced)"
-                if coerce_stored_value(p["ncbi_enforce_low_identity"], False)
+                if coerce_stored_value(
+                    p["ncbi_enforce_low_identity"], NCBI_ENFORCE_LOW_IDENTITY_DEFAULT
+                )
                 else ""
             )
         ),
@@ -321,98 +308,71 @@ def ncbi_filter_controls():
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        methods = list(FILTER_METHOD_LABELS.keys())
-        default_method = stored.get("ncbi_method") or NCBI_METHOD_DEFAULT
-        persist_value("ncbi_method", default_method)
-        method = st.selectbox(
-            SETTING_LABELS["ncbi_method"],
-            methods,
+        method = setting_widget(
+            st.selectbox,
+            "ncbi_method",
+            NCBI_METHOD_DEFAULT,
+            list(FILTER_METHOD_LABELS),
+            applied=stored,
             format_func=lambda m: FILTER_METHOD_LABELS[m],
             help="Barcoding gap: keep the hits above a barcoding gap, or within "
             "the similarity range of the best hit when there is none. Similarity "
             "range: always the latter.",
-            key="ncbi_method",
         )
-        save_widget("ncbi_method")
-        active_method = stored.get("ncbi_method", "None")
-        active_label = FILTER_METHOD_LABELS.get(active_method, active_method)
-        st.caption(f"Active in results: **{active_label}**")
     with col2:
-        default_qc = int(stored.get("ncbi_query_cover") or NCBI_QUERY_COVER_DEFAULT)
-        persist_value("ncbi_query_cover", default_qc)
-        qc = st.slider(
-            SETTING_LABELS["ncbi_query_cover"],
+        qc = setting_widget(
+            st.slider,
+            "ncbi_query_cover",
+            NCBI_QUERY_COVER_DEFAULT,
             1,
             100,
+            applied=stored,
             help="Minimum percentage of the query sequence that must be covered by the hit",
-            key="ncbi_query_cover",
         )
-        save_widget("ncbi_query_cover")
-        active_qc = stored.get("ncbi_query_cover", "None")
-        st.caption(f"Active in results: **{active_qc}**")
     with col3:
-        default_gap_size = int(stored.get("ncbi_gap_size") or NCBI_GAP_SIZE_DEFAULT)
-        persist_value("ncbi_gap_size", default_gap_size)
-        gap_size = st.slider(
-            SETTING_LABELS["ncbi_gap_size"],
+        gap_size = setting_widget(
+            st.slider,
+            "ncbi_gap_size",
+            NCBI_GAP_SIZE_DEFAULT,
             0,
             20,
+            applied=stored,
             help="Minimum drop in identity percentage that defines the barcoding gap, or the maximum difference from the best hit with the similarity range",
-            key="ncbi_gap_size",
         )
-        save_widget("ncbi_gap_size")
-        active_gap_size = stored.get("ncbi_gap_size", "None")
-        st.caption(f"Active in results: **{active_gap_size}**")
 
     with st.expander("🛠️ Advanced Filter Settings", expanded=False):
         acol1, acol2 = st.columns(2)
         with acol1:
             if method == "barcoding_gap":
-                default_gap_min_top = int(
-                    stored.get("ncbi_gap_min_top") or NCBI_GAP_MIN_TOP_DEFAULT
-                )
-                persist_value("ncbi_gap_min_top", default_gap_min_top)
-                gap_min_top = st.slider(
-                    SETTING_LABELS["ncbi_gap_min_top"],
+                gap_min_top = setting_widget(
+                    st.slider,
+                    "ncbi_gap_min_top",
+                    NCBI_GAP_MIN_TOP_DEFAULT,
                     50,
                     100,
+                    applied=stored,
                     help="The top of the barcoding gap must begin at or above this identity percentage",
-                    key="ncbi_gap_min_top",
                 )
-                save_widget("ncbi_gap_min_top")
-                active_gap_min_top = stored.get("ncbi_gap_min_top", "None")
-                st.caption(f"Active in results: **{active_gap_min_top}**")
             else:
                 gap_min_top = NCBI_GAP_MIN_TOP_DEFAULT
         with acol2:
-            default_lit = int(
-                stored.get("ncbi_low_identity_threshold")
-                or NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
-            )
-            persist_value("ncbi_low_identity_threshold", default_lit)
-            low_identity_threshold = st.slider(
-                SETTING_LABELS["ncbi_low_identity_threshold"],
+            low_identity_threshold = setting_widget(
+                st.slider,
+                "ncbi_low_identity_threshold",
+                NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT,
                 50,
                 100,
+                applied=stored,
                 help="Hits below this identity are highlighted (red), and in the summary, the sequences with a species whose best hit is below it.",
-                key="ncbi_low_identity_threshold",
             )
-            save_widget("ncbi_low_identity_threshold")
-            active_lit = stored.get("ncbi_low_identity_threshold", "None")
-            st.caption(f"Active in results: **{active_lit}**")
-
-            default_enforce = (
-                stored.get("ncbi_enforce_low_identity")
-                if stored.get("ncbi_enforce_low_identity") is not None
-                else NCBI_ENFORCE_LOW_IDENTITY_DEFAULT
-            )
-            persist_value("ncbi_enforce_low_identity", default_enforce)
-            enforce_low_identity = st.checkbox(
-                SETTING_LABELS["ncbi_enforce_low_identity"],
+            enforce_low_identity = setting_widget(
+                st.checkbox,
+                "ncbi_enforce_low_identity",
+                NCBI_ENFORCE_LOW_IDENTITY_DEFAULT,
+                applied=stored,
+                caption=False,
                 help="Remove hits below the threshold instead of just highlighting them",
-                key="ncbi_enforce_low_identity",
             )
-            save_widget("ncbi_enforce_low_identity")
 
     return (
         method,
@@ -661,14 +621,6 @@ def display_ncbi_sequence_summary(sequence_data):
     )
 
 
-def _style_slider(label, key, default, *args, **kwargs):
-    """A plot style slider whose value is kept across sequences and tabs."""
-    persist_value(key, default)
-    value = st.slider(label, *args, key=key, **kwargs)
-    save_widget(key)
-    return value
-
-
 def display_ncbi_sequence_plots(
     selected_sequence, sequence_ncbi_data, ncbi_filtered_df, cut
 ):
@@ -686,29 +638,30 @@ def display_ncbi_sequence_plots(
         max(math.floor(all_identities.min()) - 1, 0) if not all_identities.empty else 80
     )
 
-    persist_value("mol_plot_view", "Bars")
-    view = st.radio(
-        "View",
+    view = setting_widget(
+        st.radio,
+        "mol_plot_view",
+        "Bars",
         ["Bars", "Points"],
+        label="View",
+        caption=False,
         horizontal=True,
-        key="mol_plot_view",
         help="Bars: number of hits per identity bin, stacked by species. "
         "Points: one point per hit.",
     )
-    save_widget("mol_plot_view")
 
     # Plot style controls
     with st.expander("Plot settings", expanded=False):
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            font_size = _style_slider("Axis text", "mol_plot_font", 14, 8, 24)
+            font_size = style_slider("mol_plot_font", "Axis text", 14, 8, 24)
         with col2:
-            legend_size = _style_slider("Legend text", "mol_plot_legend", 12, 6, 20)
+            legend_size = style_slider("mol_plot_legend", "Legend text", 12, 6, 20)
         with col3:
             if view == "Bars":
-                bin_width = _style_slider(
-                    "Bin width (%)",
+                bin_width = style_slider(
                     "mol_plot_bin",
+                    "Bin width (%)",
                     0.2,
                     0.1,
                     1.0,
@@ -718,10 +671,10 @@ def display_ncbi_sequence_plots(
                     "with the same number of mismatches.",
                 )
             else:
-                marker_size = _style_slider("Marker size", "mol_plot_marker", 10, 4, 20)
+                marker_size = style_slider("mol_plot_marker", "Marker size", 10, 4, 20)
         with col4:
-            plot_height = _style_slider(
-                "Plot height", "mol_plot_height", 500, 300, 900, step=50
+            plot_height = style_slider(
+                "mol_plot_height", "Plot height", 500, 300, 900, step=50
             )
 
         range_key = f"yrange_{selected_sequence}"

@@ -6,7 +6,6 @@ import streamlit as st
 
 
 from trident.core.utils import (
-    SETTING_LABELS,
     failed_items,
     pluralize,
     species_for_sequences,
@@ -14,6 +13,10 @@ from trident.core.utils import (
 from trident.core import config
 import trident.pipelines as pipe
 
+from trident.ui.defaults import (
+    TAX_DROP_MOL_REJECTED_DEFAULT,
+    WORMS_MARINE_ONLY_DEFAULT,
+)
 from trident.ui.ui import (
     record_empty_step,
     lazy_expander,
@@ -30,8 +33,8 @@ from trident.ui.ui import (
     sequence_selector,
     run_step_workflow,
     require_prerequisite,
-    persist_value,
-    save_widget,
+    coerce_stored_value,
+    setting_widget,
 )
 
 
@@ -178,22 +181,23 @@ def worms_search_workflow():
         st.markdown("### ⚙️ Search Execution")
 
         with st.expander("🛠️ Advanced Search Settings", expanded=False):
-            persist_value("worms_marine_only", True)
-            marine_only = st.checkbox(
-                SETTING_LABELS["worms_marine_only"],
-                key="worms_marine_only",
+            marine_only = setting_widget(
+                st.checkbox,
+                "worms_marine_only",
+                WORMS_MARINE_ONLY_DEFAULT,
+                applied=st.session_state.tax_params,
                 help=(
                     "Restrict WoRMS expansion to marine-flagged species "
                     "(default). WoRMS counts brackish species as marine too. "
                     "Uncheck to also include non-marine WoRMS records."
                 ),
             )
-            save_widget("worms_marine_only")
 
-            persist_value("tax_drop_mol_rejected", True)
-            drop_mol_rejected = st.checkbox(
-                SETTING_LABELS["tax_drop_mol_rejected"],
-                key="tax_drop_mol_rejected",
+            drop_mol_rejected = setting_widget(
+                st.checkbox,
+                "tax_drop_mol_rejected",
+                TAX_DROP_MOL_REJECTED_DEFAULT,
+                applied=st.session_state.tax_params,
                 help=(
                     "For each sequence, leave out the species added by TAX that BLAST "
                     "returned for it but that failed the MOL filter (default). "
@@ -201,7 +205,6 @@ def worms_search_workflow():
                     "sequence is kept for the others. Uncheck to keep them."
                 ),
             )
-            save_widget("tax_drop_mol_rejected")
 
         current_params = {
             "worms_marine_only": marine_only,
@@ -363,7 +366,10 @@ def display_mol_rejected(seq_id=None):
         if rejected.empty:
             return
     n_species = rejected["scientificName"].nunique()
-    dropped = st.session_state.tax_params.get("tax_drop_mol_rejected", False)
+    # Unknown (params without the setting): not claimed as left out.
+    dropped = coerce_stored_value(
+        st.session_state.tax_params.get("tax_drop_mol_rejected"), False
+    )
     if seq_id is None:
         title = f"🚫 {species_for_sequences(rejected)} already rejected by MOL"
     else:

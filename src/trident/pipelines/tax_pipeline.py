@@ -27,6 +27,7 @@ from loguru import logger
 
 from trident.core.database import save_to_db, PartialCache, FullCache
 from trident.core.http import create_session
+from trident.core.constants import WORMS_MARINE_ONLY, TAX_DROP_MOL_REJECTED
 from trident.core.utils import (
     StepLog,
     as_ids,
@@ -292,7 +293,7 @@ def run_worms_search(
     genera_list: list[str],
     progress_handler: dict | object | None = None,
     user_agent: str | None = None,
-    marine_only: bool = True,
+    marine_only: bool = WORMS_MARINE_ONLY,
     failure_sink: list | None = None,
     result_sink: Callable | None = None,
 ) -> pd.DataFrame:
@@ -572,7 +573,7 @@ def finalize_tax_results(
     *,
     ncbi_search_df: pd.DataFrame | None,
     name_table: pd.DataFrame | None,
-    drop_mol_rejected: bool = True,
+    drop_mol_rejected: bool = TAX_DROP_MOL_REJECTED,
 ) -> pd.DataFrame:
     """Finalize the TAX list for export or downstream analysis.
 

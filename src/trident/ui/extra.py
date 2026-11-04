@@ -17,7 +17,6 @@ from trident.clients.bold import (
 import trident.pipelines as pipe
 
 from trident.core.utils import (
-    SETTING_LABELS,
     count_phrase,
     failed_items,
     species_for_sequences,
@@ -33,8 +32,7 @@ from trident.ui.ui import (
     RANK_COLUMNS,
     get_recent_param_sets,
     param_preset_selector,
-    persist_value,
-    save_widget,
+    setting_widget,
     StreamlitLogSink,
     count_progress,
     run_with_progress,
@@ -45,7 +43,12 @@ from trident.ui.ui import (
     require_prerequisite,
 )
 
-from trident.ui.defaults import BOLD_SIMILARITY_DEFAULT
+from trident.ui.defaults import (
+    BOLD_KEEP_NCBI_DEFAULT,
+    BOLD_KEEP_ONLY_COI5P_DEFAULT,
+    BOLD_LONGEST_N_DEFAULT,
+    BOLD_SIMILARITY_DEFAULT,
+)
 
 
 # --------------------------------------------------------------------
@@ -132,23 +135,23 @@ def bold_search_workflow():
         with st.expander("🛠️ Advanced Search Settings", expanded=False):
             c1, c2 = st.columns(2)
             with c1:
-                persist_value("bold_keep_only_COI5P", True)
-                keep_only_COI5P = st.checkbox(
-                    SETTING_LABELS["bold_keep_only_COI5P"],
-                    key="bold_keep_only_COI5P",
+                keep_only_COI5P = setting_widget(
+                    st.checkbox,
+                    "bold_keep_only_COI5P",
+                    BOLD_KEEP_ONLY_COI5P_DEFAULT,
+                    applied=st.session_state.bold_search_params,
                     help="COI-5P is BOLD's code for the CO1 barcode region; other "
                     "markers are left out.",
                 )
-                save_widget("bold_keep_only_COI5P")
             with c2:
-                persist_value("bold_keep_ncbi", False)
-                keep_ncbi = st.checkbox(
-                    SETTING_LABELS["bold_keep_ncbi"],
-                    key="bold_keep_ncbi",
+                keep_ncbi = setting_widget(
+                    st.checkbox,
+                    "bold_keep_ncbi",
+                    BOLD_KEEP_NCBI_DEFAULT,
+                    applied=st.session_state.bold_search_params,
                     help="Also keep the BOLD records copied from GenBank (left out "
                     "by default: as proxies they would find themselves in HYPO).",
                 )
-                save_widget("bold_keep_ncbi")
 
         current_params = {
             "bold_keep_only_COI5P": keep_only_COI5P,
@@ -308,35 +311,31 @@ def bold_filter_controls() -> tuple[int, int | None]:
     )
     stored = st.session_state.extra_params
 
-    def_similarity = int(stored.get("bold_similarity") or BOLD_SIMILARITY_DEFAULT)
-
     col1, col2 = st.columns(2)
     with col1:
-        persist_value("bold_similarity", def_similarity)
-        similarity = st.slider(
-            SETTING_LABELS["bold_similarity"],
+        similarity = setting_widget(
+            st.slider,
+            "bold_similarity",
+            BOLD_SIMILARITY_DEFAULT,
+            applied=stored,
             min_value=90,
             max_value=100,
             step=1,
-            key="bold_similarity",
             help="Two BOLD sequences of a species at or above this identity are "
             "redundant: only the longer is kept.",
         )
-        save_widget("bold_similarity")
-        active_similarity = stored.get("bold_similarity", "None")
-        st.caption(f"Active in results: **{active_similarity}**")
     with col2:
-        persist_value("bold_longest_n", None)
-        longest_n = st.number_input(
-            SETTING_LABELS["bold_longest_n"],
+        longest_n = setting_widget(
+            st.number_input,
+            "bold_longest_n",
+            BOLD_LONGEST_N_DEFAULT,
+            applied=stored,
             min_value=1,
             value=None,
             step=1,
-            key="bold_longest_n",
             placeholder="No limit",
             help="Leave empty to keep all non-redundant sequences.",
         )
-        save_widget("bold_longest_n")
 
     return similarity, longest_n
 

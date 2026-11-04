@@ -22,7 +22,7 @@ from PIL import Image
 
 from trident.clients.ncbi import BLAST_SLOW_THREADS
 from trident.core.constants import BLAST_DATABASE
-from trident.core.utils import name_list
+from trident.core.utils import SETTING_LABELS, format_setting, name_list
 from trident.core import stop
 from trident.core.database import get_connection, table_columns
 from trident.pipelines.names import replace_source_rows, same_species_groups
@@ -40,6 +40,7 @@ from trident.logging import get_log_level
 from trident.ui.defaults import (
     BLAST_GIVE_UP_MINUTES_MIN,
     BLAST_MAX_THREADS,
+    NCBI_ENFORCE_LOW_IDENTITY_DEFAULT,
     NCBI_GAP_MIN_TOP_DEFAULT,
     NCBI_GAP_SIZE_DEFAULT,
     NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT,
@@ -528,15 +529,83 @@ def coerce_stored_value(value, default):
         return default
 
 
-def persist_value(key: str, default):
-    """Pre-seed a widget key from the persistent override store.
+# Widgets whose first argument is their options (st.*, or a container's,
+# e.g. col.selectbox): a seed must be one of them.
+_OPTION_WIDGETS = {"selectbox", "radio", "segmented_control", "select_slider", "pills"}
 
-    Call BEFORE creating the widget. Only acts when the key is absent
-    from session_state (e.g. after a tab switch removed it). When the
-    widget is already on screen, the key exists and this is a no-op.
+
+def setting_widget(
+    widget: Callable,
+    key: str,
+    default,
+    *args,
+    applied: dict | None = None,
+    caption: bool = True,
+    shown: Callable | None = None,
+    label: str | None = None,
+    **kwargs,
+):
+    """A step setting: ``widget(label, *args, key=key, **kwargs)`` (e.g.
+    ``st.slider``), labelled ``SETTING_LABELS[key]`` unless *label*.
+
+    Its value is remembered across tabs (``save_widget``). When the widget is
+    not on screen yet, it starts at the value last set in it, else at the value
+    the step's results used (*applied*, the params the step returned), else at
+    *default*, as the type of *default* (``coerce_stored_value``). An option
+    widget (``_OPTION_WIDGETS``) skips a value it does not offer, matched by
+    its text ("250" is 250, "global" stays "global"). Once the step has run
+    (its params hold *key*), a caption gives the value the results used
+    ("Active in results"), formatted by *shown* or ``format_setting``;
+    *caption* False leaves it out. Returns the widget's value.
     """
+    applied = applied or {}
     if key not in st.session_state:
-        st.session_state[key] = stored_value(key, default)
+        overrides = st.session_state._widget_overrides
+        candidates = [overrides[key]] if key in overrides else []
+        if applied.get(key) is not None:
+            candidates.append(applied[key])
+        if getattr(widget, "__name__", "") in _OPTION_WIDGETS:
+            offered = {
+                str(c): c for c in kwargs.get("options", args[0] if args else [])
+            }
+            seed = next(
+                (offered[str(v)] for v in candidates if str(v) in offered), default
+            )
+        else:
+            seed = (
+                coerce_stored_value(candidates[0], default) if candidates else default
+            )
+        st.session_state[key] = seed
+    value = widget(label or SETTING_LABELS[key], *args, key=key, **kwargs)
+    save_widget(key)
+    if caption and key in applied:
+        used = applied[key]
+        active = shown(used) if shown else format_setting(used, key)
+        st.caption(f"Active in results: **{active}**")
+    return value
+
+
+def style_slider(key: str, label: str, default, *args, **kwargs):
+    """A display slider (plot or map style): kept across tabs, no caption."""
+    return setting_widget(
+        st.slider, key, default, *args, label=label, caption=False, **kwargs
+    )
+
+
+def ev_exponent_widget(key: str, default: int, high: int, applied: dict):
+    """The E-value exponent of a BLAST search (x in 10^-x), with the E-value
+    it stands for in the caption."""
+    return setting_widget(
+        st.number_input,
+        key,
+        default,
+        0,
+        high,
+        applied=applied,
+        label=f"{SETTING_LABELS[key]} ($10^{{-x}}$)",
+        shown=lambda v: f"{format_setting(v)} (E-value: $10^{{-{format_setting(v)}}}$)",
+        help=BLAST_HELP["ev_exponent"],
+    )
 
 
 def stored_value(key: str, default):
@@ -564,11 +633,15 @@ def blast_speed_settings(prefix: str, batch_size: int, threads: int, give_up: in
     """
 
     def speed_input(name, label, low, high, default):
-        key = f"{prefix}_{name}"
-        persist_value(key, default)
-        value = st.number_input(label, low, high, help=BLAST_HELP[name], key=key)
-        save_widget(key)
-        return value
+        return setting_widget(
+            st.number_input,
+            f"{prefix}_{name}",
+            default,
+            low,
+            high,
+            label=label,
+            help=BLAST_HELP[name],
+        )
 
     with st.expander("🛠️ Advanced Search Settings", expanded=False):
         st.markdown(
@@ -1068,18 +1141,19 @@ def sequence_selector(
     *labels* gives the text shown for each sequence (its ID by default).
     """
     sequences = st.session_state.sequences_id
-    persist_value(SELECTED_SEQUENCE_KEY, sequences[0])
     # The labels are computed before the selectbox, which may call format_func
     # outside the script run (e.g. in tests), where session state is empty.
     labels = labels or {}
-    selected_sequence = st.selectbox(
-        "Select a sequence (type to search):",
+    selected_sequence = setting_widget(
+        st.selectbox,
+        SELECTED_SEQUENCE_KEY,
+        sequences[0],
         sequences,
-        key=SELECTED_SEQUENCE_KEY,
+        label="Select a sequence (type to search):",
+        caption=False,
         format_func=lambda seq: labels.get(seq, str(seq)),
         filter_mode="contains",
     )
-    save_widget(SELECTED_SEQUENCE_KEY)
     sequences_df = st.session_state.sequences_df
     dna_sequence = sequences_df.loc[
         sequences_df["seq_id"] == selected_sequence, "dna_sequence"
@@ -1542,7 +1616,9 @@ def check_settings():
     """The MOL settings that judge a HYPO check hit (add_check_result): the
     filter's, and the low identity threshold when the MOL step enforces it."""
     stored = st.session_state.get("mol_params") or {}
-    enforced = coerce_stored_value(stored.get("ncbi_enforce_low_identity"), False)
+    enforced = coerce_stored_value(
+        stored.get("ncbi_enforce_low_identity"), NCBI_ENFORCE_LOW_IDENTITY_DEFAULT
+    )
     threshold = stored_low_identity_threshold() if enforced else None
     return {**mol_filter_settings(), "threshold": threshold}
 
@@ -1742,6 +1818,6 @@ def param_preset_selector(presets, format_fn, key):
         st.session_state[prev_key] = preset_id
         for col in cols:
             st.session_state._widget_overrides[col] = preset[col]
-            # Delete widget key so persist_value re-seeds from override
+            # Delete widget key so setting_widget re-seeds from override
             if col in st.session_state:
                 del st.session_state[col]

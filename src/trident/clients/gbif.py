@@ -14,7 +14,10 @@ import requests
 from loguru import logger
 
 
-from trident.core.constants import GBIF_CONFIDENCE
+from trident.core.constants import (
+    GBIF_CONFIDENCE,
+    GBIF_AREA,
+)
 from trident.core import stop
 from trident.core.http import create_session, request_label, with_optional_session
 from trident.core.utils import (
@@ -660,7 +663,7 @@ def area_params(
     latitude: float | str | None,
     longitude: float | str | None,
     extent: int | float | str,
-    area: str = "circle",
+    area: str = GBIF_AREA,
 ) -> dict:
     """Occurrence search filter for one search area.
 
@@ -853,7 +856,7 @@ def counts_for_area(
     latitude: float | None = None,
     longitude: float | None = None,
     extent: int | float | str = "global",
-    area: str = "circle",
+    area: str = GBIF_AREA,
     progress_handler: Callable[[float, str], None] | None = None,
     user_agent: str | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:

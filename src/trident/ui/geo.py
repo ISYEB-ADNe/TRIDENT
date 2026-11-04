@@ -30,8 +30,8 @@ from trident.ui.ui import (
     RANK_COLUMNS,
     get_recent_param_sets,
     param_preset_selector,
-    persist_value,
-    save_widget,
+    setting_widget,
+    style_slider,
     StreamlitLogSink,
     run_with_progress,
     reset_state_after,
@@ -44,8 +44,7 @@ from trident.ui.ui import (
 )
 
 from trident.ui.defaults import (
-    GBIF_LATITUDE_DEFAULT,
-    GBIF_LONGITUDE_DEFAULT,
+    GBIF_AREA_DEFAULT,
     GBIF_EXTENT_DEFAULT,
     GBIF_MIN_OCCURRENCES_DEFAULT,
 )
@@ -77,85 +76,88 @@ def display_gbif_parameters():
     )
 
     stored = st.session_state.gbif_search_params
-    def_lat = str(stored.get("gbif_latitude") or GBIF_LATITUDE_DEFAULT)
-    def_lon = str(stored.get("gbif_longitude") or GBIF_LONGITUDE_DEFAULT)
-    def_extent = str(stored.get("gbif_extent") or GBIF_EXTENT_DEFAULT)
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        persist_value("gbif_latitude", def_lat)
-        latitude_input = st.text_input(
-            SETTING_LABELS["gbif_latitude"],
-            help="Decimal degrees or degrees-minutes-seconds, e.g. -7.543 or "
-            "7°32'37\"S",
-            key="gbif_latitude",
+        latitude = _site_coordinate(
+            "gbif_latitude", stored, "lat", "e.g. -7.543 or 7°32'37\"S"
         )
-        save_widget("gbif_latitude")
-        try:
-            latitude = parse_coordinate(latitude_input, "lat")
-            st.caption(f"✅ Parsed as: {latitude:.4f}°")
-        except ValueError as e:
-            st.error(str(e))
-            return None
-
     with col2:
-        persist_value("gbif_longitude", def_lon)
-        longitude_input = st.text_input(
-            SETTING_LABELS["gbif_longitude"],
-            help="Decimal degrees or degrees-minutes-seconds, e.g. -35.423 or "
-            "35°25'24\"W",
-            key="gbif_longitude",
+        longitude = _site_coordinate(
+            "gbif_longitude", stored, "lon", "e.g. -35.423 or 35°25'24\"W"
         )
-        save_widget("gbif_longitude")
-        try:
-            longitude = parse_coordinate(longitude_input, "lon")
-            st.caption(f"✅ Parsed as: {longitude:.4f}°")
-        except ValueError as e:
-            st.error(str(e))
-            return None
 
     with col3:
-        persist_value("gbif_extent", def_extent)
-        extent_input = st.text_input(
-            SETTING_LABELS["gbif_extents"],
+        # The search stores its extents as a list (with "global"); the field
+        # holds them as text.
+        searched = [e for e in stored.get("gbif_extents") or [] if e != "global"]
+        extent_input = setting_widget(
+            st.text_input,
+            "gbif_extent",
+            ", ".join(map(str, searched)) or str(GBIF_EXTENT_DEFAULT),
+            caption=False,
+            label=SETTING_LABELS["gbif_extents"],
             help="Enter one or more search extents in km, separated by commas (e.g. 100, 250).",
-            key="gbif_extent",
         )
-        save_widget("gbif_extent")
 
         try:
             extents = [int(x.strip()) for x in extent_input.split(",") if x.strip()]
-
-            if not extents:
-                st.error(
-                    "Please enter at least one valid integer for the search extent."
-                )
-                return None
-
-            extents_str = ", ".join(map(str, extents))
-            st.caption(f"✅ Parsed extents: **{extents_str} km**")
-
-            extents += ["global"]  # Always include global search option
-
         except ValueError:
+            extents = None
             st.error(
                 "Please enter valid integers separated by commas (e.g., 100, 250)."
             )
-            return None
+        else:
+            if extents:
+                st.caption(f"✅ Parsed extents: **{', '.join(map(str, extents))} km**")
+                extents += ["global"]  # Always include global search option
+            else:
+                extents = None
+                st.error(
+                    "Please enter at least one valid integer for the search extent."
+                )
 
-    persist_value("gbif_area", stored.get("gbif_area") or "circle")
-    area = st.radio(
-        SETTING_LABELS["gbif_area"],
+    area = setting_widget(
+        st.radio,
+        "gbif_area",
+        GBIF_AREA_DEFAULT,
         SEARCH_AREAS,
+        applied=stored,
+        caption=False,
         format_func=AREA_LABELS.get,
-        key="gbif_area",
         horizontal=True,
         help="Circle: the occurrences within each extent of the site. Bounding box: "
         "the rectangle around that circle.",
     )
-    save_widget("gbif_area")
 
+    if latitude is None or longitude is None or extents is None:
+        return None
     return latitude, longitude, extents, area
+
+
+def _site_coordinate(key: str, stored: dict, axis: str, example: str):
+    """The sampling site's latitude or longitude (*axis* "lat" or "lon") from
+    its text field, or None while it is empty or cannot be read (the search
+    waits). No default site: an uploaded FASTA starts with empty fields."""
+    text = setting_widget(
+        st.text_input,
+        key,
+        "",
+        applied=stored,
+        caption=False,
+        help=f"Decimal degrees or degrees-minutes-seconds, {example}",
+    )
+    if not text.strip():
+        name = "latitude" if axis == "lat" else "longitude"
+        st.caption(f"Enter the {name} of your sampling site.")
+        return None
+    try:
+        value = parse_coordinate(text, axis)
+    except ValueError as e:
+        st.error(str(e))
+        return None
+    st.caption(f"✅ Parsed as: {value:.4f}°")
+    return value
 
 
 def _recent_gbif_search_presets(db_path: str, limit: int = 5) -> list[dict]:
@@ -193,10 +195,12 @@ def display_gbif_map(
     latitude: float, longitude: float, extents: list[int], area: str
 ) -> None:
     """Render a Plotly map showing the search areas."""
-    show_map = st.checkbox(
-        "📍 Show the search areas on a map",
-        value=False,
-        key="gbif_show_map",
+    show_map = setting_widget(
+        st.checkbox,
+        "gbif_show_map",
+        False,
+        label="📍 Show the search areas on a map",
+        caption=False,
         help="Display the center point and the search areas sent to GBIF on a map.",
     )
 
@@ -209,28 +213,30 @@ def display_gbif_map(
         with st.expander("Map settings", expanded=True):
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                plot_height = st.slider(
-                    "Plot height", 300, 800, 500, step=50, key="geo_map_height"
+                plot_height = style_slider(
+                    "geo_map_height", "Plot height", 500, 300, 800, step=50
                 )
             with col2:
-                map_padding = st.slider(
+                map_padding = style_slider(
+                    "geo_map_padding",
                     "Padding",
+                    0.5,
                     0.1,
                     2.0,
-                    0.5,
                     step=0.1,
-                    key="geo_map_padding",
                     help="Space around the search areas (as fraction of extent)",
                 )
             with col3:
-                legend_size = st.slider("Legend text", 6, 20, 12, key="geo_map_legend")
+                legend_size = style_slider("geo_map_legend", "Legend text", 12, 6, 20)
             with col4:
                 # A circle search always shows its circles; a box search on
                 # request
-                show_circles = area == "circle" or st.checkbox(
-                    "Show circles",
-                    value=False,
-                    key="geo_map_circles",
+                show_circles = area == "circle" or setting_widget(
+                    st.checkbox,
+                    "geo_map_circles",
+                    False,
+                    label="Show circles",
+                    caption=False,
                     help="Draw the circular perimeter for each extent",
                 )
 
@@ -384,42 +390,45 @@ def gbif_search_workflow():
 
         # Parameter Inputs
         params = display_gbif_parameters()
-        if params is None:
-            return
+        # While the site is incomplete, no new run, but a running search is
+        # still followed (it uses the settings of its click) and the saved
+        # results stay shown.
+        mode = None
+        if params is not None:
+            latitude, longitude, extents, area = params
+            display_gbif_map(latitude, longitude, extents, area)
+            current_params = {
+                "gbif_latitude": latitude,
+                "gbif_longitude": longitude,
+                "gbif_extents": extents,
+                "gbif_area": area,
+            }
+        else:
+            current_params = st.session_state.gbif_search_params
+        if params is not None or st.session_state.get("gbif_search_flag"):
+            unique_sp = len(st.session_state.tax_species)
 
-        latitude, longitude, extents, area = params
-        display_gbif_map(latitude, longitude, extents, area)
-
-        current_params = {
-            "gbif_latitude": latitude,
-            "gbif_longitude": longitude,
-            "gbif_extents": extents,
-            "gbif_area": area,
-        }
-
-        unique_sp = len(st.session_state.tax_species)
-
-        mode = run_step_workflow(
-            df_key="gbif_search_df",
-            params_key="gbif_search_params",
-            flag_key="gbif_search_flag",
-            tab_id="geo",
-            compare_keys=[
-                "gbif_latitude",
-                "gbif_longitude",
-                "gbif_extents",
-                "gbif_area",
-            ],
-            current_params=current_params,
-            job_fn=gbif_search_job,
-            job_kwargs={"params": current_params},
-            new_string=f"Ready to count the GBIF occurrences of **{unique_sp}** species.",
-            btn_key="gbif_search_apply",
-            failed_key="gbif_search_failed",
-            logs_prefix="gbif_",
-            threaded=True,
-            status_label="🗺️ Running GBIF search...",
-        )
+            mode = run_step_workflow(
+                df_key="gbif_search_df",
+                params_key="gbif_search_params",
+                flag_key="gbif_search_flag",
+                tab_id="geo",
+                compare_keys=[
+                    "gbif_latitude",
+                    "gbif_longitude",
+                    "gbif_extents",
+                    "gbif_area",
+                ],
+                current_params=current_params,
+                job_fn=gbif_search_job,
+                job_kwargs={"params": current_params},
+                new_string=f"Ready to count the GBIF occurrences of **{unique_sp}** species.",
+                btn_key="gbif_search_apply",
+                failed_key="gbif_search_failed",
+                logs_prefix="gbif_",
+                threaded=True,
+                status_label="🗺️ Running GBIF search...",
+            )
 
     # Results Preview
     if mode != "NEW" and st.session_state.gbif_search_df is not None:
@@ -470,48 +479,34 @@ def gbif_filter_controls() -> tuple[int, int]:
         ),
         key="gbif_filter_preset",
     )
-    stored = st.session_state.gbif_search_params
-
-    def_min_occ = int(
-        stored.get("gbif_min_occurrences") or GBIF_MIN_OCCURRENCES_DEFAULT
+    # The filter settings reach the GEO step's params, not the search's.
+    applied = st.session_state.geo_params or {}
+    options = st.session_state.gbif_search_params["gbif_extents"]
+    default_extent = (
+        GBIF_EXTENT_DEFAULT if GBIF_EXTENT_DEFAULT in options else options[0]
     )
-    default_extent = stored.get("gbif_filter_extent") or GBIF_EXTENT_DEFAULT
-    available_extents = st.session_state.gbif_search_params["gbif_extents"]
 
     col1, col2 = st.columns(2)
     with col1:
-        persist_value("gbif_min_occurrences", def_min_occ)
-        min_occurrences = st.number_input(
-            SETTING_LABELS["gbif_min_occurrences"],
+        min_occurrences = setting_widget(
+            st.number_input,
+            "gbif_min_occurrences",
+            GBIF_MIN_OCCURRENCES_DEFAULT,
+            applied=applied,
             min_value=0,
-            key="gbif_min_occurrences",
             help="Minimum number of occurrences a species must have in the "
             "filtering area to be kept.",
         )
-        save_widget("gbif_min_occurrences")
-        active_min_occ = stored.get("gbif_min_occurrences", "None")
-        st.caption(f"Active in results: **{active_min_occ}**")
     with col2:
-        options = available_extents
-        active_extent = stored.get("gbif_filter_extent", "None")
-        # Ensure default is valid for current options
-        if default_extent not in options:
-            default_extent = options[0]
-        persist_value("gbif_filter_extent", default_extent)
-        extent = st.selectbox(
-            SETTING_LABELS["gbif_filter_extent"],
+        extent = setting_widget(
+            st.selectbox,
+            "gbif_filter_extent",
+            default_extent,
             options,
-            key="gbif_filter_extent",
+            applied=applied,
+            shown=get_extent_column_name,
             help="Choose which search area to use for the occurrence threshold.",
         )
-        save_widget("gbif_filter_extent")
-
-        if active_extent == "None" or active_extent is None:
-            st.caption("Active in results: **None**")
-        else:
-            st.caption(
-                f"Active in results: **{get_extent_column_name(active_extent)}**"
-            )
 
     return min_occurrences, extent
 

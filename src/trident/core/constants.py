@@ -31,13 +31,27 @@ NCBI_ENFORCE_LOW_IDENTITY = False
 NCBI_CUT_TOP_IDENTITY = 97
 NCBI_CUT_RANGE = 3
 
+# --- TAX (WoRMS) ---
+WORMS_MARINE_ONLY = True
+# Per sequence, leave out the TAX species that BLAST returned for it but that
+# failed the MOL filter.
+TAX_DROP_MOL_REJECTED = True
+
 # --- GEO (GBIF) ---
 GBIF_CONFIDENCE = 95
+# "circle" (within each extent of the site) or "box" (the rectangle around it).
+GBIF_AREA = "circle"
 GBIF_EXTENT = 500
 GBIF_MIN_OCCURRENCES = 3
 
 # --- EXTRA (BOLD) ---
 BOLD_SIMILARITY = 98
+BOLD_KEEP_ONLY_COI5P = True
+# Max sequences kept per species after the redundancy filter (None: no limit).
+BOLD_LONGEST_N = None
+# The BOLD records mined from GenBank: as proxies they would find themselves
+# in HYPO.
+BOLD_KEEP_NCBI = False
 
 # --- HYPO (NCBI BLAST validation of BOLD proxies) ---
 HYPO_MAX_HITS = 500

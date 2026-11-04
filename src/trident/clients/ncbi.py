@@ -23,6 +23,8 @@ from trident.core import config, stop
 from trident.core.http import retry_call
 from trident.core.constants import (
     BLAST_DATABASE,
+    NCBI_EV_EXPONENT,
+    NCBI_MAX_HITS,
     NCBI_GAP_SIZE,
     NCBI_GAP_MIN_TOP,
     NCBI_QUERY_COVER,
@@ -694,8 +696,8 @@ class BlastCircuit:
 def submit_blast_batch(
     batch: list[SeqRecord],
     entrez_query: str | None = None,
-    evalue: float = 1e-10,
-    hitlist_size: int = 500,
+    evalue: float = 10.0 ** (-NCBI_EV_EXPONENT),
+    hitlist_size: int = NCBI_MAX_HITS,
     batch_id: int | str | None = None,
     retry: bool = True,
     circuit: BlastCircuit | None = None,
@@ -923,8 +925,8 @@ def blast_batch(
 def run_blast_batches(
     batches: list[list[SeqRecord]],
     n_threads: int = 10,
-    evalue: float = 1e-10,
-    hitlist_size: int = 500,
+    evalue: float = 10.0 ** (-NCBI_EV_EXPONENT),
+    hitlist_size: int = NCBI_MAX_HITS,
     entrez_query: str | None = None,
     progress_handler: dict | object | None = None,
     circuit: BlastCircuit | None = None,

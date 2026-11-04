@@ -6,6 +6,8 @@ from loguru import logger
 
 from Bio.Align import PairwiseAligner
 
+from trident.core.constants import BOLD_SIMILARITY
+
 
 # --------------------------------------------------------------------
 # Pairwise identity
@@ -69,7 +71,7 @@ def compute_pairwise_identity(
 def select_longest_sequences(
     sequences: list[str],
     n_longest: int | None = None,
-    identity_threshold: float = 98.0,
+    identity_threshold: float = BOLD_SIMILARITY,
 ) -> tuple[list[int], list[str]]:
     """Select non-redundant sequences, longest first.
 

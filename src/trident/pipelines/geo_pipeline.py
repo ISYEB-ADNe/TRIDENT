@@ -28,7 +28,10 @@ from trident.clients.gbif import (
     get_extent_column_name,
 )
 
-from trident.core.constants import GBIF_MIN_OCCURRENCES
+from trident.core.constants import (
+    GBIF_MIN_OCCURRENCES,
+    GBIF_AREA,
+)
 from trident.pipelines.tax_pipeline import TAX_COLUMNS
 from trident.core.database import save_to_db, FullCache, CustomCache, warn_empty_params
 from trident.core.utils import (
@@ -155,7 +158,7 @@ def run_gbif_search(
     latitude: float | None = None,
     longitude: float | None = None,
     extents: list[int | str] | None = None,
-    area: str = "circle",
+    area: str = GBIF_AREA,
     worms_ids: dict[str, str] | None = None,
     progress_handler: Callable[[float, str], None] | None = None,
     user_agent: str | None = None,

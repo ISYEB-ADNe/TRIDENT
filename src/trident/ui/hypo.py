@@ -7,8 +7,8 @@ from trident.clients.ncbi import set_ncbi_email
 from trident.core import config
 from trident.core.constants import BLAST_DATABASE
 from trident.core.utils import (
-    SETTING_LABELS,
     failed_items,
+    format_setting,
     pluralize,
     species_for_sequences,
 )
@@ -34,8 +34,8 @@ from trident.ui.ui import (
     BLAST_HELP,
     get_recent_param_sets,
     param_preset_selector,
-    persist_value,
-    save_widget,
+    setting_widget,
+    ev_exponent_widget,
     StreamlitLogSink,
     blast_speed_settings,
     stored_value,
@@ -98,75 +98,53 @@ def display_hypo_parameters():
     st.caption(BLAST_DATABASE_CAPTION)
     stored = st.session_state.hypo_merge_params
 
-    def_hits = int(stored.get("hypo_max_hits") or HYPO_MAX_HITS_DEFAULT)
-    default_ev_exp = int(stored.get("hypo_ev_exponent") or HYPO_EV_EXPONENT_DEFAULT)
-    def_id_cutoff = int(
-        stored.get("hypo_identity_cutoff") or HYPO_IDENTITY_CUTOFF_DEFAULT
-    )
-    def_ntop = int(stored.get("hypo_ntop") or HYPO_NTOP_DEFAULT)
     # --- Row 1: Primary Scientific Parameters ---
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        persist_value("hypo_max_hits", def_hits)
-        max_hits = st.number_input(
-            SETTING_LABELS["hypo_max_hits"],
+        max_hits = setting_widget(
+            st.number_input,
+            "hypo_max_hits",
+            HYPO_MAX_HITS_DEFAULT,
             1,
             1000,
+            applied=stored,
             help=BLAST_HELP["max_hits"],
-            key="hypo_max_hits",
         )
-        save_widget("hypo_max_hits")
-        active_hits = stored.get("hypo_max_hits", "None")
-        st.caption(f"Active in results: **{active_hits}**")
 
     with col2:
-        persist_value("hypo_ev_exponent", default_ev_exp)
-        ev_exponent = st.number_input(
-            f"{SETTING_LABELS['hypo_ev_exponent']} ($10^{{-x}}$)",
-            0,
-            50,
-            help=BLAST_HELP["ev_exponent"],
-            key="hypo_ev_exponent",
+        ev_exponent = ev_exponent_widget(
+            "hypo_ev_exponent", HYPO_EV_EXPONENT_DEFAULT, 50, stored
         )
-        save_widget("hypo_ev_exponent")
-        active_ev = stored.get("hypo_ev_exponent", "None")
-        threshold_str = (
-            f"(e-value: $10^{{-{active_ev}}}$)" if active_ev != "None" else ""
-        )
-        st.caption(f"Active in results: **{active_ev}** {threshold_str}")
 
     with col3:
-        persist_value("hypo_identity_cutoff", def_id_cutoff)
-        identity_cutoff = st.number_input(
-            SETTING_LABELS["hypo_identity_cutoff"],
+        identity_cutoff = setting_widget(
+            st.number_input,
+            "hypo_identity_cutoff",
+            HYPO_IDENTITY_CUTOFF_DEFAULT,
             0,
             100,
+            applied=stored,
+            shown=lambda v: f"{format_setting(v)}%",
             help="Proxy hits below this identity are dropped, before the top hits "
             "are kept.",
-            key="hypo_identity_cutoff",
         )
-        save_widget("hypo_identity_cutoff")
-        active_id = stored.get("hypo_identity_cutoff", "None")
-        st.caption(f"Active in results: **{active_id}**%")
 
     with col4:
-        persist_value("hypo_ntop", def_ntop)
-        ntop = st.number_input(
-            SETTING_LABELS["hypo_ntop"],
+        ntop = setting_widget(
+            st.number_input,
+            "hypo_ntop",
+            HYPO_NTOP_DEFAULT,
             1,
             100,
+            applied=stored,
             help=(
                 "Per BOLD sequence and hit species, the search keeps the hits "
                 "no other beats on both identity and query cover, so a short "
                 "fragment cannot push out a full-length hit. This sets how many "
                 "hits with the same identity and cover are kept."
             ),
-            key="hypo_ntop",
         )
-        save_widget("hypo_ntop")
-        active_ntop = stored.get("hypo_ntop", "None")
-        st.caption(f"Active in results: **{active_ntop}**")
 
     batch_size, threads, give_up = blast_speed_settings(
         "hypo",
@@ -353,36 +331,29 @@ def hypo_filter_controls():
     )
     stored = st.session_state.hypo_filter_params
 
-    def_qc = int(stored.get("hypo_query_cover") or HYPO_QUERY_COVER_DEFAULT)
-    def_identity = int(stored.get("hypo_identity") or HYPO_IDENTITY_DEFAULT)
-
     col1, col2 = st.columns(2)
     with col1:
-        persist_value("hypo_query_cover", def_qc)
-        query_cover = st.slider(
-            SETTING_LABELS["hypo_query_cover"],
+        query_cover = setting_widget(
+            st.slider,
+            "hypo_query_cover",
+            HYPO_QUERY_COVER_DEFAULT,
+            applied=stored,
             min_value=0,
             max_value=100,
             help="Minimum query cover percentage to filter NCBI hits",
-            key="hypo_query_cover",
         )
-        save_widget("hypo_query_cover")
-        active_qc = stored.get("hypo_query_cover", "None")
-        st.caption(f"Active in results: **{active_qc}**")
     with col2:
-        persist_value("hypo_identity", def_identity)
-        identity = st.slider(
-            SETTING_LABELS["hypo_identity"],
+        identity = setting_widget(
+            st.slider,
+            "hypo_identity",
+            HYPO_IDENTITY_DEFAULT,
+            applied=stored,
             min_value=90,
             max_value=100,
             step=1,
             help="A candidate is a hypothetical species when its proxy hits a MOL "
             "species of the sequence at or above this identity.",
-            key="hypo_identity",
         )
-        save_widget("hypo_identity")
-        active_id = stored.get("hypo_identity", "None")
-        st.caption(f"Active in results: **{active_id}**")
 
     return query_cover, identity
 
@@ -497,28 +468,13 @@ def display_hypo_check_controls():
     st.caption(BLAST_DATABASE_CAPTION)
     stored = st.session_state.hypo_check_params
 
-    default_ev_exp = int(
-        stored.get("hypo_check_ev_exponent") or HYPO_CHECK_EVALUE_EXPONENT_DEFAULT
-    )
-
     with st.expander(
         "🛠️ Advanced Search Settings",
         expanded=False,
     ):
-        persist_value("hypo_check_ev_exponent", default_ev_exp)
-        ev_exponent = st.number_input(
-            f"{SETTING_LABELS['hypo_check_ev_exponent']} ($10^{{-x}}$)",
-            0,
-            10,
-            help=BLAST_HELP["ev_exponent"],
-            key="hypo_check_ev_exponent",
+        ev_exponent = ev_exponent_widget(
+            "hypo_check_ev_exponent", HYPO_CHECK_EVALUE_EXPONENT_DEFAULT, 10, stored
         )
-        save_widget("hypo_check_ev_exponent")
-        active_ev = stored.get("hypo_check_ev_exponent", "None")
-        threshold_str = (
-            f"(e-value: $10^{{-{active_ev}}}$)" if active_ev != "None" else ""
-        )
-        st.caption(f"Active in results: **{active_ev}** {threshold_str}")
 
     return ev_exponent
 

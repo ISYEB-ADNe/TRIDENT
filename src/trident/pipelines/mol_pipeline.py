@@ -42,6 +42,7 @@ from trident.core.constants import (
     NCBI_METHOD,
     NCBI_GAP_MIN_TOP,
     NCBI_LOW_IDENTITY_THRESHOLD,
+    NCBI_ENFORCE_LOW_IDENTITY,
 )
 from trident.core.database import save_to_db, PartialCache, FullCache
 from trident.core.utils import (
@@ -244,7 +245,7 @@ def run_ncbi_filter(
 def finalize_mol_results(
     ncbi_filter_df: pd.DataFrame,
     threshold: float = NCBI_LOW_IDENTITY_THRESHOLD,
-    enforce_threshold: bool = False,
+    enforce_threshold: bool = NCBI_ENFORCE_LOW_IDENTITY,
     filter_params: dict | None = None,
 ) -> pd.DataFrame:
     """Finalize the MOL list for export or downstream analysis.

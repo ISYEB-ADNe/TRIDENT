@@ -39,8 +39,8 @@ DB_EXTENSIONS = {"db", "sqlite", "sqlite3"}
 # documented install (git clone or downloaded archive); None when installed.
 EXAMPLE_FASTA = root / "example" / "example.fasta" if (root := source_root()) else None
 # The example's sequences come from Svalbard: pre-fill the GEO area of the
-# paper's worked example (kept on the counts within 250 km), or GBIF would be
-# searched around 0°, 0°.
+# paper's worked example (kept on the counts within 250 km). An uploaded FASTA
+# starts with no site.
 EXAMPLE_SETTINGS = {
     "gbif_latitude": "78.5",
     "gbif_longitude": "14.5",
