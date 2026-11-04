@@ -393,6 +393,11 @@ def handle_file_upload():
         type=sorted(FASTA_EXTENSIONS | DB_EXTENSIONS),
         key=f"file_upload_{st.session_state.fasta_uploader_key}",
     )
+    if is_streamlit_cloud():
+        st.caption(
+            "Your files stay on the demo server until it restarts; run TRIDENT "
+            "locally for unpublished data."
+        )
 
     if not uploaded_file:
         return

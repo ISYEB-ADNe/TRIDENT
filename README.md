@@ -137,7 +137,7 @@ The **Parameters** tab lists the settings of every step that has run.
 
 ### Online demo
 
-A hosted demo is live on Streamlit Cloud: <https://trident-nxanjv7pk4z2fnkyulzvwt.streamlit.app/>. It is meant for trying TRIDENT on small inputs and may be limited. In particular, the EXTRA step (BOLD) may be blocked on the hosted demo, since BOLD can refuse requests from shared cloud IPs; run TRIDENT locally (above) for full analyses.
+A hosted demo is live on Streamlit Cloud: <https://trident-nxanjv7pk4z2fnkyulzvwt.streamlit.app/>. It is meant for trying TRIDENT on small inputs and may be limited. In particular, the EXTRA step (BOLD) may be blocked on the hosted demo, since BOLD can refuse requests from shared cloud IPs; run TRIDENT locally (above) for full analyses, and for unpublished data: your files stay on the demo server until it restarts.
 
 ## Example
 

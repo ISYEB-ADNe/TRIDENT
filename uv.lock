@@ -1183,7 +1183,7 @@ requires-dist = [
     { name = "joblib", specifier = ">=1.5.2" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "numpy", specifier = ">=1.26" },
-    { name = "pandas", specifier = ">=2.3.2" },
+    { name = "pandas", specifier = ">=3.0" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "plotly", specifier = ">=5.23" },
     { name = "requests", specifier = ">=2.32.5" },
