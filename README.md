@@ -40,7 +40,7 @@ TRIDENT takes your sequences through five steps. Each step has its own tab in th
 | 1 | **MOL** | Your sequences are BLAST-searched against GenBank (NCBI core_nt), and the hits are filtered by query cover and a barcoding gap | The MOL list: the species of the hits kept for each sequence |
 | 2 | **TAX** | The MOL names are checked in WoRMS, and each MOL genus is expanded to its accepted species (marine only by default) | The TAX list: MOL species plus the species added by TAX |
 | 3 | **GEO** | The TAX species are counted in GBIF occurrences within your study area | The GEO list: species with enough occurrences where you sampled |
-| 4 | **EXTRA** | For the GEO species that are not MOL species (their target marker gave no kept hit), CO1 sequences are fetched from BOLD | Proxy sequences for these species |
+| 4 | **EXTRA** | For the GEO species BLAST did not return for the sequence, CO1 sequences are fetched from BOLD | Proxy sequences for these species |
 | 5 | **HYPO** | The proxies are BLAST-searched against GenBank, restricted to the MOL species of each sequence | Hypothetical species, validated through their CO1 proxy |
 
 The **Results** tab gives each sequence its candidate species, from two paths:
@@ -54,7 +54,7 @@ The **Results** tab gives each sequence its candidate species, from two paths:
 
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/) (package manager)
-- A contact email address (sent with every API request, required by NCBI, GBIF, WoRMS and BOLD)
+- A contact email address (sent with every request to NCBI, GBIF, WoRMS and BOLD so they can reach you in case of heavy use)
 
 ### Quick start
 
@@ -122,7 +122,7 @@ Each analysis is saved as a `.db` file in the `results/` folder of TRIDENT, what
 ## How to use the app
 
 1. **Start Analysis**: Upload a FASTA file of your MOTU/ASV sequences (`.fasta`, `.fa`, `.fas`, `.txt`). Each sequence needs its own name: TRIDENT names a sequence by its header up to the first space or tab, and refuses a file where two share one. Click **Process FASTA**, then **Next: MOL**.
-2. **Run each step in order**: Open MOL, TAX, GEO, EXTRA, HYPO one at a time. Each tab has its own settings; review them, then run the step. A ✅ on the tab means the step is done.
+2. **Run each step in order**: Open MOL, TAX, GEO, EXTRA, HYPO one at a time. Each tab has its own settings; review them, then run the step. A ✅ on the tab means the step is done. When some queries of a step fail, the next steps wait until you ask again for the failed ones or accept the incomplete result and continue without them.
 3. **Set your study area in GEO**: Enter the latitude and longitude of your site and one or more extents (km). Species with too few occurrences in the filtering area are left out.
 4. **Results**: The Results tab opens once MOL, TAX and GEO are done; EXTRA and HYPO add the hypothetical species. It shows a summary, the assignment of each sequence (its species, or the lowest taxon its candidate species share), the candidate species of a sequence with the step where each other species was lost, and the curated results, where you can leave out a species by hand.
 
@@ -238,7 +238,7 @@ Each proxy is BLAST-searched against GenBank, restricted to the MOL species of i
 <details>
 <summary><strong>Reproducibility</strong></summary>
 
-Each cached run records the UTC date it queried each live database (NCBI core_nt, GBIF, BOLD, WoRMS) and the TRIDENT version, shown in the Results "Data sources" panel. These databases change over time, so the query date identifies which version of the source data an analysis used.
+Each cached run records the UTC date it queried each live database (NCBI core_nt, GBIF, BOLD, WoRMS) and the TRIDENT version, shown in the Results "Data sources & provenance" panel. These databases change over time, so the query date identifies which version of the source data an analysis used.
 
 </details>
 

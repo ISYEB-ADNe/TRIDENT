@@ -417,11 +417,6 @@ def ncbi_filter_job(*, force_rerun, retry_empty=False, params):
     st.session_state.mol_df = finalized_df
     st.session_state.mol_params = params_final
     st.session_state.mol_summary_df = summary_df
-    st.session_state.mol_species = (
-        finalized_df["scientificName"].dropna().unique().tolist()
-        if not finalized_df.empty
-        else []
-    )
     reset_state_after("mol_df")
 
 

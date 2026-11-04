@@ -405,7 +405,6 @@ class AppState:
     ncbi_search_df: "pd.DataFrame | None" = None
     ncbi_filter_flag: bool = False
     mol_params: dict[str, Any] = field(default_factory=dict)
-    mol_species: list[str] = field(default_factory=list)
     mol_summary_df: "pd.DataFrame | None" = None
     mol_df: "pd.DataFrame | None" = None
 
@@ -426,7 +425,6 @@ class AppState:
     gbif_search_failed: list[str] = field(default_factory=list)
     gbif_search_df: "pd.DataFrame | None" = None
     gbif_filter_flag: bool = False
-    gbif_filter_df: "pd.DataFrame | None" = None
     geo_params: dict[str, Any] = field(default_factory=dict)
     geo_and_mol_species: list[str] = field(default_factory=list)
     geo_summary_df: "pd.DataFrame | None" = None
@@ -435,7 +433,8 @@ class AppState:
     bold_logs: list[tuple[str, str]] = field(default_factory=list)
     bold_search_flag: bool = False
     bold_search_params: dict[str, Any] = field(default_factory=dict)
-    bold_input_species: list[str] = field(default_factory=list)
+    # None until computed (an empty list is a computed result).
+    bold_input_species: list[str] | None = None
     # pipe.needs_proxy of the GEO list (see proxy_mask in extra.py).
     bold_proxy_mask: "pd.Series | None" = None
     bold_missing_species: list[str] = field(default_factory=list)
@@ -778,7 +777,10 @@ def display_run_button(
         st.info(new_string)
         btn_label = "▶️ Start Analysis"
         btn_type = "primary"
-        btn_help = "Begin fresh analysis"
+        btn_help = (
+            "Runs this step. Results already saved in this analysis for the "
+            "same settings are read from it, unless you choose Erase."
+        )
 
     elif mode == "IDENTICAL":
         if logs_prefix:
@@ -1468,7 +1470,7 @@ def run_with_progress(
         raise error
     if error is not None and not isinstance(error, stop.StepStopped):
         # Most likely caused by the stop (its items all failed), but kept in
-        # the console and log file (this thread is not stopped).
+        # the console (this thread is not stopped).
         logger.opt(exception=error).warning("The stopped search ended with an error")
     raise stop.StepStopped() from error
 
@@ -1576,7 +1578,7 @@ def check_legends(df) -> list[str]:
 def highlight_check_result(row):
     """Colour a HYPO species' row by its check result (see CHECK_COLOURS)."""
     colour = CHECK_COLOURS.get(row.get("hypo_check_result"))
-    style = f"background-color: {colour[0]};" if colour else ""
+    style = f"background-color: {colour[0]}; color: black;" if colour else ""
     return [style] * len(row)
 
 
@@ -1782,7 +1784,7 @@ def param_preset_selector(presets, format_fn, key):
     """
     if not presets:
         return
-    cols = [k for k in presets[0] if k != "run_id"]
+    cols = list(presets[0])
 
     if len(presets) == 1:
         # Single preset: apply silently, no UI

@@ -51,8 +51,8 @@ def setup_logging(level: str | None = None, log_file: str | Path | None = None) 
     config.get), else INFO.
 
     Importing `trident` does NOT call this (the package keeps loguru silent via
-    `logger.disable("trident")`); the entry points (the Streamlit app, the
-    `trident` launcher) and notebooks call it explicitly to turn logging on.
+    `logger.disable("trident")`); the Streamlit app (app.py) and notebooks
+    call it explicitly to turn logging on.
 
     Args:
         level: Log level string (e.g. "DEBUG", "INFO"). Case-insensitive.

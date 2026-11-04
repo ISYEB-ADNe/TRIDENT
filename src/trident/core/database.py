@@ -136,11 +136,6 @@ def check_schema_version(db_path: str | Path) -> tuple[bool, str]:
 _PROVENANCE_TABLE = "provenance"
 
 
-def _trident_version() -> str:
-    """Installed trident version (single source: config.app_version)."""
-    return config.app_version()
-
-
 def _today_utc() -> str:
     """Current UTC date as an ISO string (YYYY-MM-DD)."""
     return datetime.now(timezone.utc).date().isoformat()
@@ -684,7 +679,7 @@ def _save_items(
     _add_missing_columns(conn, f"{table_name}_inputs", inputs_df)
     # Committed with the inputs rows.
     _write_provenance(
-        conn, table_name, list(run_ids.values()), _today_utc(), _trident_version()
+        conn, table_name, list(run_ids.values()), _today_utc(), config.app_version()
     )
     inputs_df.to_sql(
         name=f"{table_name}_inputs", con=conn, if_exists="append", index=False
@@ -1142,9 +1137,13 @@ def save_to_db(
                         cached_ids.append(run_id)
                     else:
                         if run_id is not None:
-                            _delete_run(conn, table_name, run_id)
-                            _delete_run(conn, f"{table_name}_inputs", run_id)
+                            # Provenance and inputs row first: a stop in
+                            # between leaves orphan result rows (cleaned
+                            # later), never an item read back as empty nor a
+                            # date of a deleted run.
                             _delete_provenance(conn, table_name, [run_id])
+                            _delete_run(conn, f"{table_name}_inputs", run_id)
+                            _delete_run(conn, table_name, run_id)
                             replaced.append(run_id)
                         uncached_items.append(item)
                 if replaced:

@@ -112,21 +112,44 @@ def _download_results(
 def _parse_jsonl(response_text: str) -> list[dict]:
     """Parse JSONL (newline-delimited JSON) response into record dicts.
 
+    A line is a record when it is a JSON object with a processid (every BOLD
+    record has one).
+
     Args:
         response_text: Raw JSONL text from BOLD API download endpoint.
 
     Returns:
-        List of parsed record dicts. Invalid lines are skipped.
+        List of parsed record dicts (none: the species has no record). Other
+        lines are skipped, with one warning.
+
+    Raises:
+        ValueError: When the last line is not JSON (an error page, or a
+            download cut off), so the species fails and is asked again instead
+            of being saved with no or fewer records.
     """
     data = []
-    for line in response_text.strip().split("\n"):
-        line = line.strip()
-        if not line:
-            continue
+    skipped = 0
+    lines = [line.strip() for line in response_text.strip().split("\n")]
+    lines = [line for line in lines if line]
+    for i, line in enumerate(lines):
         try:
-            data.append(json.loads(line))
-        except json.JSONDecodeError as e:
-            logger.debug(f"Failed to parse JSONL line: {e}")
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            if i == len(lines) - 1:
+                raise ValueError(
+                    "BOLD answer is not records or was cut off (its last line "
+                    "is not JSON)"
+                )
+            record = None
+        if isinstance(record, dict) and "processid" in record:
+            data.append(record)
+        else:
+            skipped += 1
+    if skipped:
+        logger.warning(
+            f"BOLD answer: {skipped} {pluralize(skipped, 'line')} that "
+            f"{'is' if skipped == 1 else 'are'} not a record skipped"
+        )
     return data
 
 

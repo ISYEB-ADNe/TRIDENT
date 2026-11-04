@@ -272,3 +272,56 @@ def test_bold_names_go_with_the_extra_search_they_come_from():
     at.run()
     assert not at.exception
     assert at.session_state["name_table"]["source"].tolist() == ["gbif"]
+
+
+def test_hypo_check_results_are_judged_under_the_mol_settings_of_the_results():
+    """The app judges each HYPO check hit with the MOL settings the results were
+    made with (query cover, enforced low identity), not the defaults."""
+
+    def page(mol_params):
+        import pandas as pd
+        import streamlit as st
+
+        from trident.ui.ui import hypo_check_results
+
+        # s1's check hit covers 80%: partial under the default 90, judged under 70.
+        # s2's is 89% next to a 90% MOL hit: kept unless 90% is enforced.
+        st.session_state.ncbi_search_df = pd.DataFrame(
+            {
+                "seq_id": ["s1", "s2"],
+                "scientificName": ["Mol one", "Mol two"],
+                "identity_percentage": [92.0, 90.0],
+                "query_cover": [100.0, 100.0],
+            }
+        )
+        st.session_state.hypo_df = pd.DataFrame(
+            {
+                "seq_id": ["s1", "s2"],
+                "scientificName": ["Hypo one", "Hypo two"],
+                "hypo_check_identity": [91.0, 89.0],
+                "hypo_check_query_cover": [80.0, 100.0],
+            }
+        )
+        st.session_state.mol_params = mol_params
+        st.session_state.check_result_memo = None
+        st.session_state.results = hypo_check_results()
+
+    def results(mol_params):
+        at = AppTest.from_function(page, args=(mol_params,))
+        at.run()
+        assert not at.exception
+        return at.session_state["results"]
+
+    assert results({}) == {
+        ("s1", "Hypo one"): "partial hit",
+        ("s2", "Hypo two"): "matches",
+    }
+    user = {
+        "ncbi_query_cover": 70,
+        "ncbi_enforce_low_identity": True,
+        "ncbi_low_identity_threshold": 90,
+    }
+    assert results(user) == {
+        ("s1", "Hypo one"): "matches",
+        ("s2", "Hypo two"): "differs",
+    }

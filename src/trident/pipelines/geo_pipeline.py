@@ -80,6 +80,18 @@ def prepare_gbif_worms_ids(df: pd.DataFrame) -> dict[str, str]:
 ### SEARCH WORKFLOW ###
 
 
+def _require_site(latitude, longitude, extents) -> None:
+    """Refuse a km extent without the site: nothing could be counted, and
+    the species would be saved as absent from GBIF."""
+    in_km = [e for e in extents or [] if e != "global"]
+    if in_km and (pd.isna(latitude) or pd.isna(longitude)):
+        raise ValueError(
+            "Latitude and longitude are needed for the "
+            f"{', '.join(f'{e} km' for e in in_km)} "
+            f"{pluralize(len(in_km), 'extent')}"
+        )
+
+
 def _gbif_search_params(
     species_list: list[str],
     latitude: float | None,
@@ -94,6 +106,7 @@ def _gbif_search_params(
     search, and 500.0 read back as text would no longer match 500. A numpy
     integer is keyed as a plain int, which is saved as a number.
     """
+    _require_site(latitude, longitude, extents)
     not_whole = [
         e
         for e in extents
@@ -170,8 +183,9 @@ def run_gbif_search(
 
     Args:
         species_list: Scientific names to match in GBIF.
-        latitude: Center latitude of the search areas.
-        longitude: Center longitude of the search areas.
+        latitude: Center latitude of the search areas (needed unless every
+            extent is "global").
+        longitude: Center longitude of the search areas (same).
         extents: Distances (whole km) from the center, or "global".
         area: "circle" (within each distance of the center) or "box" (the
             bounding box of that circle).
@@ -223,7 +237,7 @@ def run_gbif_search(
 
     # 2. Counts in each area
     species_by_extent = _species_by_extent or {e: species_list for e in extents or []}
-    if latitude is not None and longitude is not None and extents:
+    if extents:
         n_extents = len(extents)
         for i, dist_km in enumerate(extents):
             if progress_handler:

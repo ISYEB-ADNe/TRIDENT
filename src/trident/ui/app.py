@@ -37,8 +37,8 @@ def _app_config():
             key="_settings_email",
             help=(
                 "Required to start or open an analysis. Sent with every request "
-                "to NCBI, GBIF, WoRMS and BOLD, so they can reach you about heavy "
-                "use (NCBI asks for it). "
+                "to NCBI, GBIF, WoRMS and BOLD, so they can reach you in case of "
+                "heavy use. "
                 "Pre-fill via CONTACT_EMAIL in .streamlit/secrets.toml."
             ),
         )

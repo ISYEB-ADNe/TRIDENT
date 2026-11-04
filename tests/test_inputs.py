@@ -137,3 +137,40 @@ def test_same_sequences_under_another_filename_open_the_analysis_unchanged(
     with sqlite3.connect(tmp_path / "x.db") as conn:
         assert conn.execute("SELECT COUNT(*) FROM sequences").fetchone()[0] == 2
     conn.close()
+
+
+def test_an_incompatible_upload_never_replaces_the_analysis_it_was_meant_to_overwrite(
+    tmp_path, monkeypatch
+):
+    """A file from a newer TRIDENT, or one without sequences, imported under the
+    name of a saved analysis is refused, and the saved analysis stays as it was."""
+    from trident.core.database import SCHEMA_VERSION
+
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path))
+    saved = _analysis_file(tmp_path / "AbuDhabi.db")
+
+    newer = tmp_path / "newer.db"
+    _analysis_file(newer)
+    with sqlite3.connect(newer) as conn:
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    conn.close()
+    no_sequences = tmp_path / "other.db"
+    _analysis_file(no_sequences, with_sequences=False)
+    with sqlite3.connect(no_sequences) as conn:
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    conn.close()
+
+    def page(data):
+        import io
+
+        from trident.ui.inputs import _restore_db
+
+        _restore_db(io.BytesIO(data), "AbuDhabi")
+
+    for upload in [newer, no_sequences]:
+        at = AppTest.from_function(page, args=(upload.read_bytes(),))
+        at.run()
+        assert not at.exception, upload.name
+        assert len(at.error) == 1, upload.name
+        assert (tmp_path / "AbuDhabi.db").read_bytes() == saved
+        assert not list(tmp_path.glob("*.upload"))

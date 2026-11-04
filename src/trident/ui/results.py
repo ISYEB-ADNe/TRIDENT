@@ -950,8 +950,10 @@ def show_provenance_section():
     if prov.empty:
         return
 
-    versions = prov["trident_version"].dropna()
-    version = versions.iloc[0] if not versions.empty else "unknown"
+    # Every version of the saved runs, by date of first use: a step rerun
+    # after an upgrade has another one.
+    by_date = prov.sort_values("queried_on", kind="stable")
+    versions = list(dict.fromkeys(by_date["trident_version"].dropna()))
 
     rows = []
     for table, source, step in _SOURCE_STEPS:
@@ -965,9 +967,18 @@ def show_provenance_section():
         return
 
     with st.expander("🔎 Data sources & provenance", expanded=False):
+        if not versions:
+            produced = "TRIDENT version unknown."
+        elif len(versions) == 1:
+            produced = f"Produced with TRIDENT {versions[0]}."
+        else:
+            produced = (
+                "This analysis file holds runs made with TRIDENT "
+                f"{', '.join(versions[:-1])} and {versions[-1]}."
+            )
         st.caption(
-            f"Produced with TRIDENT {version}. Dates are when each live database "
-            "was queried (UTC); they reflect the database state used for this analysis."
+            f"{produced} Dates are when each live database was queried, for "
+            "the runs saved in this file (UTC)."
         )
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 

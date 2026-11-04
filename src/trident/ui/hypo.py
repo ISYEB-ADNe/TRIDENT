@@ -63,6 +63,7 @@ from trident.ui.defaults import (
     HYPO_QUERY_COVER_DEFAULT,
     HYPO_IDENTITY_DEFAULT,
     HYPO_CHECK_EVALUE_EXPONENT_DEFAULT,
+    NCBI_MAX_HITS_LIMIT,
 )
 
 
@@ -107,7 +108,7 @@ def display_hypo_parameters():
             "hypo_max_hits",
             HYPO_MAX_HITS_DEFAULT,
             1,
-            1000,
+            NCBI_MAX_HITS_LIMIT,
             applied=stored,
             help=BLAST_HELP["max_hits"],
         )

@@ -3,6 +3,7 @@ expansion, without network (real answers as fixtures)."""
 
 import json
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
 
@@ -291,7 +292,7 @@ class _Answers(_Session):
         self.asked = set()
 
     def get(self, url, params=None, **k):
-        path = url.removeprefix(worms.WORMS_API_BASE + "/")
+        path = unquote(url.removeprefix(worms.WORMS_API_BASE + "/"))
         self.asked.add(path)
         records = self.answers.get(path)
         if "offset" in (params or {}):

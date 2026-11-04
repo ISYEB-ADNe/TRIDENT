@@ -717,7 +717,7 @@ def extra_analysis():
         return
 
     # Compute and cache input species list (avoid re-logging on every Streamlit rerun)
-    if not st.session_state.bold_input_species:
+    if st.session_state.bold_input_species is None:
         species_list, _ = pipe.prepare_bold_input(
             st.session_state.geo_df,
             st.session_state.ncbi_search_df,

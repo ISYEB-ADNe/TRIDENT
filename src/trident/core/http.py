@@ -27,6 +27,7 @@ from typing import Callable
 import requests
 from loguru import logger
 from requests.adapters import HTTPAdapter
+from urllib3.exceptions import MaxRetryError, ResponseError
 from urllib3.util.retry import Retry
 
 from trident.core import config, stop
@@ -40,6 +41,11 @@ _request_label: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # Statuses by which a server asks clients to slow down: retrying them is
 # routine, so they are logged at DEBUG only.
 _SLOW_DOWN_STATUSES = {429, 503}
+
+# Longest Retry-After wait honoured, in seconds. A source asking for longer
+# (a block, maintenance) is not retried: the request fails at once, so the
+# step does not sit silent for hours.
+RETRY_AFTER_MAX = 120
 
 
 @contextlib.contextmanager
@@ -68,12 +74,23 @@ class _StoppableRetry(Retry):
         _pool=None,
         _stacktrace=None,
     ):
+        what = _request_label.get() or (_pool.host if _pool else "Request")
+        asked = (
+            self.get_retry_after(response)
+            if response is not None and self.respect_retry_after_header
+            else None
+        )
+        if asked is not None and asked > RETRY_AFTER_MAX:
+            logger.warning(
+                f"{what}: HTTP {response.status}, the server asks to wait "
+                f"{asked:g} s, longer than {RETRY_AFTER_MAX} s: not retried"
+            )
+            raise MaxRetryError(_pool, url, ResponseError("Retry-After too long"))
         # Raises once the retries are used up: the caller reports the failure.
         new = super().increment(method, url, response, error, _pool, _stacktrace)
-        what = _request_label.get() or (_pool.host if _pool else "Request")
         if response is not None:
             reason = f"HTTP {response.status}"
-            wait = new.get_retry_after(response) or new.get_backoff_time()
+            wait = asked or new.get_backoff_time()
         else:
             # urllib3 errors start with the connection pool: keep what follows.
             reason = str(error).split(": ", 1)[-1].rstrip(".")

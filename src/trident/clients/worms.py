@@ -65,7 +65,7 @@ def get_aphia_records(
     Returns:
         Raw record dicts in WoRMS order, empty if the name is unknown.
     """
-    url = f"{WORMS_API_BASE}/AphiaRecordsByName/{taxon_name}"
+    url = f"{WORMS_API_BASE}/AphiaRecordsByName/{quote(taxon_name, safe='')}"
     params = {"like": "false", "marine_only": "false"}
 
     records = _get_json(session, url, params)

@@ -534,7 +534,6 @@ def gbif_filter_job(*, force_rerun, retry_empty=False, min_occurrences, extent):
         st.session_state.gbif_search_df, min_occurrences
     )
 
-    st.session_state.gbif_filter_df = gbif_filter_df
     st.session_state.geo_df = geo_df
     st.session_state.geo_params = geo_params
     st.session_state.geo_summary_df = geo_summary_df

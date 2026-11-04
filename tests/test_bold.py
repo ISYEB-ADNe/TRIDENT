@@ -125,9 +125,25 @@ class _BoldSession:
         ({"preprocessor": _Answer(status=403)}, None),
         ({"preprocessor": _Answer(body={})}, None),
         ({"query": _Answer(body={"extent_limit": None})}, None),
+        ({"download": _Answer(text="<html>Service unavailable</html>")}, None),
+        ({"download": _Answer(text='{"processid": "A-1"}\n{"processid": "A')}, None),
         ({"download": _Answer(text="")}, (True, [])),
+        ({"download": _Answer(text="{}")}, (True, [])),
+        (
+            {"download": _Answer(text='{"processid": "A-1"}\n{"total": 1}')},
+            (True, [{"processid": "A-1"}]),
+        ),
     ],
-    ids=["refused", "no match", "no query id", "no record"],
+    ids=[
+        "refused",
+        "no match",
+        "no query id",
+        "error page",
+        "cut off",
+        "no record",
+        "no record as JSON",
+        "other line skipped",
+    ],
 )
 def test_query_fails_only_when_bold_gave_no_usable_answer(overrides, expected):
     """None is a failure (retried); a query with no record is a genuine empty."""

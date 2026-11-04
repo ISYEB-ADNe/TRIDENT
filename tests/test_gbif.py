@@ -607,3 +607,39 @@ def test_search_extents_are_whole_km():
         geo_pipeline.run_gbif_search(
             ["Gadus morhua"], latitude=0, longitude=0, extents=[500.0, "global"]
         )
+
+
+def test_a_km_extent_needs_the_site_and_global_alone_does_not(monkeypatch):
+    """A search around a site without its coordinates is refused before any
+    request (nothing could be counted, every species would be saved as absent);
+    worldwide counts need no site."""
+    with pytest.raises(ValueError, match="Latitude and longitude"):
+        geo_pipeline.run_gbif_search(["Gadus morhua"], extents=[250, "global"])
+
+    def fake_match(names, **k):
+        return pd.DataFrame(
+            [
+                {
+                    "query": n,
+                    "canonicalName": n,
+                    "confidence": 99,
+                    "matchType": "EXACT",
+                    "needs_review": False,
+                    "taxonID": "111",
+                    "rank": "SPECIES",
+                    "genus": n.split()[0],
+                    "kingdom": "Animalia",
+                    "status": "ACCEPTED",
+                }
+                for n in names
+            ]
+        )
+
+    monkeypatch.setattr(geo_pipeline, "match_taxon_names", fake_match)
+    monkeypatch.setattr(
+        gbif, "create_session", lambda *a, **k: _FacetSession({"111": 42})
+    )
+    df, _ = geo_pipeline.run_gbif_search(["Gadus morhua"], extents=["global"])
+    assert df[["scientificName", "occurrences", "gbif_extent"]].values.tolist() == [
+        ["Gadus morhua", 42, "global"]
+    ]

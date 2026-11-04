@@ -115,3 +115,39 @@ def test_a_session_is_built_for_the_call_only_when_none_is_given(monkeypatch):
     own = fetch("a", None, "trident-test")
     assert built == ["trident-test"]
     assert own.closed and not mine.closed
+
+
+@pytest.mark.parametrize("wait, requests_sent", [("60", 3), ("3600", 1)])
+def test_a_long_retry_after_fails_at_once_and_a_short_one_is_waited(
+    sleeps, wait, requests_sent
+):
+    """A server asking to wait longer than RETRY_AFTER_MAX (a block) is not
+    asked again: the answer comes back at once for the caller to fail the
+    item. A shorter wait is honoured before each retry."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    seen = []
+
+    class Busy(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            self.send_response(429)
+            self.send_header("Retry-After", wait)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Busy)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        answer = create_session(retries=2).get(
+            f"http://127.0.0.1:{server.server_port}/", timeout=5
+        )
+    finally:
+        server.shutdown()
+    assert answer.status_code == 429
+    assert len(seen) == requests_sent
+    assert sleeps == [60.0] * (requests_sent - 1)

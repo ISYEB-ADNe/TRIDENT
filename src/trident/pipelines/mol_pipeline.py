@@ -91,7 +91,7 @@ def prepare_ncbi_input(sequences_df: pd.DataFrame) -> list[SeqRecord]:
 def run_ncbi_search(
     sequences: list[SeqRecord],
     batch_size: int = 50,
-    num_threads: int = 3,
+    num_threads: int = 4,
     ev_exponent: int = NCBI_EV_EXPONENT,
     max_hits: int = NCBI_MAX_HITS,
     give_up_minutes: float = BLAST_GIVE_UP / 60,
