@@ -192,8 +192,8 @@ BOLD_RECORD_COLUMNS = [
 ]
 
 # Columns of the search: scientificName is the queried species (the name the
-# EXTRA merge joins on), bold_scientificName the name BOLD files the records
-# under, bold_matched_by the name that found them (SPECIES_NAME, or the source
+# EXTRA merge joins on), bold_scientificName the name searched in BOLD,
+# bold_matched_by the name that found them (SPECIES_NAME, or the source
 # of another name of the species, e.g. "gbif"). A species without sequences
 # has one row, with its bold_outcome, and the name BOLD knows it by if any.
 BOLD_SEARCH_COLUMNS = BOLD_RECORD_COLUMNS + [
@@ -271,10 +271,9 @@ def _clean_records(
 
 def query_species(
     species_name: str,
-    query_prefix: str = "tax:species:",
     session: requests.Session | None = None,
 ) -> tuple[bool, list[dict]] | None:
-    """Query BOLD for barcode sequences of a species.
+    """Query BOLD for barcode sequences of a species or subspecies.
 
     BOLD's preprocessor checks the name against BOLD's taxonomy (exact names
     only, no synonyms). A name it does not know comes back as a search of the
@@ -284,15 +283,17 @@ def query_species(
     failure.
 
     Args:
-        species_name: Species name (e.g. ``"Caranx caballus"``).
-        query_prefix: Query type prefix.
+        species_name: Species name (e.g. ``"Caranx caballus"``), or a
+            subspecies name of three words (e.g. the name GBIF matched), which
+            BOLD refuses as a species (HTTP 400).
         session: Optional requests session for connection reuse.
 
     Returns:
         (in_bold, records): whether BOLD knows the name, and its records
         (empty when it has none). None if any request fails.
     """
-    query = f"{query_prefix}{species_name}"
+    rank = "subspecies" if len(species_name.split()) == 3 else "species"
+    query = f"tax:{rank}:{species_name}"
 
     try:
         preprocess_response = _preprocess_query(query, session=session)
@@ -364,8 +365,11 @@ def _species_rows(
             columns=BOLD_SEARCH_COLUMNS,
             dtype=object,
         )
+    # The name searched, not the records' own: a subspecies' records carry
+    # the species name (Larus glaucoides thayeri: Larus glaucoides), another
+    # WoRMS species.
     return cleaned.assign(
-        bold_scientificName=cleaned["scientificName"],
+        bold_scientificName=name,
         bold_matched_by=matched_by,
         scientificName=species,
         bold_outcome=SEQUENCES,
@@ -437,9 +441,8 @@ def _found_as(rows: pd.DataFrame) -> str:
 
 
 # Columns only the search needs: bold_outcome is always SEQUENCES on a
-# sequence row, and bold_scientificName and bold_matched_by (the name BOLD
-# files a record under, and which name found it) are for looking at the
-# search itself.
+# sequence row, and bold_scientificName and bold_matched_by (the name
+# searched in BOLD, and its source) are for looking at the search itself.
 SEARCH_ONLY_COLUMNS = ["bold_scientificName", "bold_matched_by", "bold_outcome"]
 
 

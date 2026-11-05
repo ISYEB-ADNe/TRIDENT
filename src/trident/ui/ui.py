@@ -224,8 +224,8 @@ COL = {
     "proxy_url": _link("BOLD Link"),
     "bold_scientificName": _Text(
         "Name in BOLD",
-        help="The name BOLD files the records under, when the species was "
-        "found under another of its names (NCBI or GBIF).",
+        help="The name searched in BOLD, when the species was found under "
+        "another of its names (NCBI or GBIF).",
     ),
     "bold_outcome": _Text("Why", help="Why the species has no usable BOLD sequence."),
     "bold_url": _link("BOLD Link"),

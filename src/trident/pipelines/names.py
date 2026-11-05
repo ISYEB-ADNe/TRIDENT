@@ -142,8 +142,8 @@ def gbif_name_rows(gbif_search_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def bold_name_rows(bold_search_df: pd.DataFrame) -> pd.DataFrame:
-    """Name table rows of the BOLD search: the name BOLD files each species'
-    sequences under.
+    """Name table rows of the BOLD search: the name each species' sequences
+    were found under in BOLD.
 
     Args:
         bold_search_df: Output of run_bold_search (scientificName the queried
@@ -152,7 +152,7 @@ def bold_name_rows(bold_search_df: pd.DataFrame) -> pd.DataFrame:
 
     Returns:
         DataFrame with NAME_TABLE_COLUMNS, source "bold", one row per species
-        and BOLD name with sequences (a species BOLD splits has several).
+        with sequences.
     """
     found = (
         ensure_columns(

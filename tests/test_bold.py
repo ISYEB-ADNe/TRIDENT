@@ -105,14 +105,17 @@ class _BoldSession:
         if endpoint in self.overrides:
             return self.overrides[endpoint]
         if endpoint == "preprocessor":
-            name = params["query"].removeprefix("tax:species:")
+            _, rank, name = params["query"].split(":", 2)
+            if rank == "species" and len(name.split()) == 3:
+                # BOLD refuses a subspecies name queried as a species.
+                return _Answer(status=400)
             return _Answer(body=FIXTURE[name]["preprocessor"])
         if endpoint == "query":
             term = params["query"]
             assert term.startswith("tax:"), f"queried a name BOLD does not know: {term}"
             return _Answer(body={"query_id": term, "extent_limit": None})
         query_id = url.rsplit("/", 2)[-2]
-        records = FIXTURE[query_id.removeprefix("tax:species:")]["records"]
+        records = FIXTURE[query_id.split(":", 2)[2]]["records"]
         return _Answer(text="\n".join(json.dumps(r) for r in records))
 
     def close(self):
@@ -230,4 +233,21 @@ def test_a_species_bold_files_under_another_name_is_found_under_it():
     assert len(with_sequences(df)) == 8
     assert bold_name_rows(df)[["species", "name", "matched_by"]].values.tolist() == [
         ["Larus pipixcan", "Leucophaeus pipixcan", "gbif"]
+    ]
+
+
+def test_a_species_bold_has_only_under_a_subspecies_name_is_found_under_it():
+    # GBIF matches Larus thayeri to Larus glaucoides thayeri, a name BOLD
+    # refuses as a species (HTTP 400) and knows as a subspecies.
+    df, failed = get_records_from_species_list(
+        ["Larus thayeri"],
+        {"Larus thayeri": [("Larus glaucoides thayeri", "gbif")]},
+        rate_limit_delay=0,
+        session=_BoldSession(),
+    )
+    assert failed == []
+    assert outcomes_by_species(df).to_dict() == {"Larus thayeri": bold.SEQUENCES}
+    assert len(with_sequences(df)) == 6
+    assert bold_name_rows(df)[["species", "name", "matched_by"]].values.tolist() == [
+        ["Larus thayeri", "Larus glaucoides thayeri", "gbif"]
     ]
