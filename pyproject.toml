@@ -1,6 +1,6 @@
 [project]
 name = "trident"
-version = "0.2.0.dev0"
+version = "0.2.0"
 description = "Taxonomic Resolution and IDentification using Environmental dNa Traces"
 readme = "README.md"
 authors = [
