@@ -1,6 +1,7 @@
-"""FASTA I/O — load, build, and serialize FASTA sequences via BioPython."""
+"""FASTA I/O: load, build and serialize FASTA sequences via Biopython."""
 
 import io
+from collections import Counter
 from typing import Any
 
 import pandas as pd
@@ -8,6 +9,28 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from loguru import logger
+
+from trident.core.utils import pluralize
+
+
+class RepeatedSequenceNames(ValueError):
+    """A FASTA whose sequences do not all have their own name: every step
+    keys a sequence by it, so two sharing one would be merged."""
+
+    SHOWN = 5  # names listed; the others are counted
+
+    def __init__(self, repeated: dict[str, int]):
+        self.repeated = repeated
+        names = ", ".join(
+            f"{name or '(empty header)'} ({n} sequences)"
+            for name, n in list(repeated.items())[: self.SHOWN]
+        )
+        if (more := len(repeated) - self.SHOWN) > 0:
+            names += f" and {more} more {pluralize(more, 'name')}"
+        super().__init__(
+            f"Some sequences share a name: {names}. A sequence is named by its "
+            "header up to the first space or tab; give each its own name."
+        )
 
 
 def load_fasta(fasta_file: Any) -> list[SeqRecord]:
@@ -19,9 +42,17 @@ def load_fasta(fasta_file: Any) -> list[SeqRecord]:
 
     Returns:
         List of SeqRecord objects parsed from the FASTA source.
+
+    Raises:
+        RepeatedSequenceNames: two or more sequences share a name (the header
+            up to its first space or tab).
     """
     display_name = getattr(fasta_file, "name", "buffer")
     sequences = list(SeqIO.parse(fasta_file, "fasta"))
+    counts = Counter(seq.id for seq in sequences)
+    repeated = {name: n for name, n in counts.items() if n > 1}
+    if repeated:
+        raise RepeatedSequenceNames(repeated)
 
     if not sequences:
         logger.debug(f"No sequences found in {display_name}")
@@ -59,16 +90,35 @@ def records_to_fasta_string(sequences: list[SeqRecord]) -> str:
     Returns:
         FASTA-formatted string.
     """
-    logger.debug(f"Building FASTA string for {len(sequences)} sequences")
     with io.StringIO() as output:
         SeqIO.write(sequences, output, "fasta")
         return output.getvalue()
 
 
+def clean_sequence(dna_sequence: str) -> str:
+    """The bases of a sequence: uppercase, without gaps ('-') and without the
+    Ns at its ends. A gap is a position where the sequence has no base (BOLD
+    keeps some records aligned, as submitted), and end Ns hold no base either:
+    both would count in the sequence's length, and so in the query cover.
+    Lowercase is the same base: BLAST reads it as uppercase, and the BOLD
+    filter must too. Inner Ns and other ambiguity codes stay, as bases that
+    could not be read. A sequence of gaps and Ns only keeps its length, as
+    Ns."""
+    sequence = dna_sequence.strip().upper()
+    return sequence.replace("-", "").strip("N") or sequence.replace("-", "N")
+
+
+def blast_record(seq_id, dna_sequence: str) -> SeqRecord:
+    """A sequence as a BLAST query, with no description so the FASTA header
+    is the id alone. It is cleaned only when sent (see submit_blast_batch), so
+    the hits keep the sequence as given."""
+    return SeqRecord(Seq(dna_sequence), id=str(seq_id), description="")
+
+
 def dataframe_to_records(sequences_df: pd.DataFrame) -> list[SeqRecord]:
     """Convert a sequences DataFrame back to SeqRecord objects.
 
-    Gaps ('-') in sequences are replaced with 'N' before conversion.
+    Each sequence is made a BLAST record (see blast_record).
 
     Args:
         sequences_df: DataFrame with seq_id and dna_sequence columns,
@@ -77,9 +127,8 @@ def dataframe_to_records(sequences_df: pd.DataFrame) -> list[SeqRecord]:
     Returns:
         List of SeqRecord objects.
     """
-    logger.debug(f"Converting DataFrame to SeqRecord list ({len(sequences_df)} rows)")
     return [
-        SeqRecord(Seq(dna_sequence.replace("-", "N")), id=str(seq_id), description="")
+        blast_record(seq_id, dna_sequence)
         for seq_id, dna_sequence in zip(
             sequences_df["seq_id"], sequences_df["dna_sequence"]
         )

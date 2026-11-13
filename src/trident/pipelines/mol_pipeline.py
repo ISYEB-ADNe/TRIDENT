@@ -1,4 +1,4 @@
-"""NCBI BLAST pipeline — produces the MOL (Molecular) results list.
+"""NCBI BLAST pipeline: the MOL (molecular) list.
 
 Step order:
     1. prepare_ncbi_input(sequences_df)         → list[SeqRecord]
@@ -7,10 +7,15 @@ Step order:
     4. finalize_mol_results(ncbi_filter_df, ...)  → (mol_df, params)
 
 Exploration:
-    build_mol_summary(mol_df)
-    build_mol_sequence_report(mol_df, seq_id)
+    build_ncbi_search_overview(ncbi_search_df, sequences_df, max_hits)
+    build_mol_summary(mol_df, sequences_df, ncbi_filter_df)
+    build_mol_sequence_report(mol_df, seq_id, ncbi_search_df, ...)
+
+The BLAST jobs send the contact email set with ncbi.set_ncbi_email (a script
+calls ncbi.setup_ncbi_credentials() once first; without it they are anonymous).
 """
 
+from collections.abc import Callable
 from typing import Any
 
 import pandas as pd
@@ -20,13 +25,19 @@ from loguru import logger
 
 from trident.clients.fasta import dataframe_to_records
 from trident.clients.ncbi import (
-    check_species_across_gap,
+    BLAST_GIVE_UP,
+    BLAST_HIT_COLUMNS,
     create_sequence_batches,
     filter_blast_results,
+    mol_filter_cut,
     process_blast_results,
     run_blast_batches,
+    species_across_gap,
 )
 from trident.core.constants import (
+    BLAST_DATABASE,
+    NCBI_CUT_RANGE,
+    NCBI_CUT_TOP_IDENTITY,
     NCBI_EV_EXPONENT,
     NCBI_MAX_HITS,
     NCBI_QUERY_COVER,
@@ -34,9 +45,15 @@ from trident.core.constants import (
     NCBI_METHOD,
     NCBI_GAP_MIN_TOP,
     NCBI_LOW_IDENTITY_THRESHOLD,
+    NCBI_ENFORCE_LOW_IDENTITY,
 )
 from trident.core.database import save_to_db, PartialCache, FullCache
-from trident.core.utils import preserve_sequence_order
+from trident.core.utils import (
+    StepLog,
+    preserve_sequence_order,
+    pluralize,
+    species_for_sequences,
+)
 
 
 ### DATA PREPARATION ###
@@ -67,18 +84,22 @@ def prepare_ncbi_input(sequences_df: pd.DataFrame) -> list[SeqRecord]:
             "ncbi_ev_exponent": "ev_exponent",
             "ncbi_max_hits": "max_hits",
         },
+        constants={"blast_database": BLAST_DATABASE},
     ),
+    log_as=("NCBI BLAST", "sequence"),
 )
 def run_ncbi_search(
     sequences: list[SeqRecord],
-    batch_size: int = 10,
-    num_threads: int = 3,
+    batch_size: int = 50,
+    num_threads: int = 4,
     ev_exponent: int = NCBI_EV_EXPONENT,
     max_hits: int = NCBI_MAX_HITS,
+    give_up_minutes: float = BLAST_GIVE_UP / 60,
     progress_handler: Any | None = None,
     failure_sink: list | None = None,
+    result_sink: Callable | None = None,
 ) -> pd.DataFrame:
-    """Run BLASTn against the NCBI nt database and return processed hits.
+    """Run BLASTn against NCBI core_nt (BLAST_DATABASE) and return processed hits.
 
     Splits sequences into batches and submits them in parallel. Results are
     enriched with identity metrics and standardized taxonomy before returning.
@@ -86,35 +107,60 @@ def run_ncbi_search(
     Args:
         sequences: List of SeqRecord objects to query.
         batch_size: Number of sequences per BLAST request.
-        num_threads: Number of parallel BLAST threads.
+        num_threads: Batches run at once at normal pace, plus
+            BLAST_SLOW_THREADS while jobs are slow (see ``run_blast_pool``).
         ev_exponent: Negative exponent for the E-value threshold
             (e.g. 20 → evalue=1e-20).
         max_hits: Maximum BLAST hits returned per query sequence.
-        progress_handler: Optional progress tracker (dict, tqdm, or None).
+        give_up_minutes: Minutes a BLAST job may wait at NCBI before it is
+            resubmitted once, then counted as failed (see ``BlastGaveUp``).
+        progress_handler: Optional progress tracker (a dict with "current", or
+            tqdm-like).
         failure_sink: If provided, seq_ids whose BLAST batch errored are
             appended here so the cache layer retries them instead of caching
             them as empty.
+        result_sink: Given by save_to_db, which saves the sequences of each
+            batch as soon as its BLAST is done.
 
     Returns:
         DataFrame of processed BLAST hits with taxonomy and alignment metrics.
     """
-    sequence_word = "sequence" if len(sequences) == 1 else "sequences"
-    logger.info(f"Starting NCBI BLAST: {len(sequences)} {sequence_word}")
-
+    log = StepLog("NCBI BLAST", noun="sequence")
     batches = create_sequence_batches(sequences, batch_size)
-    blast_results, failed_ids = run_blast_batches(
+    log.batches(len(batches), f"up to {batch_size} sequences each")
+    hits_of: dict[int, pd.DataFrame] = {}  # processed hits of each batch
+
+    def batch_done(i, dfs, failed):
+        batch = batches[i]
+        found = [df for df in dfs if not df.empty]
+        raw = pd.concat(found, ignore_index=True) if found else pd.DataFrame()
+        hits_of[i] = process_blast_results(raw, fasta_sequences=batch)
+        if result_sink is not None:
+            result_sink(hits_of[i], [rec.id for rec in batch if rec.id not in failed])
+
+    _, failed_ids = run_blast_batches(
         batches,
         n_threads=num_threads,
         evalue=10.0 ** (-ev_exponent),
         hitlist_size=max_hits,
         progress_handler=progress_handler,
+        give_up=give_up_minutes * 60,
+        on_batch=batch_done,
     )
     if failed_ids and failure_sink is not None:
         failure_sink.extend(failed_ids)
 
-    ncbi_df = process_blast_results(blast_results, fasta_sequences=sequences)
+    found = [hits_of[i] for i in sorted(hits_of) if not hits_of[i].empty]
+    ncbi_df = (
+        pd.concat(found, ignore_index=True)
+        if found
+        else pd.DataFrame(columns=BLAST_HIT_COLUMNS)
+    )
 
-    logger.info(f"NCBI BLAST complete: {len(ncbi_df)} hits")
+    log.done(
+        f"{len(ncbi_df)} {pluralize(len(ncbi_df), 'hit')}",
+        failed_ids,
+    )
     return ncbi_df
 
 
@@ -133,6 +179,7 @@ def run_ncbi_search(
         inherit_from=["search_params"],
         fingerprint_on=["ncbi_search_df"],
     ),
+    log_reuse_as="MOL filter",
 )
 @preserve_sequence_order("seq_id", "ncbi_search_df")
 def run_ncbi_filter(
@@ -143,28 +190,24 @@ def run_ncbi_filter(
     gap_min_top: float = NCBI_GAP_MIN_TOP,
     search_params: dict | None = None,
 ) -> pd.DataFrame:
-    """Filter NCBI search results by query coverage and identity gap method.
+    """Filter NCBI hits by query cover, then by barcoding gap or similarity
+    range.
 
     Args:
         ncbi_search_df: DataFrame from run_ncbi_search().
-        query_cover: Minimum query coverage percentage to retain a hit.
+        query_cover: Minimum query cover (%) of a kept hit.
         gap_size: Minimum identity drop defining a barcoding gap, or maximum
-            drop from the best hit when using similarity filtering.
+            drop from the best hit with the similarity range.
         method: Either 'barcoding_gap' or 'similarity'.
         gap_min_top: Minimum identity for barcoding gap search (the top of the
             gap must be ≥ this value). Only used when method='barcoding_gap'.
-        search_params: Parameter dict from run_ncbi_search, used for caching only.
+        search_params: Params of run_ncbi_search, for the cache key only.
 
     Returns:
         Filtered DataFrame.
     """
     if search_params is None:
         search_params = {}
-
-    logger.info(
-        f"Filtering NCBI results: query_cover≥{query_cover}%, gap_size={gap_size}%, "
-        f"method={method}, gap_min_top={gap_min_top}%"
-    )
 
     filtered_df = filter_blast_results(
         ncbi_search_df,
@@ -174,9 +217,14 @@ def run_ncbi_filter(
         gap_min_top=gap_min_top,
     )
 
+    # identity_drop serves the barcoding gap method only (absent with the
+    # similarity method): the MOL list does not keep it.
+    filtered_df = filtered_df.drop(columns="identity_drop", errors="ignore")
+
+    n_seqs = filtered_df["seq_id"].nunique()
     logger.info(
-        f"NCBI filter done: {len(filtered_df)} hits from "
-        f"{filtered_df['seq_id'].nunique()} sequences"
+        f"MOL filter: {len(filtered_df)} {pluralize(len(filtered_df), 'hit')} kept "
+        f"for {n_seqs} {pluralize(n_seqs, 'sequence')}"
     )
     return filtered_df
 
@@ -193,12 +241,14 @@ def run_ncbi_filter(
         },
         inherit_from=["filter_params"],
     ),
+    log_reuse_as="MOL list",
+    bool_columns=("low_identity_warning",),
 )
 @preserve_sequence_order("seq_id", "ncbi_filter_df")
 def finalize_mol_results(
     ncbi_filter_df: pd.DataFrame,
     threshold: float = NCBI_LOW_IDENTITY_THRESHOLD,
-    enforce_threshold: bool = False,
+    enforce_threshold: bool = NCBI_ENFORCE_LOW_IDENTITY,
     filter_params: dict | None = None,
 ) -> pd.DataFrame:
     """Finalize the MOL list for export or downstream analysis.
@@ -210,7 +260,7 @@ def finalize_mol_results(
         ncbi_filter_df: Filtered DataFrame from run_ncbi_filter().
         threshold: Identity percentage below which low_identity_warning is set.
         enforce_threshold: If True, remove hits below threshold instead of just warning.
-        filter_params: Parameter dict from run_ncbi_filter, used for caching only.
+        filter_params: Params of run_ncbi_filter, for the cache key only.
 
     Returns:
         Finalized MOL DataFrame with a low_identity_warning column (low hits
@@ -228,10 +278,14 @@ def finalize_mol_results(
         n_removed = n_before - len(mol_df)
         if n_removed:
             logger.info(
-                f"Enforced low identity threshold: removed {n_removed} hits below {threshold}%"
+                f"MOL list: {n_removed} {pluralize(n_removed, 'hit')} below "
+                f"{threshold}% identity removed"
             )
 
-    logger.success(f"Finalized MOL list: {len(mol_df)} hits")
+    logger.success(
+        f"MOL list: {species_for_sequences(mol_df)} "
+        f"({len(mol_df)} {pluralize(len(mol_df), 'hit')})"
+    )
     return mol_df
 
 
@@ -246,8 +300,9 @@ def build_ncbi_search_overview(
 ) -> pd.DataFrame:
     """Build a per-sequence overview of raw BLAST search results (before filtering).
 
-    Flags sequences where max_hits was reached and the identity range is narrow,
-    suggesting the search may need more hits to capture lower-identity matches.
+    Flags the sequences whose hits reached max_hits and all lie within
+    NCBI_CUT_RANGE of a top hit at or above NCBI_CUT_TOP_IDENTITY
+    (close_hits_cut): species as close as these hits may lie past the limit.
 
     Args:
         ncbi_search_df: Raw BLAST DataFrame from run_ncbi_search().
@@ -255,41 +310,44 @@ def build_ncbi_search_overview(
         max_hits: The max_hits parameter used in the search.
 
     Returns:
-        DataFrame with one row per seq_id: hit count, identity range, and a
-        saturation warning flag.
+        DataFrame with one row per seq_id: hit count, identity range and
+        close_hits_cut.
     """
     all_seq_ids = sequences_df["seq_id"].unique()
-    present_ids = set(ncbi_search_df["seq_id"].unique())
+    identities = ncbi_search_df.groupby("seq_id")["identity_percentage"]
+    stats = identities.agg(["size", "min", "max"])
 
     rows = []
     for seq_id in all_seq_ids:
-        if seq_id not in present_ids:
+        if seq_id not in stats.index:
             rows.append(
                 {
                     "seq_id": seq_id,
-                    "n_hits": 0,
+                    "n_blast_hits": 0,
                     "min_identity": None,
                     "max_identity": None,
                     "identity_range": None,
-                    "max_hits_reached": False,
+                    "close_hits_cut": False,
                 }
             )
             continue
 
-        group = ncbi_search_df[ncbi_search_df["seq_id"] == seq_id]
-        n_hits = len(group)
-        min_id = group["identity_percentage"].min()
-        max_id = group["identity_percentage"].max()
+        n_hits = stats.at[seq_id, "size"]
+        min_id, max_id = stats.at[seq_id, "min"], stats.at[seq_id, "max"]
         identity_range = max_id - min_id
 
         rows.append(
             {
                 "seq_id": seq_id,
-                "n_hits": n_hits,
+                "n_blast_hits": n_hits,
                 "min_identity": round(min_id, 2),
                 "max_identity": round(max_id, 2),
                 "identity_range": round(identity_range, 2),
-                "max_hits_reached": n_hits >= max_hits,
+                "close_hits_cut": bool(
+                    n_hits >= max_hits
+                    and max_id >= NCBI_CUT_TOP_IDENTITY
+                    and identity_range <= NCBI_CUT_RANGE
+                ),
             }
         )
 
@@ -312,7 +370,9 @@ def build_mol_summary(
 
     Returns:
         DataFrame with one row per seq_id containing hit counts, species
-        counts, top identity, filter method, and low identity warning flag.
+        counts, top identity, filter method, and low_identity_warning: a
+        species kept for the sequence has its best hit below the MOL list's
+        low identity threshold.
     """
     present_ids = set(mol_df["seq_id"].unique())
     all_seq_ids = sequences_df["seq_id"].unique()
@@ -331,10 +391,14 @@ def build_mol_summary(
             {
                 "seq_id": seq_id,
                 "filter_method": query_data["filter_method"].iloc[0],
-                "hits_count": len(query_data),
-                "species_count": query_data["scientificName"].nunique(),
-                "top_identity": f"{query_data['identity_percentage'].max():.2f}",
-                "low_identity_warning": query_data["low_identity_warning"].any(),
+                "n_hits": len(query_data),
+                "n_species": query_data["scientificName"].nunique(),
+                "top_identity": round(query_data["identity_percentage"].max(), 2),
+                # A species whose best hit is low: all its hits are low.
+                "low_identity_warning": query_data["low_identity_warning"]
+                .groupby(query_data["scientificName"], dropna=False)
+                .all()
+                .any(),
             }
         )
 
@@ -345,8 +409,8 @@ def build_mol_summary(
                 {
                     "seq_id": seq_id,
                     "filter_method": filter_method_lookup.get(seq_id),
-                    "hits_count": 0,
-                    "species_count": 0,
+                    "n_hits": 0,
+                    "n_species": 0,
                     "top_identity": None,
                     "low_identity_warning": False,
                 }
@@ -358,25 +422,37 @@ def build_mol_summary(
 def build_mol_sequence_report(
     mol_df: pd.DataFrame,
     seq_id: str,
-    gap_size: float = 2.0,
+    ncbi_search_df: pd.DataFrame,
+    query_cover: float = NCBI_QUERY_COVER,
+    gap_size: float = NCBI_GAP_SIZE,
+    method: str = NCBI_METHOD,
+    gap_min_top: float = NCBI_GAP_MIN_TOP,
 ) -> dict:
     """Build a detailed per-sequence analysis report from the MOL list.
+
+    The gap is located on all the sequence's BLAST hits with the MOL filter
+    settings: the MOL list only holds the hits above it.
 
     Args:
         mol_df: Finalized MOL DataFrame from finalize_mol_results().
         seq_id: Sequence identifier to report on.
-        gap_size: Identity drop threshold used for gap analysis.
+        ncbi_search_df: All BLAST hits, from run_ncbi_search().
+        query_cover, gap_size, method, gap_min_top: The MOL filter settings
+            (see run_ncbi_filter).
 
     Returns:
         Dict with keys:
         - 'seq_id': The sequence identifier.
-        - 'sequence_data': DataFrame of hits for this sequence (with hit_count column).
-        - 'filter_method': 'barcoding_gap' or 'similarity'.
-        - 'gap_analysis': Output from check_species_across_gap() for this seq_id,
-          or None if similarity filtering was used.
+        - 'sequence_data': DataFrame of hits for this sequence (with an n_hits column: hits of
+          its species).
+        - 'search_hits': The sequence's BLAST hits that pass *query_cover*
+          (the ones to plot).
+        - 'cut': The filter's gap or range, from mol_filter_cut(); its
+          is_gap says which method the filter used for this sequence.
+        - 'species_across_gap': Output of species_across_gap(): species with
+          hits on both sides of the gap (empty without a gap).
         - 'summary_stats': Dict with total_hits, unique_species, top_identity,
           and top_species.
-        - 'has_warnings': True if any species appear on both sides of the gap.
 
     Raises:
         ValueError: If seq_id is not found in mol_df.
@@ -386,25 +462,26 @@ def build_mol_sequence_report(
     if sequence_data.empty:
         raise ValueError(f"Sequence {seq_id!r} not found in MOL results")
 
-    sequence_data["hit_count"] = sequence_data.groupby("scientificName")[
+    sequence_data["n_hits"] = sequence_data.groupby("scientificName")[
         "scientificName"
     ].transform("count")
 
-    filter_method = sequence_data["filter_method"].iloc[0]
-
-    gap_analysis = None
-    has_warnings = False
-    if filter_method == "barcoding_gap":
-        gap_analysis = check_species_across_gap(sequence_data, gap_size)
-        has_warnings = seq_id in gap_analysis and bool(
-            gap_analysis[seq_id].get("species_details", {})
-        )
+    search_hits = ncbi_search_df[ncbi_search_df["seq_id"] == seq_id]
+    search_hits = search_hits[search_hits["query_cover"] >= query_cover]
+    cut = mol_filter_cut(
+        search_hits,
+        query_cover=query_cover,
+        gap_size=gap_size,
+        method=method,
+        gap_min_top=gap_min_top,
+    )
 
     return {
         "seq_id": seq_id,
         "sequence_data": sequence_data,
-        "filter_method": filter_method,
-        "gap_analysis": gap_analysis.get(seq_id) if gap_analysis else None,
+        "search_hits": search_hits,
+        "cut": cut,
+        "species_across_gap": species_across_gap(search_hits, cut, query_cover),
         "summary_stats": {
             "total_hits": len(sequence_data),
             "unique_species": sequence_data["scientificName"].nunique(),
@@ -413,5 +490,4 @@ def build_mol_sequence_report(
                 sequence_data["identity_percentage"].idxmax(), "scientificName"
             ],
         },
-        "has_warnings": has_warnings,
     }

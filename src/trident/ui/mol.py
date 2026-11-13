@@ -1,39 +1,65 @@
-"""
-NCBI Analysis UI Module
+"""MOL tab: the NCBI BLAST search, the MOL filter and the MOL list."""
 
-This module handles only UI rendering and user interaction.
-"""
+import math
 
 import streamlit as st
 
-from loguru import logger
 
+from trident.core.utils import (
+    FILTER_METHOD_LABELS,
+    SETTING_LABELS,
+    failed_items,
+    pluralize,
+    species_for_sequences,
+)
 from trident.clients import ncbi
+from trident.clients.fasta import (
+    clean_sequence,
+    dataframe_to_records,
+    records_to_fasta_string,
+)
 from trident.clients.ncbi import set_ncbi_email
 from trident.core import config
+from trident.core.constants import (
+    BLAST_DATABASE,
+    NCBI_CUT_RANGE,
+    NCBI_CUT_TOP_IDENTITY,
+    SHORT_SEQUENCE_EV_EXPONENT,
+    SHORT_SEQUENCE_LENGTH,
+)
 import trident.pipelines as pipe
-from trident.logging import get_log_level
 
 
 from trident.ui.ui import (
+    ready,
+    show_filter_success,
+    lazy_expander,
     styled_or_plain,
-    COL,
+    column_config,
+    BLAST_DATABASE_CAPTION,
+    BLAST_HELP,
     get_recent_param_sets,
     param_preset_selector,
-    persist_value,
-    save_widget,
+    coerce_stored_value,
+    mol_filter_settings,
+    setting_widget,
+    style_slider,
+    ev_exponent_widget,
     reset_state_after,
     highlight_low_identity,
     StreamlitLogSink,
+    blast_speed_settings,
+    count_progress,
     run_with_progress,
     sequence_selector,
     run_step_workflow,
-    next_step_button,
     require_prerequisite,
 )
 
 from trident.ui.defaults import (
+    BLAST_GIVE_UP_MINUTES_DEFAULT,
     NCBI_MAX_HITS_DEFAULT,
+    NCBI_MAX_HITS_LIMIT,
     NCBI_EV_EXPONENT_DEFAULT,
     NCBI_NUM_THREADS_DEFAULT,
     NCBI_BATCH_SIZE_DEFAULT,
@@ -45,7 +71,22 @@ from trident.ui.defaults import (
     NCBI_ENFORCE_LOW_IDENTITY_DEFAULT,
 )
 
-FILTER_METHOD_LABELS = {"barcoding_gap": "Barcoding Gap", "similarity": "Similarity"}
+# The columns of a BLAST hit the MOL tables show, after the sequence.
+HIT_COLUMNS = [
+    "scientificName",
+    "hit_url",
+    "identity_percentage",
+    "query_cover",
+    "hit_def",
+    "genus",
+    "specificEpithet",
+    "ncbi_taxid",
+    "align_length",
+    "identities",
+    "gaps",
+    "query_start",
+    "query_end",
+]
 
 # --------------------------------------------------------------------
 # SEARCH FUNCTIONS
@@ -58,7 +99,12 @@ def display_ncbi_parameters():
     db_path = st.session_state.db_path
     db_cols = ["ncbi_max_hits", "ncbi_ev_exponent"]
 
-    presets = get_recent_param_sets(db_path, "ncbi_search_inputs", db_cols)
+    presets = get_recent_param_sets(
+        db_path,
+        "ncbi_search_inputs",
+        db_cols,
+        only={"blast_database": BLAST_DATABASE},
+    )
     param_preset_selector(
         presets,
         format_fn=lambda p: (
@@ -66,110 +112,80 @@ def display_ncbi_parameters():
         ),
         key="ncbi_search_preset",
     )
+    st.caption(BLAST_DATABASE_CAPTION)
 
     stored = st.session_state.ncbi_search_params
-
-    default_hits = stored.get("ncbi_max_hits") or NCBI_MAX_HITS_DEFAULT
-    default_ev_exponent = stored.get("ncbi_ev_exponent") or NCBI_EV_EXPONENT_DEFAULT
 
     # --- Row 1: Primary Scientific Parameters ---
     col1, col2 = st.columns(2)
 
     with col1:
-        persist_value("ncbi_max_hits", int(default_hits))
-        max_hits = st.number_input(
-            "Max hits per query",
+        max_hits = setting_widget(
+            st.number_input,
+            "ncbi_max_hits",
+            NCBI_MAX_HITS_DEFAULT,
             1,
-            1000,
-            help="Number of NCBI hits returned per sequence",
-            key="ncbi_max_hits",
+            NCBI_MAX_HITS_LIMIT,
+            applied=stored,
+            help=BLAST_HELP["max_hits"],
         )
-        save_widget("ncbi_max_hits")
-        active_hits = stored.get("ncbi_max_hits", "None")
-        st.caption(f"Active in results: **{active_hits}**")
 
     with col2:
-        persist_value("ncbi_ev_exponent", int(default_ev_exponent))
-        ev_exponent = st.number_input(
-            "E-value exponent ($10^{-x}$)",
-            0,
-            50,
-            help="Exponent of the significance threshold for matches",
-            key="ncbi_ev_exponent",
+        ev_exponent = ev_exponent_widget(
+            "ncbi_ev_exponent", NCBI_EV_EXPONENT_DEFAULT, 50, stored
         )
-        save_widget("ncbi_ev_exponent")
-        active_ev = stored.get("ncbi_ev_exponent", "None")
-        threshold_str = (
-            f"(threshold: $10^{{-{active_ev}}}$)" if active_ev != "None" else ""
-        )
-        st.caption(f"Active in results: **{active_ev}** {threshold_str}")
 
-    # --- Row 2: Advanced Settings  ---
-    with st.expander(
-        "🛠️ Advanced Search Settings",
-        expanded=False,
-    ):
-        st.markdown(
-            "These settings affect processing speed but not biological results, and should be left at default values most of the time."
-        )
-        tcol1, tcol2 = st.columns(2)
-
-        with tcol1:
-            persist_value("ncbi_batch_size", NCBI_BATCH_SIZE_DEFAULT)
-            batch_size = st.number_input(
-                "Batch size",
-                1,
-                100,
-                help="Number of sequences processed in each batch for NCBI BLAST requests",
-                key="ncbi_batch_size",
+    sequences_df = st.session_state.get("sequences_df")
+    if sequences_df is not None and ev_exponent > SHORT_SEQUENCE_EV_EXPONENT:
+        # BLAST gets the cleaned bases (see submit_blast_batch), not the read.
+        lengths = sequences_df["dna_sequence"].map(lambda s: len(clean_sequence(s)))
+        n_short = int((lengths < SHORT_SEQUENCE_LENGTH).sum())
+        if n_short:
+            st.warning(
+                f"{n_short} {pluralize(n_short, 'sequence is', 'sequences are')} "
+                f"under {SHORT_SEQUENCE_LENGTH} bp: at this E-value "
+                f"{pluralize(n_short, 'it gets', 'they get')} only near-identical "
+                f"hits, or none. Use an exponent of {SHORT_SEQUENCE_EV_EXPONENT} "
+                "or less."
             )
-            save_widget("ncbi_batch_size")
-        with tcol2:
-            persist_value("ncbi_num_threads", NCBI_NUM_THREADS_DEFAULT)
-            threads = st.number_input(
-                "Parallel Threads",
-                1,
-                10,
-                help="Number of batches processed in parallel for NCBI BLAST requests",
-                key="ncbi_num_threads",
-            )
-            save_widget("ncbi_num_threads")
 
-    return max_hits, ev_exponent, batch_size, threads
+    batch_size, threads, give_up = blast_speed_settings(
+        "ncbi",
+        NCBI_BATCH_SIZE_DEFAULT,
+        NCBI_NUM_THREADS_DEFAULT,
+        BLAST_GIVE_UP_MINUTES_DEFAULT,
+    )
+
+    return max_hits, ev_exponent, batch_size, threads, give_up
 
 
 def ncbi_search_job(*, force_rerun, retry_empty=False, status, progress_bar, params):
-    """Run NCBI BLAST with a functioning progress bar and multi-mode support."""
+    """Run the NCBI BLAST search (a step job, see run_step_workflow)."""
 
     # 1. Setup Logging
     logsink = StreamlitLogSink(container=status, prefix="ncbi_")
-    handler_id = logger.add(
-        logsink.write, filter=logsink.thread_filter, level=get_log_level()
-    )
 
     # 2. Prepare Inputs and Progress Tracker
     sequences = pipe.prepare_ncbi_input(st.session_state.sequences_df)
     email = config.contact_email()
     total_sequences = len(sequences)
     progress_info = {"current": 0, "total": total_sequences}
-    seq_str = "sequence" if total_sequences <= 1 else "sequences"
-    progress_placeholder = st.empty()
 
     # 3. Run NCBI search in a background thread
-    def _poll():
-        curr_seq = progress_info["current"]
-        if total_sequences > 0:
-            percent = min(curr_seq / total_sequences, 1.0)
-            progress_bar.progress(
-                percent,
-                text=f"Search: {curr_seq}/{total_sequences} {seq_str} blasted...",
-            )
+    _poll = count_progress(
+        progress_bar,
+        progress_info,
+        lambda curr, total: (
+            f"Search: {curr}/{total} {pluralize(total, 'sequence')} blasted..."
+        ),
+    )
 
     ncbi_search_df, ncbi_search_params = run_with_progress(
         logsink.wrap(pipe.run_ncbi_search, before=lambda: set_ncbi_email(email)),
         sequences,
         batch_size=params["batch_size"],
         num_threads=params["num_threads"],
+        give_up_minutes=params["give_up_minutes"],
         ev_exponent=params["ncbi_ev_exponent"],
         max_hits=params["ncbi_max_hits"],
         force_rerun=force_rerun,
@@ -177,18 +193,19 @@ def ncbi_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
         db_path=st.session_state.db_path,
         progress_handler=progress_info,
         logsink=logsink,
+        progress=progress_info,
         on_poll=_poll,
     )
 
     # Final UI update before clearing
     progress_bar.empty()
-    progress_placeholder.empty()
 
     st.session_state.ncbi_search_df = ncbi_search_df
     st.session_state.ncbi_search_params = ncbi_search_params
+    st.session_state.ncbi_search_failed = failed_items(ncbi_search_df)
 
     reset_state_after("ncbi_search_df")
-    logger.remove(handler_id)
+    logsink.close()
 
 
 def ncbi_search_workflow():
@@ -197,12 +214,15 @@ def ncbi_search_workflow():
         st.markdown("### ⚙️ Search Configuration and Execution")
 
         # 1. Parameter inputs
-        max_hits, ev_exponent, batch_size, num_threads = display_ncbi_parameters()
+        max_hits, ev_exponent, batch_size, num_threads, give_up = (
+            display_ncbi_parameters()
+        )
         current_params = {
             "ncbi_max_hits": max_hits,
             "ncbi_ev_exponent": ev_exponent,
             "batch_size": batch_size,
             "num_threads": num_threads,
+            "give_up_minutes": give_up,
         }
 
         st.divider()
@@ -219,6 +239,7 @@ def ncbi_search_workflow():
             job_kwargs={"params": current_params},
             new_string=f"Ready to analyze **{n_seqs}** sequences.",
             btn_key="ncbi_search_apply",
+            failed_key="ncbi_search_failed",
             logs_prefix="ncbi_",
             threaded=True,
             status_label=f"🔍 Running NCBI BLAST on **{n_seqs}** sequences...",
@@ -228,41 +249,19 @@ def ncbi_search_workflow():
     if mode != "NEW":
         display_ncbi_search_overview()
 
-        with st.expander(
-            f"Inspect raw NCBI/BLAST results ({len(st.session_state.ncbi_search_df)} hits)",
-            expanded=False,
-        ):
-            cols = st.session_state.ncbi_search_df.columns.tolist()
-            priority = [
-                "seq_id",
-                "scientificName",
-                "hit_url",
-                "identity_percentage",
-                "query_cover",
-                "hit_def",
-            ]
-            ordered = priority + [c for c in cols if c not in priority]
-            st.dataframe(
-                st.session_state.ncbi_search_df[ordered],
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "seq_id": COL["seq_id"],
-                    "scientificName": COL["scientificName"],
-                    "hit_url": COL["hit_url"],
-                    "identity_percentage": COL["identity_percentage"],
-                    "query_cover": COL["query_cover"],
-                    "hit_def": COL["hit_def"],
-                    "dna_sequence": None,
-                    "genus": COL["genus"],
-                    "specificEpithet": COL["specificEpithet"],
-                    "align_length": COL["align_length"],
-                    "identities": COL["identities"],
-                    "gaps": COL["gaps"],
-                    "query_start": COL["query_start"],
-                    "query_end": COL["query_end"],
-                },
-            )
+        with lazy_expander(
+            f"Inspect raw NCBI/BLAST results ({len(st.session_state.ncbi_search_df):,} hits)",
+            key="mol_search_results",
+        ) as is_open:
+            if is_open:
+                shown = ["seq_id", *HIT_COLUMNS]
+                st.dataframe(
+                    st.session_state.ncbi_search_df,
+                    width="stretch",
+                    hide_index=True,
+                    column_order=shown,
+                    column_config=column_config(shown),
+                )
 
 
 # --------------------------------------------------------------------
@@ -283,108 +282,97 @@ def ncbi_filter_controls():
         "ncbi_enforce_low_identity",
     ]
     presets = get_recent_param_sets(
-        st.session_state.db_path, "ncbi_filter_inputs", db_cols
+        st.session_state.db_path, "results_mol_inputs", db_cols
     )
     param_preset_selector(
         presets,
         format_fn=lambda p: (
-            f"{p['ncbi_method']}, QC: {p['ncbi_query_cover']}%, gap: {p['ncbi_gap_size']}"
+            f"{FILTER_METHOD_LABELS.get(p['ncbi_method'], p['ncbi_method'])}, "
+            f"query cover: {p['ncbi_query_cover']}%, gap: {p['ncbi_gap_size']}"
+            + (
+                f", top: {p['ncbi_gap_min_top']}%"
+                if p["ncbi_method"] == "barcoding_gap"
+                else ""
+            )
+            + f", low identity: {p['ncbi_low_identity_threshold']}%"
+            + (
+                " (enforced)"
+                if coerce_stored_value(
+                    p["ncbi_enforce_low_identity"], NCBI_ENFORCE_LOW_IDENTITY_DEFAULT
+                )
+                else ""
+            )
         ),
         key="ncbi_filter_preset",
     )
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        methods = list(FILTER_METHOD_LABELS.keys())
-        default_method = stored.get("ncbi_method") or NCBI_METHOD_DEFAULT
-        persist_value("ncbi_method", default_method)
-        method = st.selectbox(
-            "Filtering Method",
-            methods,
+        method = setting_widget(
+            st.selectbox,
+            "ncbi_method",
+            NCBI_METHOD_DEFAULT,
+            list(FILTER_METHOD_LABELS),
+            applied=stored,
             format_func=lambda m: FILTER_METHOD_LABELS[m],
-            help="Method used to filter NCBI hits per sequence, either by detecting a barcoding gap or using a similarity threshold",
-            key="ncbi_method",
+            help="Barcoding gap: keep the hits above a barcoding gap, or within "
+            "the similarity range of the best hit when there is none. Similarity "
+            "range: always the latter.",
         )
-        save_widget("ncbi_method")
-        active_method = stored.get("ncbi_method", "None")
-        active_label = FILTER_METHOD_LABELS.get(active_method, active_method)
-        st.caption(f"Active in results: **{active_label}**")
     with col2:
-        default_qc = int(stored.get("ncbi_query_cover") or NCBI_QUERY_COVER_DEFAULT)
-        persist_value("ncbi_query_cover", default_qc)
-        qc = st.slider(
-            "Query Coverage (%)",
+        qc = setting_widget(
+            st.slider,
+            "ncbi_query_cover",
+            NCBI_QUERY_COVER_DEFAULT,
             1,
             100,
+            applied=stored,
             help="Minimum percentage of the query sequence that must be covered by the hit",
-            key="ncbi_query_cover",
         )
-        save_widget("ncbi_query_cover")
-        active_qc = stored.get("ncbi_query_cover", "None")
-        st.caption(f"Active in results: **{active_qc}**")
     with col3:
-        default_gap_size = int(stored.get("ncbi_gap_size") or NCBI_GAP_SIZE_DEFAULT)
-        persist_value("ncbi_gap_size", default_gap_size)
-        gap_size = st.slider(
-            "Gap Size (%)",
+        gap_size = setting_widget(
+            st.slider,
+            "ncbi_gap_size",
+            NCBI_GAP_SIZE_DEFAULT,
             0,
             20,
-            help="Minimum drop in identity percentage that defines the barcoding gap, or the maximum difference from the best hit when using similarity filtering",
-            key="ncbi_gap_size",
+            applied=stored,
+            help="Minimum drop in identity percentage that defines the barcoding gap, or the maximum difference from the best hit with the similarity range",
         )
-        save_widget("ncbi_gap_size")
-        active_gap_size = stored.get("ncbi_gap_size", "None")
-        st.caption(f"Active in results: **{active_gap_size}**")
 
     with st.expander("🛠️ Advanced Filter Settings", expanded=False):
         acol1, acol2 = st.columns(2)
         with acol1:
             if method == "barcoding_gap":
-                default_gap_min_top = int(
-                    stored.get("ncbi_gap_min_top") or NCBI_GAP_MIN_TOP_DEFAULT
-                )
-                persist_value("ncbi_gap_min_top", default_gap_min_top)
-                gap_min_top = st.slider(
-                    "Gap Min Top (%)",
+                gap_min_top = setting_widget(
+                    st.slider,
+                    "ncbi_gap_min_top",
+                    NCBI_GAP_MIN_TOP_DEFAULT,
                     50,
                     100,
+                    applied=stored,
                     help="The top of the barcoding gap must begin at or above this identity percentage",
-                    key="ncbi_gap_min_top",
                 )
-                save_widget("ncbi_gap_min_top")
-                active_gap_min_top = stored.get("ncbi_gap_min_top", "None")
-                st.caption(f"Active in results: **{active_gap_min_top}**")
             else:
                 gap_min_top = NCBI_GAP_MIN_TOP_DEFAULT
         with acol2:
-            default_lit = int(
-                stored.get("ncbi_low_identity_threshold")
-                or NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
-            )
-            persist_value("ncbi_low_identity_threshold", default_lit)
-            low_identity_threshold = st.slider(
-                "Low Identity Warning (%)",
+            low_identity_threshold = setting_widget(
+                st.slider,
+                "ncbi_low_identity_threshold",
+                NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT,
                 50,
                 100,
-                help="Sequences with a top identity below this threshold are highlighted as warnings",
-                key="ncbi_low_identity_threshold",
+                applied=stored,
+                help="Hits below this identity are highlighted (red), and in the summary, the sequences with a species whose best hit is below it.",
             )
-            save_widget("ncbi_low_identity_threshold")
-            active_lit = stored.get("ncbi_low_identity_threshold", "None")
-            st.caption(f"Active in results: **{active_lit}**")
-
-            default_enforce = (
-                stored.get("ncbi_enforce_low_identity")
-                if stored.get("ncbi_enforce_low_identity") is not None
-                else NCBI_ENFORCE_LOW_IDENTITY_DEFAULT
-            )
-            persist_value("ncbi_enforce_low_identity", default_enforce)
-            enforce_low_identity = st.checkbox(
-                "Enforce as hard filter",
+            enforce_low_identity = setting_widget(
+                st.checkbox,
+                "ncbi_enforce_low_identity",
+                NCBI_ENFORCE_LOW_IDENTITY_DEFAULT,
+                applied=stored,
+                caption=False,
                 help="Remove hits below the threshold instead of just highlighting them",
-                key="ncbi_enforce_low_identity",
             )
-            save_widget("ncbi_enforce_low_identity")
 
     return (
         method,
@@ -429,11 +417,6 @@ def ncbi_filter_job(*, force_rerun, retry_empty=False, params):
     st.session_state.mol_df = finalized_df
     st.session_state.mol_params = params_final
     st.session_state.mol_summary_df = summary_df
-    st.session_state.mol_species = (
-        finalized_df["scientificName"].unique().tolist()
-        if not finalized_df.empty
-        else []
-    )
     reset_state_after("mol_df")
 
 
@@ -441,9 +424,7 @@ def _filter_success_message():
     """Show success message when filter results exist."""
     mol_df = st.session_state.mol_df
     if mol_df is not None:
-        st.success(
-            f"✅ Filtering complete: {len(mol_df):,}/{len(st.session_state.ncbi_search_df):,} hits retained"
-        )
+        show_filter_success(len(mol_df), len(st.session_state.ncbi_search_df), "hits")
 
 
 def ncbi_filter_workflow():
@@ -515,45 +496,53 @@ def display_ncbi_search_overview():
     with st.container(border=True):
         st.markdown("### Search Overview")
 
-        saturated = overview_df[overview_df["max_hits_reached"]]
-        if not saturated.empty:
-            NARROW_RANGE_THRESHOLD = 5
-            narrow = saturated[saturated["identity_range"] <= NARROW_RANGE_THRESHOLD]
-            if not narrow.empty:
-                seq_list = ", ".join(f"**{s}**" for s in narrow["seq_id"])
-                st.warning(
-                    f"The maximum number of hits ({max_hits}) was reached for {seq_list} "
-                    f"within a narrow identity range ({NARROW_RANGE_THRESHOLD}%). Consider increasing **Max Hits** "
-                    f"to capture more diverse matches."
-                )
+        cut = overview_df.loc[overview_df["close_hits_cut"], "seq_id"].tolist()
+        if cut:
+            n = len(cut)
+            them = pluralize(n, "it", "them")
+            rerun = (
+                f"run {them} separately with a higher "
+                f"**{SETTING_LABELS['ncbi_max_hits']}**."
+                if max_hits < NCBI_MAX_HITS_LIMIT
+                else f"search {them} on the NCBI BLAST website, which can return "
+                "more hits."
+            )
+            st.warning(
+                f"{n} {pluralize(n, 'sequence')} reached the maximum number of "
+                f"hits ({max_hits}) with every hit within {NCBI_CUT_RANGE}% identity "
+                f"of a top hit at {NCBI_CUT_TOP_IDENTITY}% identity or more: "
+                f"{', '.join(f'**{s}**' for s in cut)}. Other species with a high "
+                "identity may have been missed. If you want to look further, you "
+                f"can download {pluralize(n, 'this sequence', 'these sequences')} "
+                f"(FASTA) and {rerun}"
+            )
+            sequences_df = st.session_state.sequences_df
+            st.download_button(
+                label="⬇️ Download (FASTA)",
+                data=lambda: records_to_fasta_string(
+                    dataframe_to_records(sequences_df[sequences_df["seq_id"].isin(cut)])
+                ),
+                file_name=(
+                    f"{st.session_state.get('analysis_name', 'analysis')}"
+                    "_hit_limit.fasta"
+                ),
+                mime="text/plain",
+                key="close_hits_cut_download",
+            )
 
+        shown = [
+            "seq_id",
+            "n_blast_hits",
+            "max_identity",
+            "min_identity",
+            "identity_range",
+        ]
         st.dataframe(
-            overview_df[
-                ["seq_id", "n_hits", "max_identity", "min_identity", "identity_range"]
-            ],
+            overview_df,
             width="stretch",
             hide_index=True,
-            column_config={
-                "seq_id": COL["seq_id"],
-                "n_hits": st.column_config.NumberColumn(
-                    "Hits", help="Number of BLAST hits returned"
-                ),
-                "max_identity": st.column_config.NumberColumn(
-                    "Max Identity (%)",
-                    format="%.2f",
-                    help="Highest identity percentage among all hits",
-                ),
-                "min_identity": st.column_config.NumberColumn(
-                    "Min Identity (%)",
-                    format="%.2f",
-                    help="Lowest identity percentage among all hits",
-                ),
-                "identity_range": st.column_config.NumberColumn(
-                    "Identity Range (%)",
-                    format="%.2f",
-                    help="Spread between highest and lowest identity (max - min)",
-                ),
-            },
+            column_order=shown,
+            column_config=column_config(shown),
         )
 
 
@@ -567,132 +556,165 @@ def display_ncbi_summary():
     )
 
     if summary_df["low_identity_warning"].any():
-        st.caption(f":red[■] Low Top Identity (<{threshold}%)")
+        st.caption(f":red[■] Sequences with a species below {threshold}%")
     styled_df = styled_or_plain(summary_df, highlight_low_identity)
+    shown = ["seq_id", "filter_method", "n_hits", "n_species", "top_identity"]
     st.dataframe(
         styled_df,
         width="stretch",
         hide_index=True,
-        column_config={
-            "low_identity_warning": None,
-            "seq_id": COL["seq_id"],
-            "top_identity": COL["top_identity"],
-            "hits_count": COL["hits_count"],
-            "species_count": COL["species_count"],
-            "filter_method": COL["filter_method"],
-        },
+        column_order=shown,
+        column_config=column_config(
+            shown,
+            n_hits=st.column_config.NumberColumn(
+                "Hits Kept", format="%d", help="Hits the MOL filter kept."
+            ),
+        ),
     )
 
 
 def display_ncbi_sequence_summary(sequence_data):
     """Display detailed results summary table"""
-    # 1. Sort by:
-    #   - scientificName: Alphabetical (A-Z)
-    #   - identity_percentage: Highest first (99% > 98%)
-    #   - query_cover: Highest first (to break ties in identity)
     df_sorted = sequence_data.sort_values(
         ["scientificName", "identity_percentage", "query_cover"],
         ascending=[True, False, False],
     )
 
-    # 2. Keep the first of each species (the one with highest identity)
+    # The best hit of each species
     df_display = df_sorted.drop_duplicates(subset="scientificName")
 
-    # 3. Display selected columns
     display_cols = [
         "scientificName",
         "hit_url",
-        "hit_count",
+        "n_hits",
         "identity_percentage",
         "query_cover",
         "low_identity_warning",
     ]
     df_display = df_display[display_cols]
 
-    # 4. # Apply highlight_low_identity style to the dataframe
     styled_df = styled_or_plain(df_display, highlight_low_identity)
 
-    # 5. Display with Streamlit
     threshold = st.session_state.mol_params.get(
         "ncbi_low_identity_threshold", NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
     )
     if df_display["low_identity_warning"].any():
         st.caption(f":red[■] Low Identity (<{threshold}%)")
+    shown = [
+        "scientificName",
+        "hit_url",
+        "n_hits",
+        "identity_percentage",
+        "query_cover",
+    ]
     st.dataframe(
         styled_df,
         width="stretch",
         hide_index=True,
-        column_config={
-            "low_identity_warning": None,
-            "scientificName": COL["scientificName"],
-            "identity_percentage": COL["identity_percentage"],
-            "hit_count": COL["hit_count"],
-            "query_cover": COL["query_cover"],
-            "hit_url": COL["hit_url"],
-        },
+        column_order=shown,
+        column_config=column_config(shown),
     )
 
 
-def display_ncbi_sequence_plots(selected_sequence, ncbi_full_df, ncbi_filtered_df, gap):
-    """Display identity plot for a sequence."""
-
-    if not st.checkbox(
-        f"📊 Show Plot for {selected_sequence}",
-        value=False,
-        key=f"plot_{selected_sequence}",
-    ):
-        return
-
-    sequence_ncbi_data = ncbi_full_df[ncbi_full_df["seq_id"] == selected_sequence]
+def display_ncbi_sequence_plots(
+    selected_sequence, sequence_ncbi_data, ncbi_filtered_df, cut
+):
+    """Display identity plot of a sequence's BLAST hits that pass the query
+    cover (*sequence_ncbi_data*), with the MOL filter's *cut*."""
     filtered_species = set(
         ncbi_filtered_df[ncbi_filtered_df["seq_id"] == selected_sequence][
             "scientificName"
         ].unique()
     )
 
-    # Compute default y-range from data
+    # The identity range starts just below the sequence's lowest hit; it is
+    # kept per sequence, the style settings below are shared by all sequences
     all_identities = sequence_ncbi_data["identity_percentage"]
-    data_min = float(all_identities.min()) if not all_identities.empty else 80.0
-    data_max = float(all_identities.max()) if not all_identities.empty else 100.0
-    default_min = max(data_min - 1, 0.0)
-    default_max = min(data_max + 1, 100.0)
+    range_min = (
+        max(math.floor(all_identities.min()) - 1, 0) if not all_identities.empty else 80
+    )
+
+    view = setting_widget(
+        st.radio,
+        "mol_plot_view",
+        "Bars",
+        ["Bars", "Points"],
+        label="View",
+        caption=False,
+        horizontal=True,
+        help="Bars: number of hits per identity bin, stacked by species. "
+        "Points: one point per hit.",
+    )
 
     # Plot style controls
     with st.expander("Plot settings", expanded=False):
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            font_size = st.slider(
-                "Axis text", 8, 24, 14, key=f"font_{selected_sequence}"
-            )
+            font_size = style_slider("mol_plot_font", "Axis text", 14, 8, 24)
         with col2:
-            legend_size = st.slider(
-                "Legend text", 6, 20, 12, key=f"legend_{selected_sequence}"
-            )
+            legend_size = style_slider("mol_plot_legend", "Legend text", 12, 6, 20)
         with col3:
-            marker_size = st.slider(
-                "Marker size", 4, 20, 10, key=f"marker_{selected_sequence}"
-            )
+            if view == "Bars":
+                bin_width = style_slider(
+                    "mol_plot_bin",
+                    "Bin width (%)",
+                    0.2,
+                    0.1,
+                    1.0,
+                    step=0.1,
+                    help="A bin merges identities closer than its width. Below "
+                    "one mismatch (about 0.25% on 400 bp), it only merges hits "
+                    "with the same number of mismatches.",
+                )
+            else:
+                marker_size = style_slider("mol_plot_marker", "Marker size", 10, 4, 20)
         with col4:
-            plot_height = st.slider(
-                "Plot height", 300, 900, 500, step=50, key=f"height_{selected_sequence}"
+            plot_height = style_slider(
+                "mol_plot_height", "Plot height", 500, 300, 900, step=50
             )
 
+        range_key = f"yrange_{selected_sequence}"
+        stored_range = st.session_state.get(range_key)
+        # The hits can change under a kept range (a new search): start again
+        if stored_range and stored_range[0] < range_min:
+            del st.session_state[range_key]
         y_range = st.slider(
             "Identity range (%)",
-            0.0,
+            float(range_min),
             100.0,
-            (default_min, default_max),
-            step=0.5,
-            key=f"yrange_{selected_sequence}",
+            (float(range_min), 100.0),
+            step=0.1,
+            key=range_key,
         )
 
-    fig_identity = ncbi.plot_identity_percentage(
-        sequence_ncbi_data,
-        threshold=gap,
-        filtered_species=filtered_species,
-        title="",
-        marker_size=marker_size,
-    )
+    # Only the hits in the identity range are plotted, so the hit axis fits
+    # them; the bracket still comes from every hit that passes query cover
+    shown_hits = sequence_ncbi_data[
+        sequence_ncbi_data["identity_percentage"].between(*y_range)
+    ]
+    if view == "Bars":
+        fig_identity = ncbi.plot_identity_bars(
+            shown_hits,
+            cut=cut,
+            filtered_species=filtered_species,
+            title="",
+            bin_width=bin_width,
+        )
+        # Bars are centred on their identity, half a bin each side
+        half_mark = bin_width / 2
+    else:
+        fig_identity = ncbi.plot_identity_percentage(
+            shown_hits,
+            cut=cut,
+            filtered_species=filtered_species,
+            title="",
+            marker_size=marker_size,
+        )
+        half_mark = 0
+    # A margin beyond the range keeps the marks at its ends whole (a hit at
+    # 100% would show half a point, or a bar without its outline)
+    margin = max(half_mark, 0.03 * (y_range[1] - y_range[0]))
+    y_axis_range = [y_range[0] - margin, y_range[1] + margin]
     fig_identity.update_layout(
         margin=dict(t=20),
         height=plot_height,
@@ -703,7 +725,7 @@ def display_ncbi_sequence_plots(selected_sequence, ncbi_full_df, ncbi_filtered_d
         yaxis=dict(
             title=dict(font=dict(size=font_size + 1)),
             tickfont=dict(size=font_size),
-            range=[y_range[0], y_range[1]],
+            range=y_axis_range,
         ),
         legend=dict(font=dict(size=legend_size)),
         modebar=dict(orientation="v"),
@@ -727,7 +749,12 @@ def display_ncbi_sequence_plots(selected_sequence, ncbi_full_df, ncbi_filtered_d
 
 def display_ncbi_sequence_table(sequence_data):
     """Display detailed results table"""
-    display_cols = [
+    threshold = st.session_state.mol_params.get(
+        "ncbi_low_identity_threshold", NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
+    )
+    if sequence_data["low_identity_warning"].any():
+        st.caption(f":red[■] Low Identity (<{threshold}%)")
+    shown = [
         "scientificName",
         "identity_percentage",
         "query_cover",
@@ -735,97 +762,82 @@ def display_ncbi_sequence_table(sequence_data):
         "hit_def",
         "align_length",
         "identities",
-        "low_identity_warning",
     ]
-    cols_in_df = [c for c in display_cols if c in sequence_data.columns]
-    df_display = sequence_data[cols_in_df]
-
-    styled_df = styled_or_plain(df_display, highlight_low_identity)
-
-    threshold = st.session_state.mol_params.get(
-        "ncbi_low_identity_threshold", NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
-    )
-    if (
-        "low_identity_warning" in df_display.columns
-        and df_display["low_identity_warning"].any()
-    ):
-        st.caption(f":red[■] Low Identity (<{threshold}%)")
     st.dataframe(
-        styled_df,
+        styled_or_plain(sequence_data, highlight_low_identity),
         width="stretch",
         hide_index=True,
-        column_config={
-            "low_identity_warning": None,
-            "scientificName": COL["scientificName"],
-            "identity_percentage": COL["identity_percentage"],
-            "query_cover": COL["query_cover"],
-            "hit_url": COL["hit_url"],
-            "hit_def": COL["hit_def"],
-            "align_length": COL["align_length"],
-            "identities": COL["identities"],
-        },
+        column_order=shown,
+        column_config=column_config(shown),
     )
 
 
-def display_ncbi_filter_warnings(filter_method, gap_analysis, has_warnings):
-    """Display filtering method results and warnings"""
-    if filter_method == "barcoding_gap" and gap_analysis:
-        gap_range = gap_analysis["gap_range"]
-        species_details = gap_analysis["species_details"]
-
-        # Always show gap info (blue box)
-        if gap_range[1] is not None:
-            gap_size = gap_range[0] - gap_range[1]
-            st.info(
-                f"📊 **Barcoding Gap Detected**: Gap between {gap_range[0]:.2f}% and {gap_range[1]:.2f}% "
-                f"(gap size: {gap_size:.2f}%)"
-            )
-        else:
-            st.info(f"📊 **Barcoding Gap Detected**: Gap at {gap_range[0]:.2f}%")
-
-        # Show warning only if there are problematic species (yellow box)
-        if has_warnings and species_details:
-            warning_msg = "⚠️ **Warning**, the following species appear both BEFORE and AFTER the barcoding gap:\n\n"
-            warning_msg += ncbi.format_species_gap_details(species_details)
-            st.warning(warning_msg)
-
-    elif filter_method == "similarity":
+def display_ncbi_filter_warnings(cut, species_details, settings):
+    """Display the gap or range the MOL filter used (*settings*: its
+    settings, see mol_filter_settings), and species across the gap."""
+    if cut is None:
+        return
+    if cut.is_gap:
         st.info(
-            "ℹ️ **Similarity Filtering**: No barcoding gap > threshold found, top hits within similarity range retained"
+            f"📊 **Barcoding Gap Detected**: Gap between {cut.top:.2f}% and "
+            f"{cut.bottom:.2f}% (gap size: {cut.top - cut.bottom:.2f}%)"
+        )
+        if species_details:
+            st.warning(
+                "⚠️ These species have hits on both sides of the barcoding gap, "
+                "so the gap does not separate them:\n\n"
+                + ncbi.format_species_gap_details(species_details)
+            )
+    else:
+        # Only the gap method looked for a gap before taking the range.
+        gap_method = settings["method"] == "barcoding_gap"
+        no_gap = " (no barcoding gap found)" if gap_method else ""
+        st.info(
+            f"ℹ️ **Similarity range**: hits within {settings['gap_size']:g}% of "
+            f"the best hit kept{no_gap}."
         )
 
 
-def _mol_sequence_label(seq_id):
-    """Format sequence selector label with species count, hits, top identity, and filter method."""
+def _mol_sequence_labels():
+    """Sequence selector label of each sequence: species count, hits, top
+    identity and filter method (one pass over the MOL list for all)."""
     df = st.session_state.mol_df
-    seq_data = df[df["seq_id"] == seq_id]
-    if seq_data.empty:
-        return f"{seq_id} (no hits)"
-    n_species = seq_data["scientificName"].nunique()
-    n_hits = len(seq_data)
-    top_id = seq_data["identity_percentage"].max()
-    method = FILTER_METHOD_LABELS.get(
-        seq_data["filter_method"].iloc[0], seq_data["filter_method"].iloc[0]
-    )
-    return (
-        f"{seq_id} — {n_species} species, {n_hits} hits, top {top_id:.1f}% ({method})"
-    )
+    by_seq = df.groupby("seq_id", sort=False)
+    n_species = by_seq["scientificName"].nunique()
+    n_hits = by_seq.size()
+    top_id = by_seq["identity_percentage"].max()
+    # The method of the sequence's first row
+    method = df.drop_duplicates("seq_id").set_index("seq_id")["filter_method"]
+    labels = {}
+    for seq_id in st.session_state.sequences_id:
+        if seq_id not in n_hits.index:
+            labels[seq_id] = f"{seq_id} (no hits)"
+            continue
+        label = FILTER_METHOD_LABELS.get(method[seq_id], method[seq_id])
+        labels[seq_id] = (
+            f"{seq_id}: {n_species[seq_id]} species, {n_hits[seq_id]} hits, "
+            f"top {top_id[seq_id]:.1f}% ({label})"
+        )
+    return labels
 
 
 def display_ncbi_per_sequence():
     """Display detailed results per sequence."""
-    selected_sequence = sequence_selector(format_fn=_mol_sequence_label)
+    labels = _mol_sequence_labels()
+    selected_sequence = sequence_selector(labels=labels)
 
     if st.session_state.mol_df[
         st.session_state.mol_df["seq_id"] == selected_sequence
     ].empty:
-        st.info("No validated records for this sequence.")
+        st.info("The MOL filter kept no hit for this sequence.")
         return
 
+    settings = mol_filter_settings()
     seq_analysis = pipe.build_mol_sequence_report(
         st.session_state.mol_df,
         selected_sequence,
-        gap_size=st.session_state.mol_params["ncbi_gap_size"],
+        st.session_state.ncbi_search_df,
+        **settings,
     )
 
     tab_overview, tab_table, tab_plots = st.tabs(
@@ -835,9 +847,9 @@ def display_ncbi_per_sequence():
     with tab_overview:
         # Metrics + gap info + species list
         display_ncbi_filter_warnings(
-            seq_analysis["filter_method"],
-            seq_analysis["gap_analysis"],
-            seq_analysis["has_warnings"],
+            seq_analysis["cut"],
+            seq_analysis["species_across_gap"],
+            settings,
         )
         display_ncbi_sequence_summary(seq_analysis["sequence_data"])
 
@@ -845,58 +857,31 @@ def display_ncbi_per_sequence():
         # Detailed table
         display_ncbi_sequence_table(seq_analysis["sequence_data"])
     with tab_plots:
-        # Gap + Identity plots
         display_ncbi_sequence_plots(
             selected_sequence,
-            ncbi_full_df=st.session_state.ncbi_search_df,
+            sequence_ncbi_data=seq_analysis["search_hits"],
             ncbi_filtered_df=st.session_state.mol_df,
-            gap=st.session_state.mol_params["ncbi_gap_size"],
+            cut=seq_analysis["cut"],
         )
 
 
 def display_full_mol_list():
     """Display the complete MOL list in a flat table."""
-    mol_df = st.session_state.mol_df
-    cols = mol_df.columns.tolist()
-    priority = [
-        "seq_id",
-        "filter_method",
-        "scientificName",
-        "hit_url",
-        "identity_percentage",
-        "query_cover",
-        "hit_def",
-    ]
-    ordered = priority + [c for c in cols if c not in priority]
+    mol_df = st.session_state.mol_df.assign(
+        filter_method=lambda df: df["filter_method"].replace(FILTER_METHOD_LABELS)
+    )
     threshold = st.session_state.mol_params.get(
         "ncbi_low_identity_threshold", NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT
     )
     if mol_df["low_identity_warning"].any():
         st.caption(f":red[■] Low Identity (<{threshold}%)")
-    styled_df = styled_or_plain(mol_df[ordered], highlight_low_identity)
+    shown = ["seq_id", "filter_method", *HIT_COLUMNS]
     st.dataframe(
-        styled_df,
+        styled_or_plain(mol_df, highlight_low_identity),
         width="stretch",
         hide_index=True,
-        column_config={
-            "seq_id": COL["seq_id"],
-            "filter_method": COL["filter_method"],
-            "scientificName": COL["scientificName"],
-            "hit_url": COL["hit_url"],
-            "identity_percentage": COL["identity_percentage"],
-            "query_cover": COL["query_cover"],
-            "hit_def": COL["hit_def"],
-            "dna_sequence": None,
-            "genus": COL["genus"],
-            "specificEpithet": COL["specificEpithet"],
-            "align_length": COL["align_length"],
-            "identities": COL["identities"],
-            "gaps": COL["gaps"],
-            "query_start": COL["query_start"],
-            "query_end": COL["query_end"],
-            "identity_drop": None,
-            "low_identity_warning": None,
-        },
+        column_order=shown,
+        column_config=column_config(shown),
     )
 
 
@@ -919,11 +904,12 @@ def display_ncbi_results():
 
         display_ncbi_summary()
 
-        with st.expander(
-            f"View full MOL list ({len(final_df)} hits)",
-            expanded=False,
-        ):
-            display_full_mol_list()
+        with lazy_expander(
+            f"View full MOL list ({len(final_df):,} hits: {species_for_sequences(final_df)})",
+            key="mol_full_list",
+        ) as is_open:
+            if is_open:
+                display_full_mol_list()
 
     # Per-sequence details
     with st.container(border=True):
@@ -941,7 +927,7 @@ def mol_analysis():
 
     st.header("🧬 MOL: NCBI BLAST Search")
     st.caption(
-        "Step 1: Use BLAST to compare your (M)OTU/ASV sequences against the NCBI database and create the MOL list."
+        "Step 1: Use BLAST to compare your (M)OTU/ASV sequences against GenBank and create the MOL list."
     )
     st.divider()
 
@@ -955,14 +941,13 @@ def mol_analysis():
     ncbi_search_workflow()
 
     # Filtering Card
-    if st.session_state.ncbi_search_df is not None:
+    if ready("ncbi_search_df") is not None:
         st.divider()
         ncbi_filter_workflow()
 
     # Results Display
-    if st.session_state.mol_df is not None:
+    if ready("mol_df") is not None:
         st.divider()
         display_ncbi_results()
-        next_step_button("Next: TAX ➔", "tax")
 
     st.divider()

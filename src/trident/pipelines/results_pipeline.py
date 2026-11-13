@@ -1,47 +1,201 @@
-"""Results assembly — combines MOL+GEO and HYPO species into a unified results table.
+"""Results assembly: the MOL+GEO and HYPO species in one results table.
 
-Unlike other pipelines, this module performs read-only aggregation of existing
-pipeline outputs. No external searches or database caching (except GBIF export
-which does WoRMS lookups for higher-level taxa).
+Unlike other pipelines, this module mostly aggregates the outputs of the
+other steps. Its one search is the GBIF export's WoRMS lookup of higher-level
+taxa (run_higher_taxa_lookup), saved per name like the other steps' searches.
 
     build_results_df(sequences_df, geo_df, mol_df, ...) → DataFrame
-    find_sequence_exclusion_step(all_seq_ids, ...) → DataFrame
-    build_gbif_export_df(results_df) → DataFrame (one row per MOTU/ASV)
-    add_below_mol(df, mol_df, ncbi_search_df) → DataFrame
-    add_low_identity_warning(df, threshold) → DataFrame
+    build_gbif_export_df(results_df, ...) → DataFrame (one row per sequence)
+    run_higher_taxa_lookup(names, ...) → (records_df, params)
+    resolve_sequences(results_df) → DataFrame (species count and shared taxon per sequence)
+    exclusion_keys(df) → Series ("{seq_id}||{scientificName}" per row, as exclusions store it)
+    filter_excluded_results(results_df, excluded) → DataFrame (excluded species rows dropped)
+    build_assignments(curated_df, threshold, query_cover, lost_at) → DataFrame (one row per sequence)
+    add_check_result(df, ncbi_search_df, ...) → DataFrame (the HYPO check's result per candidate)
+    best_identity_per_sequence(df, query_cover) → DataFrame (identity and via per sequence)
+    flag_low_identity(df, threshold, best_identity) → DataFrame
+    build_species_flow(seq_id, ..., name_table) → list of (source, target, names) links
+    build_species_flows(seq_ids, ..., name_table) → {seq_id: links}
+    species_flow_table(seq_id, links, ...) → DataFrame (one row per name)
+    flow_lost_at(links) → (step, names) where a sequence without a species lost them
+    flows_lost_at(seq_ids, ..., name_table) → {seq_id: (step, names)}
+    plot_species_flow(links) → Plotly Sankey figure
 """
 
+from collections.abc import Callable
+from typing import NamedTuple
+
+import numpy as np
 import pandas as pd
 from loguru import logger
 
-from trident.clients.worms import clean_authorships, get_aphia_record
+from trident.clients.worms import (
+    INFRASPECIFIC_RANKS,
+    clean_authorships,
+    get_aphia_records,
+    pick_record,
+    worms_search_url,
+)
+from trident.clients.ncbi import filter_blast_results
+from trident.core.constants import (
+    NCBI_GAP_MIN_TOP,
+    NCBI_GAP_SIZE,
+    NCBI_METHOD,
+    NCBI_QUERY_COVER,
+)
+from trident.core.database import PartialCache, save_to_db
+from trident.core.http import create_session
 from trident.core.utils import (
+    StepLog,
     ensure_columns,
-    find_exclusion_pipeline_step,
+    name_list,
+    notify_progress,
+    pluralize,
+    normalize_name,
     preserve_sequence_order,
+)
+from trident.pipelines.names import (
+    best_hits,
+    name_keys,
+    ncbi_names,
+    species_key,
+    species_of,
 )
 
 
-RESULT_COLS = [
+# HYPO only, shown in the app but not exported: the MOL species a HYPO
+# species' CO1 proxy matched, and the sequence's MOL identity to it.
+VIA_COLS = ["proxy_hit_species", "via_mol_identity"]
+
+# The HYPO check's result for a HYPO candidate (see add_check_result).
+CHECK_NOT_FOUND = "no hit in GenBank"
+CHECK_MATCHES = "matches"
+CHECK_DIFFERS = "differs"
+CHECK_PARTIAL = "partial hit"
+# What each result means, the one definition the app's notes, legends, help
+# texts and tabs use.
+CHECK_NOTES = {
+    CHECK_NOT_FOUND: "HYPO species with no check hit in GenBank",
+    CHECK_MATCHES: "HYPO species whose check hit the MOL filter would keep",
+    CHECK_DIFFERS: "HYPO species whose check hit the MOL identity filter would drop",
+    CHECK_PARTIAL: "HYPO species whose check hit covers only part of the sequence",
+}
+
+# The columns of a HYPO candidate its check result is worked out from
+# (add_check_result).
+CHECK_INPUT_COLUMNS = [
     "seq_id",
-    "validation_step",
     "scientificName",
-    "taxonURL",
-    "gbif_taxonURL",
-    "kingdom",
-    "phylum",
-    "class",
-    "order",
-    "family",
-    "genus",
-    "specificEpithet",
-    "scientificNameAuthorship",
-    "ncbi_top_identity_percentage",
-    "ncbi_top_query_cover",
-    "ncbi_top_hit_url",
-    "bold_seq_url",
-    "gbif_occurrences",
+    "hypo_check_identity",
+    "hypo_check_query_cover",
 ]
+
+# The check results Results flags or marks for review, by their column in
+# build_assignments.
+CHECK_FLAGS = {"check_differs": CHECK_DIFFERS, "check_partial": CHECK_PARTIAL}
+
+# Why a sequence ends without a species, by the step that lost it (flow_lost_at).
+LOSS_REASONS = {
+    "MOL Search": "no NCBI hit (MOL)",
+    "MOL Filter": "no hit passing the MOL filter",
+    "TAX": "no species found in WoRMS (TAX)",
+    "GEO": "no candidate recorded in the area (GEO)",
+    "GEO match": "no candidate matched in GBIF (GEO)",
+    "GEO not run": "GEO not run",
+    "EXTRA": "only candidates added by TAX, none with a BOLD proxy (EXTRA)",
+    "EXTRA not run": "only candidates added by TAX, EXTRA not run",
+    "HYPO": "only candidates added by TAX, none validated by HYPO",
+    "HYPO not run": "only candidates added by TAX, HYPO not run",
+    "Curation": "all its candidates excluded by hand",
+}
+
+
+class FailedStep(NamedTuple):
+    """A search whose queries can fail: its name, the item it queries (with
+    its plural when pluralize cannot make it), the source, the step a
+    sequence is lost at when the failures took its last candidates and why,
+    what a failure means for an item, and the request that failed when it is
+    not the item's own."""
+
+    step: str
+    item: str
+    source: str
+    lost_at: str
+    reason: str
+    plural: str | None = None
+    lost: str = "could not be queried"
+    request: str | None = None
+
+    @property
+    def gives_up(self) -> bool:
+        """Whether the source also fails a query it gave up waiting for
+        (NCBI BLAST jobs stuck in NCBI's queue)."""
+        return self.source == "NCBI BLAST"
+
+    def label(self, n: int) -> str:
+        return pluralize(n, self.item, self.plural)
+
+
+# The searches whose failed queries the app holds the next steps for and a
+# flow can be given (see build_species_flow), in pipeline order, by the name
+# of their failed items in the app. Each but the MOL search (whose sequence
+# has no hits to show) is also the loss node of the flow where those
+# candidates end.
+FAILED_STEPS = {
+    "ncbi_search_failed": FailedStep(
+        "MOL BLAST search",
+        "sequence",
+        "NCBI BLAST",
+        "MOL failed",
+        "MOL BLAST search failed, run MOL again",
+    ),
+    "tax_failed": FailedStep(
+        "TAX WoRMS search",
+        "name or genus",
+        "WoRMS",
+        "TAX failed",
+        "WoRMS search failed for its species, run TAX again",
+        plural="names or genera",
+    ),
+    "gbif_search_failed": FailedStep(
+        "GEO GBIF search",
+        "species",
+        "GBIF",
+        "GEO failed",
+        "GBIF search failed for its candidates, run GEO again",
+    ),
+    "bold_search_failed": FailedStep(
+        "EXTRA BOLD search",
+        "species",
+        "BOLD",
+        "EXTRA failed",
+        "only candidates added by TAX, BOLD search failed for some, run EXTRA again",
+    ),
+    # A candidate with several proxies may still be validated by another.
+    "hypo_search_failed": FailedStep(
+        "HYPO BLAST search",
+        "candidate",
+        "NCBI BLAST",
+        "HYPO search failed",
+        "only candidates added by TAX, HYPO BLAST search failed for some, run "
+        "HYPO again",
+        lost="could not be fully tested",
+        request="the NCBI BLAST search of one or more of their BOLD proxies",
+    ),
+    "hypo_check_failed": FailedStep(
+        "HYPO check",
+        "candidate",
+        "NCBI BLAST",
+        "HYPO check failed",
+        "only candidates added by TAX, HYPO check failed for some, run the check again",
+        lost="could not be checked",
+    ),
+}
+LOSS_REASONS |= {step.lost_at: step.reason for step in FAILED_STEPS.values()}
+
+# MOL+GEO only, for the GBIF export: the NCBI names of the species' MOL hits,
+# joined by ", " as the export writes them.
+VERBATIM_COLS = ["verbatimIdentification"]
 
 # Column order for CSV/file export
 EXPORT_COLS = [
@@ -60,134 +214,207 @@ EXPORT_COLS = [
     "taxonID",
     "taxonID_db",
     "validation_step",
-    "ncbi_top_identity_percentage",
-    "ncbi_top_query_cover",
-    "gbif_occurrences",
-    "proxy_identity_percentage",
+    "mol_identity",
+    "mol_query_cover",
+    "geo_occurrences",
+    "proxy_identity",
     "proxy_query_cover",
+    "hypo_check_identity",
+    "hypo_check_query_cover",
     "taxonURL",
-    "gbif_taxonURL",
-    "ncbi_top_hit_url",
-    "bold_seq_url",
+    "geo_url",
+    "mol_hit_url",
+    "proxy_url",
+    "hypo_check_hit_url",
+    "hypo_check_result",
 ]
 
 
-def get_rejected_max_identity(mol_df, ncbi_search_df) -> pd.Series:
-    """Return max identity among MOL-rejected hits, per seq_id."""
-    if ncbi_search_df is None or ncbi_search_df.empty or mol_df is None or mol_df.empty:
-        return pd.Series(dtype=float, name="_rejected_max")
-    mol_keys = set(
-        zip(mol_df["seq_id"], mol_df["scientificName"], mol_df["identity_percentage"])
-    )
-    # Same set-membership test as a row-wise apply, but iterate columns directly
-    # to avoid building a Series per row. Semantics are identical (same tuples,
-    # same NaN != NaN behaviour as the set of tuples).
-    in_mol = [
-        (seq_id, name, identity) in mol_keys
-        for seq_id, name, identity in zip(
-            ncbi_search_df["seq_id"],
-            ncbi_search_df["scientificName"],
-            ncbi_search_df["identity_percentage"],
-        )
-    ]
-    rejected = ncbi_search_df[~pd.Series(in_mol, index=ncbi_search_df.index)]
-    if rejected.empty:
-        return pd.Series(dtype=float, name="_rejected_max")
-    return (
-        rejected.groupby("seq_id")["identity_percentage"].max().rename("_rejected_max")
-    )
-
-
-def add_below_mol(
+def add_check_result(
     df,
-    mol_df,
     ncbi_search_df,
-    identity_col="ncbi_top_identity_percentage",
+    query_cover=NCBI_QUERY_COVER,
+    gap_size=NCBI_GAP_SIZE,
+    method=NCBI_METHOD,
+    gap_min_top=NCBI_GAP_MIN_TOP,
+    threshold=None,
+    hypo=None,
 ):
-    """Flag rows where identity is at or below the highest rejected MOL hit."""
-    df["below_mol"] = False
-    if identity_col not in df.columns:
-        return df
-    rejected_max = get_rejected_max_identity(mol_df, ncbi_search_df)
-    if rejected_max.empty:
-        return df
-    df = df.merge(rejected_max, on="seq_id", how="left")
-    df[identity_col] = pd.to_numeric(df[identity_col], errors="coerce")
-    df["_rejected_max"] = pd.to_numeric(df["_rejected_max"], errors="coerce")
-    df["below_mol"] = (
-        df[identity_col].notna()
-        & df["_rejected_max"].notna()
-        & (df[identity_col] <= df["_rejected_max"])
+    """The HYPO check's result (hypo_check_result) of each HYPO candidate, from
+    its best check hit (hypo_check_identity, hypo_check_query_cover), see
+    CHECK_NOTES:
+
+    - no hit in GenBank: the check found none;
+    - partial hit: the hit covers less than *query_cover* (or its cover is
+      unknown);
+    - matches: the MOL filter (filter_blast_results, with the MOL settings)
+      keeps the hit when it is added to the sequence's BLAST hits
+      (*ncbi_search_df*), and the hit is at or above *threshold*, the low
+      identity threshold when the MOL step enforces it (None otherwise);
+    - differs: the hit covers enough, but the MOL filter would drop it on
+      identity (its gap or similarity range, or the enforced threshold).
+
+    The check's E-value is looser than the MOL search's, so a matching hit is
+    not always one the MOL search could have returned. *hypo* marks the HYPO
+    rows (by default those of validation_step HYPO, or every row of a table
+    without it); the others get no result.
+    """
+    if hypo is None:
+        hypo = (
+            df["validation_step"].eq("HYPO")
+            if "validation_step" in df.columns
+            else pd.Series(True, index=df.index)
+        )
+    # By position: the index of *df* need not be unique.
+    identity = pd.to_numeric(df["hypo_check_identity"], errors="coerce").to_numpy()
+    cover = pd.to_numeric(df["hypo_check_query_cover"], errors="coerce").to_numpy()
+    hypo = hypo.to_numpy(dtype=bool)
+    found = hypo & ~np.isnan(identity)
+    full = found & (cover >= query_cover)
+    kept = _kept_by_mol_filter(
+        df["seq_id"].to_numpy()[full],
+        identity[full],
+        cover[full],
+        ncbi_search_df,
+        query_cover=query_cover,
+        gap_size=gap_size,
+        method=method,
+        gap_min_top=gap_min_top,
     )
-    return df.drop(columns="_rejected_max")
+    if threshold is not None:
+        kept = kept & (identity[full] >= threshold)
+    result = np.full(len(df), pd.NA, dtype=object)
+    result[hypo & ~found] = CHECK_NOT_FOUND
+    result[found & ~full] = CHECK_PARTIAL
+    result[full] = np.where(kept, CHECK_MATCHES, CHECK_DIFFERS)
+    df["hypo_check_result"] = result
+    return df
 
 
-def add_low_identity_warning(
-    df, threshold, identity_col="ncbi_top_identity_percentage"
-):
-    """Flag rows where identity is present and below threshold."""
-    df[identity_col] = pd.to_numeric(df[identity_col], errors="coerce")
-    # `lt` returns False (not NA) for NaN, and `&` of two boolean Series is
-    # always a clean boolean, so no fillna is needed.
-    df["low_identity_warning"] = (
-        df[identity_col].lt(threshold) & df[identity_col].notna()
+# The name of a check hit added to a sequence's BLAST hits (_kept_by_mol_filter).
+_CHECK_HIT = "\x00check hit"
+
+
+def _kept_by_mol_filter(seq_ids, identity, cover, ncbi_search_df, **settings):
+    """Whether the MOL filter keeps each check hit (*identity*, *cover*, for
+    the sequence of *seq_ids*: arrays of the same length) added to its
+    sequence's BLAST hits, as a boolean array. Each hit gets its own copy of
+    its sequence's hits covering enough (the others the filter drops at
+    once), under its position as seq_id, and all are filtered in one call."""
+    if not len(seq_ids):
+        return np.zeros(0, dtype=bool)
+    if ncbi_search_df is None:
+        raise ValueError(
+            "Judging HYPO check hits needs ncbi_search_df, the MOL search's hits"
+        )
+    columns = ["seq_id", "scientificName", "identity_percentage", "query_cover"]
+    hits = ncbi_search_df.loc[ncbi_search_df["seq_id"].isin(set(seq_ids)), columns]
+    hits = hits.assign(
+        identity_percentage=pd.to_numeric(hits["identity_percentage"], errors="coerce"),
+        query_cover=pd.to_numeric(hits["query_cover"], errors="coerce"),
     )
+    # The gap and the range depend on identities only: one hit per identity.
+    hits = hits[hits["query_cover"] >= settings["query_cover"]].drop_duplicates(
+        ["seq_id", "identity_percentage"]
+    )
+    keys = pd.DataFrame({"key": np.arange(len(seq_ids)).astype(str), "seq_id": seq_ids})
+    checks = keys.assign(
+        scientificName=_CHECK_HIT, identity_percentage=identity, query_cover=cover
+    )
+    copies = pd.concat([keys.merge(hits, on="seq_id"), checks], ignore_index=True)
+    copies["seq_id"] = copies.pop("key")
+    kept = filter_blast_results(copies, **settings)
+    kept_keys = set(kept.loc[kept["scientificName"] == _CHECK_HIT, "seq_id"])
+    return keys["key"].isin(kept_keys).to_numpy()
+
+
+def best_identity_per_sequence(df, query_cover):
+    """Best NCBI identity of each sequence's species, and the MOL species it
+    comes through (via) when it is not the species' own hit.
+
+    A MOL+GEO species has its MOL hit, a HYPO species its check hit; only hits
+    covering at least the MOL query cover count (a partial hit's identity is
+    over part of the sequence only). A HYPO species without such a check hit
+    has no hit of its own: it takes the sequence's MOL hit on the species its CO1
+    proxy matched, the only NCBI evidence for the sequence.
+
+    Returns:
+        DataFrame indexed by seq_id with columns identity and via.
+    """
+    direct = (
+        df["mol_identity"]
+        .where(df["mol_query_cover"] >= query_cover)
+        .fillna(
+            df["hypo_check_identity"].where(df["hypo_check_query_cover"] >= query_cover)
+        )
+    )
+    hypo = df["validation_step"].eq("HYPO")
+    via = df["via_mol_identity"].where(hypo & direct.isna())
+    rows = pd.DataFrame(
+        {
+            "seq_id": df["seq_id"],
+            "identity": direct.fillna(via),
+            "via": df["proxy_hit_species"].where(via.notna()),
+        }
+    )
+    # On a tie, the species' own hit wins over one through another species.
+    rows["_direct"] = rows["via"].isna()
+    return (
+        rows.dropna(subset=["identity"])
+        .sort_values(["identity", "_direct"], ascending=False)
+        .drop_duplicates("seq_id")
+        .set_index("seq_id")[["identity", "via"]]
+    )
+
+
+def flag_low_identity(df, threshold, best_identity):
+    """Flag the rows of sequences whose best identity is below threshold."""
+    df = df.copy()
+    best = df["seq_id"].map(best_identity)
+    df["low_identity_warning"] = best.notna() & (best < threshold)
     return df
 
 
 def _select_columns(df, extra=None):
-    """Keep only target columns that exist in df."""
-    target = list(EXPORT_COLS) + (extra or [])
-    return df[[c for c in target if c in df.columns]].copy()
+    """df with the export's columns (and *extra*), empty where df lacks one."""
+    return df.reindex(columns=[*EXPORT_COLS, *(extra or [])])
 
 
-def _build_mol_geo_part(geo_df, mol_df):
-    """Build MOL+GEO rows: species confirmed via NCBI + geographically validated."""
-    mol_geo = geo_df[geo_df["in_mol"].astype(bool)].copy()
+def _build_mol_geo_part(geo_df, mol_df, name_table):
+    """Build MOL+GEO rows: the MOL species of each sequence that GEO kept.
+
+    Each row keeps the best MOL hit of its species for its sequence (the
+    mol_* columns TAX gave it) and gets the NCBI names of its MOL hits,
+    matched on their species (see species_of).
+    """
+    mol_geo = geo_df[geo_df["in_mol"]].copy()
     mol_geo["validation_step"] = "MOL+GEO"
-
-    # GEO carries the WoRMS-accepted name, so match the best MOL hit on the
-    # accepted name (R3) to attach NCBI scores to synonyms; fall back to raw.
-    mol_df = mol_df.copy()
-    match_name = (
-        "acceptedName" if "acceptedName" in mol_df.columns else "scientificName"
-    )
-
-    best_mol_cols = ["seq_id", match_name, "identity_percentage", "query_cover"]
-    if "hit_url" in mol_df.columns:
-        best_mol_cols.append("hit_url")
-    best_mol = (
-        mol_df.sort_values("identity_percentage", ascending=False)
-        .drop_duplicates(subset=["seq_id", match_name])[best_mol_cols]
-        .rename(
-            columns={
-                match_name: "scientificName",
-                "identity_percentage": "ncbi_top_identity_percentage",
-                "query_cover": "ncbi_top_query_cover",
-                "hit_url": "ncbi_top_hit_url",
-            }
-        )
-    )
-    return mol_geo.merge(best_mol, on=["seq_id", "scientificName"], how="left")
+    mol_geo["verbatimIdentification"] = ncbi_names(
+        mol_geo, mol_df, name_table
+    ).str.join(", ")
+    return mol_geo
 
 
-def _build_hypo_part(hypo_df, geo_df):
-    """Build HYPO rows: species confirmed via BOLD/NCBI proxy."""
+def _build_hypo_part(hypo_df, geo_df, mol_df, name_table):
+    """Build HYPO rows: hypothetical species supported by a BOLD proxy (CO1)
+    BLASTed against GenBank."""
     hypo = hypo_df.copy()
     hypo["validation_step"] = "HYPO"
 
-    hypo = hypo.rename(
-        columns={
-            "identity_percentage": "proxy_identity_percentage",
-            "query_cover": "proxy_query_cover",
-            "seq_url": "bold_seq_url",
-        }
+    # The sequence's own evidence for a HYPO species: how well it matched the
+    # MOL species the proxy links it to (its marker is not in GenBank). The
+    # proxy hit and the MOL hits may name that species differently.
+    via_identity = best_hits(mol_df, name_table, ["identity_percentage"]).rename(
+        columns={"identity_percentage": "via_mol_identity"}
+    )
+    hypo = (
+        hypo.assign(species_key=species_key(hypo["proxy_hit_species"], name_table))
+        .merge(via_identity, on=["seq_id", "species_key"], how="left")
+        .drop(columns="species_key")
     )
 
-    # Fill gbif_occurrences and gbif_taxonURL from geo_df (HYPO doesn't carry them)
-    geo_fill_cols = [
-        c for c in ("gbif_occurrences", "gbif_taxonURL") if c in geo_df.columns
-    ]
+    # Fill geo_occurrences and geo_url from geo_df (HYPO doesn't carry them)
+    geo_fill_cols = [c for c in ("geo_occurrences", "geo_url") if c in geo_df.columns]
     if geo_fill_cols:
         geo_fill = geo_df[["seq_id", "scientificName"] + geo_fill_cols].drop_duplicates(
             subset=["seq_id", "scientificName"]
@@ -198,7 +425,17 @@ def _build_hypo_part(hypo_df, geo_df):
 
 
 @preserve_sequence_order("seq_id", "sequences_df")
-def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None, ncbi_search_df=None):
+def build_results_df(
+    sequences_df,
+    geo_df,
+    mol_df,
+    hypo_df=None,
+    *,
+    name_table,
+    ncbi_search_df=None,
+    mol_settings=None,
+    check_results=None,
+):
     """Build combined results DataFrame from MOL+GEO and HYPO species.
 
     Progressive: works with just geo_df + mol_df, adds HYPO rows when available.
@@ -209,38 +446,45 @@ def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None, ncbi_search_df=
         geo_df: GEO results (must have 'in_mol' column).
         mol_df: MOL results (NCBI BLAST hits).
         hypo_df: HYPO results (optional, proxy-validated species).
-        ncbi_search_df: Raw NCBI search results (optional, used for below_mol flag).
+        name_table: See build_name_table, to match MOL names on their species.
+        ncbi_search_df: The MOL search's hits, and *mol_settings* the MOL
+            filter's settings (add_check_result's arguments, its defaults when
+            None), which judge the HYPO check's hits: ncbi_search_df is
+            required once a HYPO row's check found a hit covering enough.
+        check_results: The HYPO check's result of each HYPO candidate, by
+            (seq_id, scientificName), already judged (the app keeps them):
+            used instead of judging them again.
     """
-    parts = [_select_columns(_build_mol_geo_part(geo_df, mol_df))]
+    parts = [
+        _select_columns(
+            _build_mol_geo_part(geo_df, mol_df, name_table), extra=VERBATIM_COLS
+        )
+    ]
 
     if hypo_df is not None and not hypo_df.empty:
-        hypo_part = _select_columns(_build_hypo_part(hypo_df, geo_df))
-        hypo_part = add_below_mol(hypo_part, mol_df, ncbi_search_df)
+        hypo_part = _select_columns(
+            _build_hypo_part(hypo_df, geo_df, mol_df, name_table), extra=VIA_COLS
+        )
         parts.append(hypo_part)
 
     results = pd.concat(parts, ignore_index=True)
-    ensure_columns(results, EXPORT_COLS)
+    ensure_columns(results, EXPORT_COLS + VIA_COLS + VERBATIM_COLS)
 
     # Cast numeric columns that may be strings from DB cache
     for col in (
-        "ncbi_top_identity_percentage",
-        "ncbi_top_query_cover",
-        "proxy_identity_percentage",
+        "mol_identity",
+        "mol_query_cover",
+        "proxy_identity",
         "proxy_query_cover",
-        "gbif_occurrences",
+        "hypo_check_identity",
+        "hypo_check_query_cover",
+        "geo_occurrences",
+        "via_mol_identity",
     ):
         if col in results.columns:
             results[col] = pd.to_numeric(results[col], errors="coerce")
 
-    # Ensure below_mol is always a clean bool column
-    if "below_mol" not in results.columns:
-        results["below_mol"] = False
-    else:
-        results["below_mol"] = (
-            results["below_mol"].where(results["below_mol"].notna(), False).astype(bool)
-        )
-
-    # Empty sequences — add rows for seq_ids with no species assigned
+    # Empty sequences: add rows for seq_ids with no species assigned
     all_seq_ids = sequences_df["seq_id"].unique()
     present_seqs = set(results["seq_id"].dropna().unique())
     missing_seqs = [s for s in all_seq_ids if s not in present_seqs]
@@ -250,51 +494,31 @@ def build_results_df(sequences_df, geo_df, mol_df, hypo_df=None, ncbi_search_df=
         ].drop_duplicates(subset="seq_id")
         results = pd.concat([results, empty_rows], ignore_index=True)
 
-    return results
+    if check_results is None:
+        return add_check_result(results, ncbi_search_df, **(mol_settings or {}))
+    return lookup_check_results(results, check_results)
 
 
-def _seq_ids_in(df):
-    """Extract unique seq_id set from a DataFrame."""
-    return set(df["seq_id"].dropna().unique())
-
-
-def find_sequence_exclusion_step(
-    all_seq_ids,
-    ncbi_search_df=None,
-    mol_df=None,
-    tax_df=None,
-    geo_df=None,
-):
-    """Find at which pipeline step each empty sequence lost all species.
-
-    Args:
-        all_seq_ids: Full list of sequence IDs.
-        ncbi_search_df: Raw NCBI search results (optional).
-        mol_df: Filtered MOL results (optional).
-        tax_df: WoRMS taxonomy results (optional).
-        geo_df: GBIF geographic results (optional).
-
-    Returns:
-        DataFrame with columns: seq_id, pipeline_step.
-    """
-    steps = []
-    if ncbi_search_df is not None:
-        steps.append(("MOL Search", _seq_ids_in(ncbi_search_df)))
-    if mol_df is not None:
-        steps.append(("MOL Filter", _seq_ids_in(mol_df)))
-    if tax_df is not None:
-        steps.append(("TAX", _seq_ids_in(tax_df)))
-    if geo_df is not None:
-        steps.append(("GEO", _seq_ids_in(geo_df)))
-
-    if not steps:
-        return pd.DataFrame(columns=["seq_id", "pipeline_step"])
-
-    return find_exclusion_pipeline_step(all_seq_ids, steps)
+def lookup_check_results(df, check_results):
+    """*df* with the HYPO check's result of each HYPO row (validation_step
+    HYPO, or every row of a table without it) taken from *check_results*,
+    already worked out by (seq_id, scientificName) (see add_check_result)."""
+    hypo = (
+        df["validation_step"].eq("HYPO")
+        if "validation_step" in df.columns
+        else pd.Series(True, index=df.index)
+    )
+    keys = zip(df["seq_id"], df["scientificName"])
+    return df.assign(
+        hypo_check_result=[
+            check_results.get(key, pd.NA) if is_hypo else pd.NA
+            for key, is_hypo in zip(keys, hypo)
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
-# GBIF export (one row per MOTU/ASV)
+# GBIF export (one row per sequence)
 # ---------------------------------------------------------------------------
 
 TAXONOMY_HIERARCHY = [
@@ -341,8 +565,23 @@ GBIF_EXPORT_COLS = [
 ]
 
 
+def _lone_taxon(row) -> dict:
+    """The taxon of a sequence with one species: that species' own row."""
+    result = {col: row.get(col) for col in TAXONOMY_HIERARCHY}
+    for col in (
+        "scientificName",
+        "scientificNameAuthorship",
+        "taxonRank",
+        "taxonID",
+        "taxonID_db",
+    ):
+        result[col] = row.get(col)
+    result["identificationRemarks"] = pd.NA
+    return result
+
+
 def _find_common_taxonomy(group: pd.DataFrame) -> dict:
-    """Find the lowest common taxonomic rank for a group of species rows.
+    """Find the lowest shared taxon of a group of species rows.
 
     Returns a dict with taxonomy columns filled to the common level,
     plus scientificName, taxonRank, and identificationRemarks.
@@ -350,52 +589,192 @@ def _find_common_taxonomy(group: pd.DataFrame) -> dict:
     species_names = group["scientificName"].dropna().unique().tolist()
 
     if len(species_names) <= 1:
-        # Single species or empty — keep as-is
-        row = group.iloc[0]
-        result = {col: row.get(col) for col in TAXONOMY_HIERARCHY}
-        result["scientificName"] = row.get("scientificName")
-        result["scientificNameAuthorship"] = row.get("scientificNameAuthorship")
-        result["taxonRank"] = row.get("taxonRank")
-        result["taxonID"] = row.get("taxonID")
-        result["taxonID_db"] = row.get("taxonID_db")
-        result["identificationRemarks"] = pd.NA
-        return result
+        return _lone_taxon(group.iloc[0])
 
-    # Walk hierarchy bottom-up to find lowest common level
-    result = {}
+    # Walk the hierarchy top-down: a level is common only when every level
+    # above it is too, so homonyms (e.g. the genus Liparis, a fish and a plant)
+    # do not make a common taxon. A level missing for every species is skipped.
+    result = {col: pd.NA for col in TAXONOMY_HIERARCHY}
     resolved_rank = None
     resolved_name = None
+    # Plain lists: pandas calls on these small groups cost more than the work.
+    filled = {
+        col: [v for v in group[col].tolist() if pd.notna(v)]
+        for col in TAXONOMY_HIERARCHY
+    }
+    genus_only = any(" " not in str(name).strip() for name in species_names)
 
-    for col in reversed(TAXONOMY_HIERARCHY):
-        values = group[col].dropna().unique()
+    for col in TAXONOMY_HIERARCHY:
+        values = list(dict.fromkeys(filled[col]))
+        # An epithet names a species only within a known genus, and not when a
+        # candidate is a genus alone (a one-word name keeps it at genus).
+        if len(values) > 1 or (
+            col == "specificEpithet" and (resolved_rank != "genus" or genus_only)
+        ):
+            break
         if len(values) == 1:
+            result[col] = values[0]
             resolved_rank = col
             resolved_name = values[0]
-            # Fill taxonomy up to this level
-            for c in TAXONOMY_HIERARCHY:
-                vals = group[c].dropna().unique()
-                result[c] = vals[0] if len(vals) == 1 else pd.NA
-            break
-        else:
-            result[col] = pd.NA
 
     if resolved_rank is None:
-        # No common level found — clear all taxonomy
+        # No common level found: clear all taxonomy
         for c in TAXONOMY_HIERARCHY:
             result[c] = pd.NA
         result["scientificName"] = pd.NA
         result["taxonRank"] = pd.NA
     else:
+        # A species is named by its binomial, not by its epithet alone.
+        if resolved_rank == "specificEpithet" and pd.notna(result["genus"]):
+            resolved_name = f"{result['genus']} {resolved_name}"
         result["scientificName"] = resolved_name
         result["taxonRank"] = TAXONOMY_RANKS.get(resolved_rank, resolved_rank)
 
-    # Higher-level taxonID/authorship left empty for now (needs WoRMS lookup)
+    # Filled from WoRMS by build_gbif_export_df.
     result["scientificNameAuthorship"] = pd.NA
     result["taxonID"] = pd.NA
     result["taxonID_db"] = pd.NA
     result["identificationRemarks"] = ", ".join(sorted(species_names))
 
     return result
+
+
+# WoRMS ranks at species level or below, lower case.
+SPECIES_RANKS = {"species"} | {rank.lower() for rank in INFRASPECIFIC_RANKS}
+
+
+def resolve_sequences(results_df: pd.DataFrame) -> pd.DataFrame:
+    """Give each sequence its number of species and the taxon they resolve to.
+
+    The taxon and its rank are the ones the GBIF export writes for the sequence
+    (same routines): the species itself, or the lowest taxon its species share,
+    empty when none is shared or no species is assigned. species_level is True
+    when that taxon is a species or below (a species and its subspecies resolve
+    to the species), and species then names that species by genus and epithet,
+    so a subspecies counts with its species.
+
+    Returns:
+        DataFrame with columns: seq_id, n_species, taxonRank, scientificName,
+        species_level, species.
+    """
+    species_rows = results_df.dropna(subset=["scientificName"])
+    n_species = species_rows.groupby("seq_id")["scientificName"].nunique()
+
+    # A lone species is its own taxon, taken from its first row as the GBIF
+    # export does; only sequences with several species need the common taxon.
+    single = n_species.index[n_species == 1]
+    first_rows = species_rows[species_rows["seq_id"].isin(single)].drop_duplicates(
+        "seq_id"
+    )
+    common = {row["seq_id"]: _lone_taxon(row) for row in first_rows.to_dict("records")}
+    several = species_rows[species_rows["seq_id"].isin(n_species.index[n_species > 1])]
+    for seq_id, group in several.groupby("seq_id", sort=False):
+        common[seq_id] = _find_common_taxonomy(group)
+
+    rows = []
+    for seq_id in results_df["seq_id"].dropna().drop_duplicates():
+        n = int(n_species.get(seq_id, 0))
+        row = {"seq_id": seq_id, "n_species": n, "species_level": False}
+        if n:
+            taxon = common[seq_id]
+            row["taxonRank"] = taxon["taxonRank"]
+            row["scientificName"] = taxon["scientificName"]
+            rank = str(taxon["taxonRank"]).lower()
+            name = str(taxon["scientificName"])
+            # A lone binomial whose rank WoRMS left empty is still a species.
+            row["species_level"] = rank in SPECIES_RANKS or (
+                n == 1 and pd.isna(taxon["taxonRank"]) and " " in name
+            )
+            if row["species_level"]:
+                genus, epithet = taxon["genus"], taxon["specificEpithet"]
+                row["species"] = (
+                    f"{genus} {epithet}"
+                    if pd.notna(genus) and pd.notna(epithet)
+                    else name
+                )
+        rows.append(row)
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "seq_id",
+            "n_species",
+            "taxonRank",
+            "scientificName",
+            "species_level",
+            "species",
+        ],
+    )
+
+
+def build_assignments(
+    curated_df: pd.DataFrame,
+    threshold: float,
+    query_cover: float,
+    lost_at: Callable[[list[str]], dict[str, tuple[str | None, set[str]]]],
+) -> pd.DataFrame:
+    """One row per sequence: its assignment after curation, and what to check.
+
+    Args:
+        curated_df: build_results_df rows left after curation
+            (filter_excluded_results).
+        threshold: Identity (%) below which a sequence's best identity is
+            flagged (low_identity).
+        query_cover: The MOL filter's query cover, which the best identity's
+            hit also requires (see best_identity_per_sequence).
+        lost_at: Called with the sequences left without a species; returns
+            flow_lost_at of each (flows_lost_at with the step tables).
+
+    Returns:
+        resolve_sequences' columns plus best_identity, best_via, low_identity,
+        paths (validation steps), check_differs and check_partial (a HYPO
+        species of the sequence with that check result, see
+        add_check_result), lost_at and note.
+    """
+    table = resolve_sequences(curated_df)
+    species_rows = curated_df.dropna(subset=["scientificName"])
+    by_seq = species_rows.groupby("seq_id")
+
+    best = best_identity_per_sequence(species_rows, query_cover)
+    table["best_identity"] = table["seq_id"].map(best["identity"])
+    table["best_via"] = table["seq_id"].map(best["via"])
+    table["low_identity"] = table["best_identity"] < threshold
+    table["paths"] = table["seq_id"].map(
+        by_seq["validation_step"].agg(lambda s: " + ".join(sorted(s.unique())))
+    )
+    counts = pd.crosstab(species_rows["seq_id"], species_rows["hypo_check_result"])
+    for column, value in CHECK_FLAGS.items():
+        has = counts[value] > 0 if value in counts else pd.Series(dtype=bool)
+        table[column] = table["seq_id"].map(has).fillna(False).astype(bool)
+
+    unassigned = table.loc[table["n_species"] == 0, "seq_id"].tolist()
+    lost = lost_at(unassigned) if unassigned else {}
+    table["lost_at"] = table["seq_id"].map({s: step for s, (step, _) in lost.items()})
+    notes = []
+    for row in table.to_dict("records"):
+        if row["n_species"] == 0:
+            step = row["lost_at"]
+            notes.append(
+                "no candidate left" if pd.isna(step) else LOSS_REASONS.get(step, step)
+            )
+            continue
+        note = []
+        if row["low_identity"]:
+            via = f" (via {row['best_via']})" if pd.notna(row["best_via"]) else ""
+            note.append(f"best identity below {threshold}%{via}")
+        for column, value in CHECK_FLAGS.items():
+            if row[column]:
+                note.append(CHECK_NOTES[value])
+        if pd.isna(row["taxonRank"]) and not row["species_level"]:
+            note.append("no shared taxon" if row["n_species"] > 1 else "rank unknown")
+        # "; ": the check notes hold commas of their own.
+        notes.append("; ".join(note))
+    table["note"] = notes
+    return table
+
+
+def exclusion_keys(df: pd.DataFrame) -> pd.Series:
+    """The "{seq_id}||{scientificName}" key of each row, as exclusions store it."""
+    return df["seq_id"] + "||" + df["scientificName"]
 
 
 @preserve_sequence_order("seq_id", "results_df")
@@ -415,13 +794,8 @@ def filter_excluded_results(
     if not excluded:
         return results_df
 
-    mask = results_df.apply(
-        lambda r: (
-            f"{r['seq_id']}||{r['scientificName']}" not in excluded
-            if pd.notna(r.get("scientificName"))
-            else True
-        ),
-        axis=1,
+    mask = results_df["scientificName"].isna() | ~exclusion_keys(results_df).isin(
+        excluded
     )
     filtered = results_df[mask].reset_index(drop=True)
 
@@ -440,11 +814,14 @@ def filter_excluded_results(
 
 
 @preserve_sequence_order("seq_id", "results_df")
-def build_gbif_export_df(results_df: pd.DataFrame) -> pd.DataFrame:
-    """Build a GBIF export with one row per MOTU/ASV.
+def build_gbif_export_df(results_df: pd.DataFrame, db_path=None) -> pd.DataFrame:
+    """Build a GBIF export with one row per sequence.
 
-    Multi-species MOTUs are resolved to their lowest common taxon,
-    with individual species listed in identificationRemarks.
+    A sequence with several species is resolved to their lowest shared taxon,
+    with individual species listed in identificationRemarks. The taxonID and
+    authorship of that taxon come from WoRMS (run_higher_taxa_lookup, saved in
+    *db_path*). When the WoRMS request for a name fails, the rows of that name
+    keep both empty and the name is listed in ``attrs["failed_items"]``.
     """
     rows = []
     for seq_id, group in results_df.groupby("seq_id", sort=False):
@@ -457,13 +834,23 @@ def build_gbif_export_df(results_df: pd.DataFrame) -> pd.DataFrame:
             row["dna_sequence"] = group["dna_sequence"].iloc[0]
 
         if species_rows.empty:
-            # Empty sequence — no species assigned
+            # Empty sequence: no species assigned
             rows.append(row)
             continue
 
         # Resolve common taxonomy
         taxonomy = _find_common_taxonomy(species_rows)
         row.update(taxonomy)
+        # The NCBI names its MOL+GEO species were identified under.
+        if "verbatimIdentification" in species_rows.columns:
+            names = sorted(
+                {
+                    name
+                    for joined in species_rows["verbatimIdentification"].dropna()
+                    for name in joined.split(", ")
+                }
+            )
+            row["verbatimIdentification"] = ", ".join(names) if names else pd.NA
         rows.append(row)
 
     df = pd.DataFrame(rows)
@@ -473,32 +860,143 @@ def build_gbif_export_df(results_df: pd.DataFrame) -> pd.DataFrame:
 
     # Fill taxonID/authorship for higher-level taxa via WoRMS
     needs_lookup = df["identificationRemarks"].notna() & df["scientificName"].notna()
+    failed = []
     if needs_lookup.any():
-        _fill_worms_records(df, needs_lookup)
+        names = sorted(df.loc[needs_lookup, "scientificName"].unique())
+        records_df, _ = run_higher_taxa_lookup(names, db_path=db_path)
+        failed = records_df.attrs.get("failed_items", [])
+        _fill_worms_records(df, needs_lookup, records_df)
 
-    return df[GBIF_EXPORT_COLS]
+    df = df[GBIF_EXPORT_COLS]
+    df.attrs["failed_items"] = failed
+    return df
 
 
-def _fill_worms_records(df: pd.DataFrame, mask: pd.Series) -> None:
-    """Look up WoRMS records for higher-level taxa and fill taxonID/authorship in-place."""
-    lookups = (
-        df.loc[mask, ["scientificName", "taxonRank"]].drop_duplicates().values.tolist()
+# The fields of a WoRMS record that pick_record and the export read.
+HIGHER_TAXA_COLS = [
+    "scientificName",
+    "AphiaID",
+    "valid_AphiaID",
+    "rank",
+    "status",
+    "kingdom",
+    "class",
+    "authority",
+    "valid_authority",
+]
+
+
+@save_to_db(
+    table_name="worms_higher_taxa",
+    cache=PartialCache(items_kwarg="names", item_key="scientificName"),
+    log_as=("WoRMS higher taxa", "taxon"),
+)
+def run_higher_taxa_lookup(
+    names: list[str],
+    user_agent: str | None = None,
+    progress_handler: dict | object | None = None,
+    failure_sink: list | None = None,
+    result_sink: Callable | None = None,
+) -> pd.DataFrame:
+    """Every WoRMS record of each higher-level taxon name of the GBIF export.
+
+    All the records of a name are kept, not one: the export chooses among them
+    by the rank and group of each sequence's taxon (see _fill_worms_records).
+    Names whose request failed go to failure_sink, so they are not saved and
+    are looked up again on the next export.
+    result_sink, given by save_to_db, saves each name as soon as its records
+    are fetched.
+
+    Returns:
+        DataFrame with HIGHER_TAXA_COLS, one row per record (none for a name
+        WoRMS does not know).
+    """
+    session = create_session(user_agent=user_agent)
+    rows: list[dict] = []
+    failed: list[str] = []
+    log = StepLog("WoRMS higher taxa", len(names), "taxon")
+    try:
+        for name in names:
+            try:
+                with log.query(name):
+                    records = get_aphia_records(name, session=session)
+            except Exception as exc:
+                log.failed(name, f"{exc} (check: {worms_search_url(name)})")
+                failed.append(name)
+                continue
+            finally:
+                notify_progress(progress_handler)
+            n = len(records)
+            log.item(name, f"{n} {pluralize(n, 'record')}", notable=not records)
+            name_rows = [
+                {
+                    **{col: r.get(col) for col in HIGHER_TAXA_COLS},
+                    "scientificName": name,
+                }
+                for r in records
+            ]
+            rows.extend(name_rows)
+            if result_sink is not None:
+                result_sink(pd.DataFrame(name_rows, columns=HIGHER_TAXA_COLS), [name])
+    finally:
+        session.close()
+
+    if failed and failure_sink is not None:
+        failure_sink.extend(failed)
+    found = len({row["scientificName"] for row in rows})
+    log.done(
+        f"{found} found",
+        failed,
+        retry="Build the table again",
     )
-    logger.info(f"Looking up {len(lookups)} higher-level taxa in WoRMS")
+    return pd.DataFrame(rows, columns=HIGHER_TAXA_COLS)
 
+
+def _fill_worms_records(
+    df: pd.DataFrame, mask: pd.Series, records_df: pd.DataFrame
+) -> None:
+    """Fill taxonID/authorship of the higher-level taxa in-place, from their
+    WoRMS records (run_higher_taxa_lookup).
+
+    A name can be a taxon of that rank in several groups (e.g. the genus
+    Liparis, a fish and a plant): the record in the row's class, else its
+    kingdom, is taken (see pick_record).
+    """
+    keys = ["scientificName", "taxonRank", "class", "kingdom"]
+
+    def key_of(values) -> tuple:
+        # None for missing values, which (unlike NaN) compare equal as keys.
+        return tuple(None if pd.isna(v) else v for v in values)
+
+    lookups = sorted(
+        {key_of(row) for row in df.loc[mask, keys].values.tolist()}, key=str
+    )
+    # None for missing fields, as in a WoRMS answer, so "or" falls back on them.
+    fields = records_df.astype(object).where(records_df.notna(), None)
+    records_of = {
+        name: group.to_dict("records")
+        for name, group in fields.groupby("scientificName")
+    }
     cache = {}
-    for name, rank in lookups:
-        record = get_aphia_record(name)
-        if record and record.get("rank", "").lower() == rank.lower():
-            cache[name] = {
-                "taxonID": str(record.get("valid_AphiaID", record["AphiaID"])),
+    for name, rank, class_, kingdom in lookups:
+        records = records_of.get(name, [])
+        record = pick_record(records, rank, {"class": class_, "kingdom": kingdom})
+        if record:
+            cache[(name, rank, class_, kingdom)] = {
+                # An ID read back from the analysis can be a float, or its
+                # text ("126160.0") when the column was first saved empty.
+                "taxonID": str(
+                    int(float(record.get("valid_AphiaID") or record["AphiaID"]))
+                ),
                 "scientificNameAuthorship": record.get("valid_authority")
                 or record.get("authority"),
                 "taxonID_db": "WORMS",
             }
-        elif record:
+        elif records:
+            found = sorted({r.get("rank") or "?" for r in records})
             logger.warning(
-                f"WoRMS rank mismatch for '{name}': expected {rank}, got {record.get('rank')}"
+                f"No WoRMS {rank} record for '{name}' (found: {found}; check: "
+                f"{worms_search_url(name)})"
             )
 
     # Clean authorships
@@ -510,7 +1008,542 @@ def _fill_worms_records(df: pd.DataFrame, mask: pd.Series) -> None:
             rec["scientificNameAuthorship"] = auth
 
     for idx in df.index[mask]:
-        name = df.at[idx, "scientificName"]
-        if name in cache:
-            for col, val in cache[name].items():
+        key = key_of(df.loc[idx, keys])
+        if key in cache:
+            for col, val in cache[key].items():
                 df.at[idx, col] = val
+
+
+# ---------------------------------------------------------------------------
+# Species flow (one sequence through the steps)
+# ---------------------------------------------------------------------------
+
+
+# Sankey of one sequence's candidates: each node's column (left to right),
+# label and RGB colour (losses grey, the MOL stream blue, TAX additions orange).
+FLOW_NODES = {
+    "ncbi": (0, "NCBI hits", "76, 120, 168"),
+    "filter_out": (1, "Removed by the MOL filter", "186, 176, 172"),
+    "mol": (1, "MOL list", "76, 120, 168"),
+    "tax_failed": (2, "WoRMS search failed", "186, 176, 172"),
+    "tax_out": (2, "Not kept at TAX", "186, 176, 172"),
+    "tax_mol": (2, "MOL species (TAX)", "76, 120, 168"),
+    "tax_added": (2, "Added by TAX", "245, 133, 24"),
+    "gbif_search_failed": (3, "GBIF search failed", "186, 176, 172"),
+    "gbif_unmatched": (3, "Not matched in GBIF", "186, 176, 172"),
+    "geo_out": (3, "Not in the GEO area", "186, 176, 172"),
+    "geo_not_run": (3, "GEO not run", "186, 176, 172"),
+    "mol_geo": (3, "MOL+GEO", "76, 120, 168"),
+    "added_geo": (3, "Added, in the GEO area", "245, 133, 24"),
+    "hypo": (4, "Validated by HYPO", "245, 133, 24"),
+    "bold_search_failed": (4, "BOLD search failed", "186, 176, 172"),
+    "no_proxy": (4, "No BOLD proxy (EXTRA)", "186, 176, 172"),
+    "hypo_search_failed": (4, "HYPO BLAST search failed", "186, 176, 172"),
+    "hypo_check_failed": (4, "HYPO check failed", "186, 176, 172"),
+    "hypo_out": (4, "Not validated by HYPO", "186, 176, 172"),
+    "extra_not_run": (4, "EXTRA not run", "186, 176, 172"),
+    "hypo_not_run": (4, "HYPO not run", "186, 176, 172"),
+    "excluded": (5, "Excluded by hand", "186, 176, 172"),
+    "kept": (5, "Kept", "84, 162, 75"),
+}
+FLOW_HOVER_NAMES = 25
+# Nodes of the TAX additions' stream; every other node is on the MOL stream.
+FLOW_ADDED = {"tax_added", "added_geo", "hypo"}
+
+
+def _names(df, seq_id, mask=None):
+    """Names of a sequence's rows in a step table, optionally masked."""
+    if df is None:
+        return set()
+    rows = df[df["seq_id"] == seq_id]
+    if mask is not None:
+        rows = rows[mask(rows)]
+    return set(rows["scientificName"].dropna())
+
+
+def _in_mol(rows):
+    """Rows of a species found by MOL itself."""
+    return rows["in_mol"]
+
+
+def _added(rows):
+    """Rows of a species TAX added (a congener of a MOL species)."""
+    return ~_in_mol(rows)
+
+
+class _SpeciesNames:
+    """species_key and species_of of names, each computed once per name: one
+    lookup serves all the flows of build_species_flows (both map each name on
+    its own, so computing them for more names at once gives the same)."""
+
+    def __init__(self, name_table):
+        self.name_table = name_table
+        self._key = {}
+        self._species = {}
+
+    def _fill(self, known, fn, names):
+        missing = sorted({name for name in names if name not in known})
+        if missing:
+            series = pd.Series(missing, dtype=object)
+            known.update(zip(missing, fn(series, self.name_table)))
+
+    def keys(self, names):
+        """{name: species key} of a set of names."""
+        self._fill(self._key, species_key, names)
+        return {name: self._key[name] for name in names}
+
+    def species(self, names):
+        """The species of a set of names (see species_of)."""
+        self._fill(self._species, species_of, names)
+        return {self._species[name] for name in names}
+
+    def without(self, names, keys):
+        """The names whose species is not in keys."""
+        return {name for name, key in self.keys(names).items() if key not in keys}
+
+
+def build_species_flow(
+    seq_id,
+    ncbi_search_df,
+    mol_df,
+    tax_df=None,
+    geo_df=None,
+    extra_df=None,
+    hypo_df=None,
+    excluded=(),
+    *,
+    name_table,
+    species_names=None,
+    gbif_merge_df=None,
+    failed=None,
+):
+    """One sequence's candidates through the steps, for the steps run so far.
+
+    NCBI hits and the MOL list carry NCBI names; from TAX on, names are WoRMS
+    accepted names, so a MOL name merged as a synonym counts once at TAX.
+    NCBI names are compared with the others through their species (see
+    species_of).
+
+    Args:
+        excluded: "{seq_id}||{scientificName}" keys of the candidates excluded
+            by hand.
+        gbif_merge_df: The TAX species with GBIF counts (run_gbif_merge): a
+            species TAX listed without counts there ends at "Not matched in
+            GBIF" (not in GBIF, or a doubtful match) rather than "Not in the
+            GEO area". Without it, every species GEO did not keep ends at the
+            latter.
+        failed: The failed items of each search the user went on without, by
+            FAILED_STEPS name: the candidates they would have kept end at the
+            step's "failed" box (FLOW_FAILED) rather than at a loss they did
+            not have. Names or genera for WoRMS, species for GBIF (for one
+            area or more) and BOLD, (seq_id, scientificName) for the HYPO
+            search and check.
+        name_table: See build_name_table.
+        species_names: The lookup of the names' species, shared by
+            build_species_flows; one for this sequence otherwise.
+
+    Returns:
+        List of (source, target, names) links between FLOW_NODES, each with
+        at least one name.
+    """
+    lookup = species_names or _SpeciesNames(name_table)
+    failed = _failed_sets(failed)
+    hits = _names(ncbi_search_df, seq_id)
+    mol = _names(mol_df, seq_id)
+    key_of = lookup.keys(hits | mol)
+    hit_keys = {key_of[name] for name in hits}
+    mol_keys = {key_of[name] for name in mol}
+    # A hit of a species that MOL kept, under any of its names, is not a loss.
+    links = [
+        ("ncbi", "filter_out", {name for name in hits if key_of[name] not in mol_keys}),
+        ("ncbi", "mol", mol),
+    ]
+    if tax_df is None:
+        return _nonempty(links)
+
+    tax_mol = _names(tax_df, seq_id, _in_mol)
+    # A congener BLAST returned and the MOL filter rejected, which TAX keeps
+    # on request, stays a filter loss: EXTRA seeks no proxy for it.
+    tax_added = lookup.without(_names(tax_df, seq_id, _added), hit_keys)
+    # MOL species (by their WoRMS name) that TAX does not list.
+    mol_species = lookup.species(mol)
+    tax_mol_keys = set(lookup.keys(tax_mol).values())
+    tax_out = lookup.without(mol_species, tax_mol_keys)
+    # A species whose name or genus WoRMS could not be asked about.
+    worms_failed = failed.get("tax_failed", set())
+    links += [
+        *_split_losses(
+            "mol",
+            tax_out,
+            [
+                (
+                    "tax_failed",
+                    {n for n in tax_out if {n, n.split()[0]} & worms_failed},
+                )
+            ],
+            "tax_out",
+        ),
+        ("mol", "tax_mol", tax_mol),
+    ]
+    if geo_df is None:
+        links += [
+            ("tax_mol", "geo_not_run", tax_mol),
+            ("tax_added", "geo_not_run", tax_added),
+        ]
+        return _nonempty(links)
+
+    mol_geo = _names(geo_df, seq_id, _in_mol)
+    added_geo = lookup.without(_names(geo_df, seq_id, _added), hit_keys)
+    # A failed search fails the species even when another area's count
+    # worked; the others without GBIF counts were not matched.
+    geo_losses = [
+        ("gbif_search_failed", failed.get("gbif_search_failed", set())),
+        (
+            "gbif_unmatched",
+            set()
+            if gbif_merge_df is None
+            else (tax_mol | tax_added) - _names(gbif_merge_df, seq_id),
+        ),
+    ]
+    for src, listed, kept in (
+        ("tax_mol", tax_mol, mol_geo),
+        ("tax_added", tax_added, added_geo),
+    ):
+        links += _split_losses(src, listed - kept, geo_losses, "geo_out")
+    links += [("tax_mol", "mol_geo", mol_geo), ("tax_added", "added_geo", added_geo)]
+
+    names = sorted(mol_geo | added_geo)
+    candidates = pd.DataFrame(
+        {"seq_id": [seq_id] * len(names), "scientificName": names}, dtype=str
+    )
+    excluded = set(
+        candidates.loc[exclusion_keys(candidates).isin(excluded), "scientificName"]
+    )
+    links += [
+        ("mol_geo", "kept", mol_geo - excluded),
+        ("mol_geo", "excluded", mol_geo & excluded),
+    ]
+    if extra_df is None:
+        links.append(("added_geo", "extra_not_run", added_geo))
+        return _nonempty(links)
+    # HYPO tests only the added species EXTRA found a BOLD proxy for.
+    proxied = _names(extra_df, seq_id)
+    links += _split_losses(
+        "added_geo",
+        added_geo - proxied,
+        [("bold_search_failed", failed.get("bold_search_failed", set()))],
+        "no_proxy",
+    )
+    if hypo_df is None:
+        links.append(("added_geo", "hypo_not_run", added_geo & proxied))
+        return _nonempty(links)
+    hypo = _names(hypo_df, seq_id) & added_geo & proxied
+    hypo_out = (added_geo & proxied) - hypo
+    # The candidates whose HYPO check, or else proxy search, failed.
+    links += _split_losses(
+        "added_geo",
+        hypo_out,
+        [
+            (key, {n for n in hypo_out if (seq_id, n) in failed.get(key, set())})
+            for key in ("hypo_check_failed", "hypo_search_failed")
+        ],
+        "hypo_out",
+    )
+    links += [
+        ("added_geo", "hypo", hypo),
+        ("hypo", "kept", hypo - excluded),
+        ("hypo", "excluded", hypo & excluded),
+    ]
+    return _nonempty(links)
+
+
+def _failed_sets(failed):
+    """*failed* (see build_species_flow) with each step's items as a set,
+    once for all the flows."""
+    return {
+        key: items if isinstance(items, (set, frozenset)) else set(items)
+        for key, items in (failed or {}).items()
+    }
+
+
+def _split_losses(src, names, failed_nodes, rest):
+    """Links from *src* for the lost *names*: those of each failed node, in
+    order, go to it (the first that holds a name takes it), the others to
+    the plain loss node *rest*."""
+    links = []
+    left = set(names)
+    for node, members in failed_nodes:
+        links.append((src, node, left & members))
+        left -= members
+    links.append((src, rest, left))
+    return links
+
+
+def build_species_flows(
+    seq_ids,
+    ncbi_search_df,
+    mol_df,
+    tax_df=None,
+    geo_df=None,
+    extra_df=None,
+    hypo_df=None,
+    excluded=(),
+    *,
+    name_table,
+    gbif_merge_df=None,
+    failed=None,
+):
+    """build_species_flow of each of *seq_ids*, as {seq_id: links}. The rows
+    of these sequences are split by sequence once, instead of each step table
+    being filtered again for every sequence (seconds on thousands of
+    sequences)."""
+    tables = {
+        key: None if df is None else df[df["seq_id"].isin(seq_ids)]
+        for key, df in {
+            "ncbi_search_df": ncbi_search_df,
+            "mol_df": mol_df,
+            "tax_df": tax_df,
+            "geo_df": geo_df,
+            "extra_df": extra_df,
+            "hypo_df": hypo_df,
+            "gbif_merge_df": gbif_merge_df,
+        }.items()
+    }
+    by_seq = {
+        key: (dict(tuple(df.groupby("seq_id", sort=False))), df.iloc[:0])
+        for key, df in tables.items()
+        if df is not None
+    }
+
+    # The names' species keys, looked up once for all the flows, and the
+    # species of the MOL names (the only ones a flow asks the species of).
+    lookup = _SpeciesNames(name_table)
+    names = set().union(
+        *(df["scientificName"].dropna() for df in tables.values() if df is not None)
+    )
+    mol_df = tables["mol_df"]
+    mol = set() if mol_df is None else set(mol_df["scientificName"].dropna())
+    lookup.keys(names | lookup.species(mol))
+
+    failed = _failed_sets(failed)
+
+    def rows_of(key, seq_id):
+        if key not in by_seq:
+            return None
+        groups, empty = by_seq[key]
+        return groups.get(seq_id, empty)
+
+    return {
+        seq_id: build_species_flow(
+            seq_id,
+            **{key: rows_of(key, seq_id) for key in tables},
+            excluded=excluded,
+            name_table=name_table,
+            species_names=lookup,
+            failed=failed,
+        )
+        for seq_id in seq_ids
+    }
+
+
+def _nonempty(links):
+    """The links that carry at least one name."""
+    return [link for link in links if link[2]]
+
+
+# The loss nodes of failed queries, each waiting for its step to run again.
+FLOW_FAILED = {
+    node: step.lost_at for node, step in FAILED_STEPS.items() if node in FLOW_NODES
+}
+# The step each loss node of the flow stands for, as Results names it.
+FLOW_LOSS_STEPS = {
+    "filter_out": "MOL Filter",
+    "tax_out": "TAX",
+    "gbif_unmatched": "GEO match",
+    "geo_out": "GEO",
+    "geo_not_run": "GEO not run",
+    "no_proxy": "EXTRA",
+    "extra_not_run": "EXTRA not run",
+    "hypo_out": "HYPO",
+    "hypo_not_run": "HYPO not run",
+    "excluded": "Curation",
+    **FLOW_FAILED,
+}
+# Loss nodes whose candidates still wait for a step: not run yet, or run
+# again for its failed queries.
+FLOW_NOT_RUN = {"geo_not_run", "extra_not_run", "hypo_not_run", *FLOW_FAILED}
+
+
+def flows_lost_at(
+    seq_ids,
+    ncbi_search_df,
+    mol_df,
+    tax_df=None,
+    geo_df=None,
+    extra_df=None,
+    hypo_df=None,
+    excluded=(),
+    *,
+    name_table,
+    gbif_merge_df=None,
+    failed=None,
+):
+    """flow_lost_at of each of *seq_ids*, as {seq_id: (step, names)}, from
+    their flows (build_species_flows, same arguments). A sequence whose MOL
+    BLAST search failed (in *failed*) is lost at "MOL failed" (FAILED_STEPS)."""
+    flows = build_species_flows(
+        seq_ids,
+        ncbi_search_df,
+        mol_df,
+        tax_df,
+        geo_df,
+        extra_df,
+        hypo_df,
+        excluded,
+        name_table=name_table,
+        gbif_merge_df=gbif_merge_df,
+        failed=failed,
+    )
+    mol_failed = set((failed or {}).get("ncbi_search_failed", ()))
+    mol_step = FAILED_STEPS["ncbi_search_failed"].lost_at
+    return {
+        seq_id: (mol_step, set()) if seq_id in mol_failed else flow_lost_at(links)
+        for seq_id, links in flows.items()
+    }
+
+
+def flow_lost_at(links):
+    """Where a sequence without a species lost its last ones, with the names
+    that ended there. Curation when species it had were excluded by hand (the
+    user's decision empties it, whatever its other candidates became); else,
+    when candidates still wait for a step (not run, or run again for its
+    failed queries), the first of those steps; else the flow's
+    furthest loss (FLOW_NODES runs left to right): a sequence with some species
+    HYPO did not confirm and others without a BOLD proxy lost its last chance
+    at HYPO.
+
+    Returns:
+        (step, names); ("MOL Search", set()) for a sequence without NCBI hits,
+        (None, set()) when its flow loses no candidate.
+    """
+    if not links:
+        return "MOL Search", set()
+    rank = {node: i for i, node in enumerate(FLOW_NODES)}
+    losses = [(dst, names) for _, dst, names in links if dst in FLOW_LOSS_STEPS]
+    if not losses:
+        return None, set()
+    # Among candidates waiting for a step, the step to run first.
+    last, _ = max(
+        losses,
+        key=lambda loss: (
+            loss[0] == "excluded",
+            loss[0] in FLOW_NOT_RUN,
+            -rank[loss[0]] if loss[0] in FLOW_NOT_RUN else rank[loss[0]],
+        ),
+    )
+    return FLOW_LOSS_STEPS[last], set().union(
+        *(names for dst, names in losses if dst == last)
+    )
+
+
+def _hover_names(names):
+    """Names for a hover box, cut after FLOW_HOVER_NAMES."""
+    return name_list(sorted(names), FLOW_HOVER_NAMES, sep="<br>", more="<br>… and")
+
+
+def _is_end(node, links):
+    """Whether no flow leaves node: where its species ended."""
+    return not any(src == node for src, _, _ in links)
+
+
+def species_flow_table(seq_id, links, ncbi_search_df, name_table):
+    """One row per name of build_species_flow's links: where it came from and
+    where it ended, with its best NCBI identity for a name the sequence's hits
+    carry: an NCBI name's own hits, or a species' hits under any of its names."""
+    by_name, by_species = {}, {}
+    if ncbi_search_df is not None:
+        rows = ncbi_search_df[ncbi_search_df["seq_id"] == seq_id]
+        # Cached tables can return numbers as strings.
+        identity = pd.to_numeric(rows["identity_percentage"], errors="coerce")
+        names = rows["scientificName"]
+        by_name = identity.groupby(name_keys(names)).max().to_dict()
+        by_species = identity.groupby(species_key(names, name_table)).max().to_dict()
+
+    def best_identity(src, name):
+        if src in FLOW_ADDED:
+            return None
+        best = (by_name if src == "ncbi" else by_species).get(normalize_name(name))
+        return None if pd.isna(best) else best
+
+    order = list(FLOW_NODES)
+    rows = [
+        {
+            "species": name,
+            "origin": "Added by TAX" if src in FLOW_ADDED else "NCBI hit",
+            "outcome": FLOW_NODES[dst][1],
+            "identity": best_identity(src, name),
+            "_order": order.index(dst),
+        }
+        for src, dst, names in links
+        if _is_end(dst, links)
+        for name in names
+    ]
+    return (
+        pd.DataFrame(
+            rows, columns=["species", "origin", "outcome", "identity", "_order"]
+        )
+        .sort_values(["_order", "species"], ascending=[False, True])
+        .drop(columns="_order")
+    )
+
+
+def plot_species_flow(links):
+    """Sankey of build_species_flow's links, nodes placed by column."""
+    import plotly.graph_objects as go
+
+    used = list(dict.fromkeys(n for src, dst, _ in links for n in (src, dst)))
+    index = {node: i for i, node in enumerate(used)}
+
+    # A node's names: what flows into it, or out of it for a first node. The
+    # MOL list's names come in as NCBI names and leave as WoRMS names.
+    targets = {dst for _, dst, _ in links}
+    node_names = {node: set() for node in used}
+    for src, dst, names in links:
+        node_names[dst] |= names
+        if src not in targets:
+            node_names[src] |= names
+
+    columns = sorted({FLOW_NODES[n][0] for n in used})
+    x = {c: i / max(len(columns) - 1, 1) for i, c in enumerate(columns)}
+    by_column = {c: [n for n in used if FLOW_NODES[n][0] == c] for c in columns}
+    y = {
+        n: (i + 0.5) / len(nodes)
+        for nodes in by_column.values()
+        for i, n in enumerate(nodes)
+    }
+
+    fig = go.Figure(
+        go.Sankey(
+            arrangement="snap",
+            textfont=dict(shadow="none"),
+            node=dict(
+                label=[f"{FLOW_NODES[n][1]} ({len(node_names[n])})" for n in used],
+                color=[f"rgb({FLOW_NODES[n][2]})" for n in used],
+                x=[min(max(x[FLOW_NODES[n][0]], 0.001), 0.999) for n in used],
+                y=[min(max(y[n], 0.001), 0.999) for n in used],
+                customdata=[_hover_names(node_names[n]) for n in used],
+                hovertemplate="%{customdata}<extra></extra>",
+                pad=20,
+            ),
+            link=dict(
+                source=[index[src] for src, _, _ in links],
+                target=[index[dst] for _, dst, _ in links],
+                value=[len(names) for _, _, names in links],
+                color=[f"rgba({FLOW_NODES[src][2]}, 0.35)" for src, _, _ in links],
+                customdata=[_hover_names(names) for _, _, names in links],
+                hovertemplate="%{customdata}<extra></extra>",
+            ),
+        )
+    )
+    fig.update_layout(height=450, margin=dict(l=10, r=10, t=10, b=10))
+    return fig

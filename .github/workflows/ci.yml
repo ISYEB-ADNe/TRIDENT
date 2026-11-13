@@ -29,7 +29,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --locked
 
       - name: Ruff lint
         run: uv run ruff check .
@@ -38,7 +38,7 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Spell check
-        run: uv run codespell src tests README.md
+        run: uv run codespell
 
       - name: Notebook outputs stripped
         run: uv run nbstripout --verify example/example_pipeline.ipynb

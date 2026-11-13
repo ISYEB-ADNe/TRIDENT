@@ -1,74 +1,60 @@
-"""Tests for pure GBIF helpers (coordinate parsing, extent naming). No network."""
+"""Tests for the GBIF client and GBIF search. No network: GBIF answers come
+from fixtures or stand-in sessions."""
+
+import inspect
+import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from trident.clients import gbif
 from trident.clients.gbif import (
+    area_params,
     counts_for_area,
     filter_taxon_matches,
+    get_bounding_box,
     get_extent_column_name,
     parse_coordinate,
     search_taxon_occurrences,
     _GBIF_TAXON_COLS,
     _match_single_taxon_name,
+    match_taxon_names,
 )
+from trident.core.database import get_connection
+from trident.core.utils import ensure_columns
 from trident.pipelines import geo_pipeline
 
 
-# --- parse_coordinate ---
+# --- parse_coordinate, get_extent_column_name ---
 
 
-def test_parse_numeric():
-    assert parse_coordinate(45.5, "lat") == 45.5
-    assert parse_coordinate(-120, "lon") == -120.0
+@pytest.mark.parametrize(
+    "value, kind, degrees",
+    [
+        (45.5, "lat", 45.5),
+        (-120, "lon", -120.0),
+        ("45.5", "lat", 45.5),
+        ("45°30'15\"N", "lat", 45 + 30 / 60 + 15 / 3600),
+        ("45°30'0\"S", "lat", -45.5),
+    ],
+)
+def test_coordinate_read_as_decimal_degrees(value, kind, degrees):
+    assert parse_coordinate(value, kind) == pytest.approx(degrees, abs=1e-6)
 
 
-def test_parse_decimal_string():
-    assert parse_coordinate("45.5", "lat") == 45.5
-
-
-def test_parse_dms_north():
-    # 45°30'15"N = 45 + 30/60 + 15/3600
-    assert parse_coordinate("45°30'15\"N", "lat") == pytest.approx(45.504166, abs=1e-5)
-
-
-def test_parse_dms_south_is_negative():
-    assert parse_coordinate("45°30'0\"S", "lat") == pytest.approx(-45.5, abs=1e-6)
-
-
-def test_parse_out_of_range_raises():
+@pytest.mark.parametrize(
+    "value, kind",
+    [(200, "lon"), (95, "lat"), ("45°30'15\"E", "lat"), ("", "lat"), ("abc", "lat")],
+)
+def test_coordinate_out_of_range_or_unreadable_is_refused(value, kind):
     with pytest.raises(ValueError):
-        parse_coordinate(200, "lon")
-    with pytest.raises(ValueError):
-        parse_coordinate(95, "lat")
+        parse_coordinate(value, kind)
 
 
-def test_parse_wrong_direction_for_type_raises():
-    # An east/west direction is invalid for a latitude.
-    with pytest.raises(ValueError):
-        parse_coordinate("45°30'15\"E", "lat")
-
-
-def test_parse_empty_and_garbage_raise():
-    with pytest.raises(ValueError):
-        parse_coordinate("", "lat")
-    with pytest.raises(ValueError):
-        parse_coordinate("not a coordinate", "lat")
-
-
-# --- get_extent_column_name ---
-
-
-def test_extent_numeric():
-    assert get_extent_column_name(100) == "100 km"
-    assert get_extent_column_name(100.0) == "100 km"
-    assert get_extent_column_name("250") == "250 km"
-
-
-def test_extent_string():
-    assert get_extent_column_name("global") == "global"
-    assert get_extent_column_name("GLOBAL") == "global"
+def test_extent_column_is_named_in_km_or_global():
+    names = [get_extent_column_name(v) for v in (100, 100.0, "250", "global", "GLOBAL")]
+    assert names == ["100 km", "100 km", "250 km", "global", "global"]
 
 
 # --- match failure contract (matchType == "ERROR" -> routed to failure_sink) ---
@@ -109,30 +95,32 @@ def test_failed_occurrence_batch_reports_failed_keys(monkeypatch):
     assert set(failed) == {"111", "222"}
 
 
-class _FacetSession:
-    """Session returning fixed facet counts; keys absent from it zero-fill."""
+class _JsonSession:
+    """Session answering each request with answer(params) as its JSON body."""
 
-    def __init__(self, counts):
-        self._counts = counts
+    def __init__(self, answer):
+        self._answer = answer
 
-    def get(self, *a, **k):
-        counts = self._counts
+    def get(self, url, params=None, timeout=None):
+        body = self._answer(params)
 
         class R:
             def raise_for_status(self):
                 pass
 
             def json(self):
-                return {
-                    "facets": [
-                        {"counts": [{"name": n, "count": c} for n, c in counts.items()]}
-                    ]
-                }
+                return body
 
         return R()
 
     def close(self):
         pass
+
+
+def _FacetSession(counts):
+    """Session returning fixed facet counts; keys absent from it zero-fill."""
+    facets = [{"name": n, "count": c} for n, c in counts.items()]
+    return _JsonSession(lambda params: {"facets": [{"counts": facets}]})
 
 
 def test_search_returns_counts_and_zero_fills_absent(monkeypatch):
@@ -144,6 +132,45 @@ def test_search_returns_counts_and_zero_fills_absent(monkeypatch):
 
     assert failed == []
     assert dict(zip(df["taxonID"], df["count"])) == {"111": 42, "222": 0}
+
+
+def test_search_counts_rare_species_cut_from_a_full_facet_list(monkeypatch):
+    # Like GBIF, the facet lists each species' ancestors too, most records
+    # first, cut at facetLimit: in a batch of 4 the species fall off the end.
+    def answer(params):
+        counts = []
+        for key in params["taxonKey"]:
+            counts += [{"name": f"{key}-a{i}", "count": 1000} for i in range(15)]
+            counts.append({"name": key, "count": int(key)})
+        counts.sort(key=lambda c: -c["count"])
+        return {"facets": [{"counts": counts[: params["facetLimit"]]}]}
+
+    monkeypatch.setattr(gbif, "create_session", lambda *a, **k: _JsonSession(answer))
+    keys = ["1", "2", "3", "4"]
+    df, failed = search_taxon_occurrences(keys, batch_size=4)
+
+    assert failed == []
+    assert dict(zip(df["taxonID"], df["count"])) == {k: int(k) for k in keys}
+
+
+def test_search_counts_a_species_only_from_its_own_batch(monkeypatch):
+    # Like GBIF: asking for Larus glaucoides thayeri also lists L. glaucoides,
+    # with only the subspecies' records (counts seen live, worldwide).
+    thayeri, glaucoides = "B765P", "3SBQC"
+
+    def answer(params):
+        if params["taxonKey"] == [thayeri]:
+            counts = {thayeri: 4760, glaucoides: 4760}
+        else:
+            counts = {thayeri: 4760, glaucoides: 520609}
+        return {
+            "facets": [{"counts": [{"name": n, "count": c} for n, c in counts.items()]}]
+        }
+
+    monkeypatch.setattr(gbif, "create_session", lambda *a, **k: _JsonSession(answer))
+    df, _ = search_taxon_occurrences([thayeri, glaucoides], batch_size=1)
+
+    assert dict(zip(df["taxonID"], df["count"])) == {thayeri: 4760, glaucoides: 520609}
 
 
 def test_run_gbif_search_routes_occurrence_errors_to_failure_sink(monkeypatch):
@@ -162,6 +189,7 @@ def test_run_gbif_search_routes_occurrence_errors_to_failure_sink(monkeypatch):
                     "genus": n.split()[0],
                     "kingdom": "Animalia",
                     "status": "ACCEPTED",
+                    "matched_by": "WoRMS ID",
                 }
                 for i, n in enumerate(names)
             ]
@@ -180,47 +208,60 @@ def test_run_gbif_search_routes_occurrence_errors_to_failure_sink(monkeypatch):
         db_path=None,
     )
 
-    # Errored species are excluded from the result and queued for retry.
-    assert set(sink) == {"Gadus morhua", "Thunnus thynnus"}
+    # Errored species are excluded from the result and queued for retry in
+    # that area.
+    assert set(sink) == {("Gadus morhua", 500), ("Thunnus thynnus", 500)}
     assert df.empty  # both taxa errored -> dropped from the result
 
 
-def test_failure_sink_uses_input_names_not_canonical(monkeypatch):
-    # GBIF canonicalName differs in case from the input species string. The
-    # failure_sink must carry the *input* string (the cache-item key), or the
-    # cache cannot match it for retry.
-    def fake_match(names, **k):
+def test_resumed_gbif_search_counts_each_species_once_per_extent(monkeypatch, tmp_path):
+    """A search adding a species and an extent to a saved one asks GBIF only
+    for the species not saved in each extent, and gives each species one
+    count per extent; the same search again asks nothing."""
+    names = ["Gadus morhua", "Thunnus thynnus", "Salmo salar"]
+
+    def fake_match(queried, **k):
         return pd.DataFrame(
             [
                 {
                     "query": n,
-                    "canonicalName": n.lower().capitalize(),  # e.g. "Gadus morhua"
+                    "canonicalName": n,
                     "confidence": 99,
                     "matchType": "EXACT",
                     "needs_review": False,
-                    "taxonID": str(1000 + i),
+                    "taxonID": str(1000 + names.index(n)),
                     "rank": "SPECIES",
-                    "genus": n.split()[0].lower().capitalize(),
+                    "genus": n.split()[0],
                     "kingdom": "Animalia",
                     "status": "ACCEPTED",
+                    "matched_by": "WoRMS ID",
                 }
-                for i, n in enumerate(names)
+                for n in queried
             ]
         )
 
-    monkeypatch.setattr(geo_pipeline, "match_taxon_names", fake_match)
-    monkeypatch.setattr(gbif, "create_session", lambda *a, **k: _BoomSession())
+    asked = []
 
-    sink: list = []
-    geo_pipeline.run_gbif_search(
-        ["GADUS MORHUA"],
-        latitude=43.0,
-        longitude=7.0,
-        extents=[500],
-        failure_sink=sink,
-        db_path=None,
-    )
-    assert sink == ["GADUS MORHUA"]  # input string, not "Gadus morhua"
+    def answer(params):
+        asked.append(sorted(params["taxonKey"]))
+        counts = [{"name": key, "count": 5} for key in params["taxonKey"]]
+        return {"facets": [{"counts": counts}]}
+
+    monkeypatch.setattr(geo_pipeline, "match_taxon_names", fake_match)
+    monkeypatch.setattr(gbif, "create_session", lambda *a, **k: _JsonSession(answer))
+    area = {"latitude": 43.0, "longitude": 7.0, "db_path": str(tmp_path / "a.db")}
+
+    geo_pipeline.run_gbif_search(names[:2], extents=[500], **area)
+    asked.clear()
+    df, _ = geo_pipeline.run_gbif_search(names, extents=[500, 1000], **area)
+    assert asked == [["1002"], ["1000", "1001", "1002"]]
+    pairs = sorted(zip(df["scientificName"], df["gbif_extent"].astype(int)))
+    assert pairs == sorted((n, e) for n in names for e in (500, 1000))
+    assert set(df["occurrences"]) == {5}
+
+    asked.clear()
+    geo_pipeline.run_gbif_search(names, extents=[500, 1000], **area)
+    assert asked == []
 
 
 # --- no usable matches: filter must not crash, returns empty columned frame ---
@@ -275,7 +316,7 @@ def test_counts_for_area_empty_keys_returns_empty():
 
 
 def test_run_gbif_search_no_matches_returns_empty(monkeypatch):
-    # No species clears the backbone filter; the step returns empty, no crash.
+    # No species clears the match filter; the step returns empty, no crash.
     def m_none(names, **k):
         return pd.DataFrame(
             [
@@ -299,3 +340,316 @@ def test_run_gbif_search_no_matches_returns_empty(monkeypatch):
         db_path=None,
     )
     assert df.empty
+    # The columns read by the GBIF merge and filter are present.
+    assert {"scientificName", "occurrences", "gbif_extent"} <= set(df.columns)
+
+
+def test_merge_drops_species_without_gbif_data(monkeypatch):
+    """Species without GBIF data have no extent row, so the merge leaves them
+    out (as the cache layer would); the empty result keeps its columns."""
+    no_match = gbif.filter_taxon_matches(pd.DataFrame(columns=gbif.GBIF_MATCH_COLUMNS))
+    gbif_search_df = ensure_columns(no_match, ["occurrences", "gbif_extent"])
+    tax_df = pd.DataFrame(
+        {"seq_id": ["s1"], "scientificName": ["Gadus morhua"], "in_mol": [True]}
+    )
+
+    merged = inspect.unwrap(geo_pipeline.run_gbif_merge)(gbif_search_df, tax_df)
+
+    assert merged.empty
+    assert {"seq_id", "scientificName", "in_mol", "geo_extent"} <= set(merged.columns)
+
+
+def test_merge_keeps_whole_counts_when_a_species_lacks_gbif_data(tmp_path):
+    """A TAX species GBIF does not hold leaves the merge, and the counts of
+    the others stay whole numbers (a decimal column would be saved as such):
+    read back from the analysis, the merge equals the live one."""
+    gbif_search_df = pd.DataFrame(
+        {
+            "scientificName": ["Gadus morhua"],
+            "taxonURL": ["https://www.gbif.org/taxon/X"],
+            "occurrences": [12],
+            "gbif_extent": ["500"],
+        }
+    )
+    tax_df = pd.DataFrame(
+        {"seq_id": ["s1", "s1"], "scientificName": ["Gadus morhua", "Gadus ogac"]}
+    )
+
+    db_path = str(tmp_path / "analysis.db")
+    params = {"gbif_search_params": {"gbif_extents": ["500"]}, "tax_params": {"t": 1}}
+    merged, _ = geo_pipeline.run_gbif_merge(
+        gbif_search_df, tax_df, **params, db_path=db_path
+    )
+    cached, _ = geo_pipeline.run_gbif_merge(
+        gbif_search_df, tax_df, **params, db_path=db_path
+    )
+    with get_connection(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM gbif_merge").fetchone()[0] == 1
+
+    assert merged["scientificName"].tolist() == ["Gadus morhua"]
+    assert pd.api.types.is_integer_dtype(merged["geo_occurrences"])
+    pd.testing.assert_frame_equal(merged, cached, check_dtype=True)
+
+
+def test_filter_finds_the_extent_however_it_is_written():
+    """The filter's extent matches the saved one whether given as 250, 250.0
+    or "250" (a notebook may pass a float)."""
+    merged = pd.DataFrame(
+        {
+            "seq_id": ["s1", "s1"],
+            "scientificName": ["Gadus morhua", "Gadus morhua"],
+            "geo_occurrences": [12, 40],
+            "geo_extent": ["250", "global"],
+        }
+    ).reindex(columns=[*geo_pipeline.GEO_LIST_COLUMNS, "geo_extent"])
+    kept = [
+        inspect.unwrap(geo_pipeline.run_gbif_filter)(merged, extent, 3)
+        for extent in (250, 250.0, "250")
+    ]
+    assert [df["geo_occurrences"].tolist() for df in kept] == [[12]] * 3
+
+
+def test_geo_list_takes_gbif_counts_not_gbif_names():
+    """The GEO merge adds GBIF's counts and taxon page to the TAX rows; GBIF's
+    own name of the species stays out of the GEO list."""
+    gbif_search_df = pd.DataFrame(
+        {
+            "scientificName": ["Larus saundersi"],
+            "gbif_scientificName": ["Chroicocephalus saundersi"],
+            "gbif_matched_by": ["WoRMS ID"],
+            "genus": ["Chroicocephalus"],
+            "taxonID": ["5YGFL"],
+            "taxonURL": ["https://www.gbif.org/taxon/5YGFL"],
+            "occurrences": [12],
+            "gbif_extent": [500],
+        }
+    )
+    tax_df = pd.DataFrame(
+        {
+            "seq_id": ["s1"],
+            "scientificName": ["Larus saundersi"],
+            "genus": ["Larus"],
+            "taxonID": ["343919"],
+        }
+    )
+
+    merged = inspect.unwrap(geo_pipeline.run_gbif_merge)(gbif_search_df, tax_df)
+
+    row = merged.iloc[0]
+    assert (row["genus"], row["taxonID"], row["geo_occurrences"]) == (
+        "Larus",
+        "343919",
+        12,
+    )
+    assert row["geo_url"] == "https://www.gbif.org/taxon/5YGFL"
+    assert not {"gbif_scientificName", "gbif_matched_by"} & set(merged.columns)
+
+
+def test_match_no_names_keeps_match_columns():
+    assert list(gbif.match_taxon_names([]).columns) == gbif.GBIF_MATCH_COLUMNS
+
+
+# --- v2 match (COL XR) on real GBIF answers ---
+
+# Real v2 species/match answers (Oct 2026), queried with the WoRMS ID of each name
+V2_MATCHES = json.loads(
+    (Path(__file__).parent / "fixtures" / "gbif_v2_match.json").read_text()
+)
+
+
+def test_name_matching_reuses_one_session_per_thread(monkeypatch):
+    """Each matching thread reuses one session for all its names (no new
+    connection per name), and every session is closed once all are matched."""
+    answer = next(iter(V2_MATCHES.values()))["body"]
+    sessions = []
+
+    class _CountedSession(_JsonSession):
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    def new_session(*a, **k):
+        sessions.append(_CountedSession(lambda params: answer))
+        return sessions[-1]
+
+    monkeypatch.setattr(gbif, "create_session", new_session)
+    names = [f"Species {i}" for i in range(60)]
+
+    matches = match_taxon_names(names, n_jobs=3)
+
+    assert len(matches) == 60
+    assert 1 <= len(sessions) <= 3
+    assert all(session.closed for session in sessions)
+
+
+def test_species_counted_under_gbif_species_of_worms_id_or_name(monkeypatch):
+    """Each name keeps its row under the GBIF species of its WoRMS ID, or of its
+    name or a variant of it; names sharing a species are both kept. A synonym
+    in GBIF of another species (a separate species in WoRMS) counts under its
+    own GBIF key; one that only changes the genus, under the accepted key. A
+    subspecies in GBIF counts under its species when it is the nominate one,
+    else under its own key. Each name also keeps GBIF's species for it: the
+    accepted species of a synonym, the species of a subspecies. A genus-only
+    or fuzzy match is left out."""
+    answers = {name: match["body"] for name, match in V2_MATCHES.items()}
+    # A misspelt name GBIF matches fuzzily to Spicara flexuosum, without an ID
+    spicara = answers["Spicara flexuosum"]
+    answers["Spicara flexuosa"] = spicara | {
+        "diagnostics": {"matchType": "FUZZY", "confidence": 96}
+    }
+    # A name GBIF holds as a synonym of a species with the same epithet in
+    # another genus (Lestrolepis japonica)
+    answers["Arctozenus japonicus"] = answers["Lestrolepis philippina"]
+    monkeypatch.setattr(
+        gbif,
+        "create_session",
+        lambda *a, **k: _JsonSession(lambda params: answers[params["scientificName"]]),
+    )
+    worms_ids = {
+        name: match["params"]["scientificNameID"].rsplit(":", 1)[1]
+        for name, match in V2_MATCHES.items()
+    }
+
+    matches = match_taxon_names(list(answers), worms_ids=worms_ids)
+    kept = filter_taxon_matches(matches).set_index("scientificName")
+
+    assert set(kept.index) == {
+        "Larus saundersi",  # WoRMS ID, GBIF's name: Chroicocephalus saundersi
+        "Chroicocephalus saundersi",
+        "Spicara flexuosum",
+        "Monocentris neozelanica",  # name variant: neozelanicus
+        "Arctozenus japonicus",  # synonym, genus change only: L. japonica
+        "Lestrolepis philippina",  # synonym of L. japonica, separate in WoRMS
+        "Larus atricilla",  # nominate subspecies of Leucophaeus atricilla
+        "Larus novaehollandiae",  # nominate subspecies of C. novaehollandiae
+        "Larus scopulinus",  # subspecies of Chroicocephalus novaehollandiae
+        "Larus thayeri",  # subspecies of Larus glaucoides
+    }
+    larus = kept.loc["Larus saundersi"]
+    assert larus["gbif_scientificName"] == "Chroicocephalus saundersi"
+    assert larus["gbif_matched_by"] == "WoRMS ID"
+    assert larus["taxonID"] == kept.loc["Chroicocephalus saundersi", "taxonID"]
+    assert larus["taxonURL"] == f"https://www.gbif.org/taxon/{larus['taxonID']}"
+    assert larus["aphia_id"] == int(worms_ids["Larus saundersi"])
+    lestrolepis = V2_MATCHES["Lestrolepis philippina"]["body"]
+    own, japonica = kept.loc["Lestrolepis philippina"], kept.loc["Arctozenus japonicus"]
+    assert own["taxonID"] == lestrolepis["usage"]["key"]
+    assert own["gbif_scientificName"] == "Lestrolepis philippina"
+    assert "synonym in GBIF of Lestrolepis japonica" in own["gbif_note"]
+    assert japonica["taxonID"] == lestrolepis["acceptedUsage"]["key"]
+    assert own["gbif_speciesID"] == japonica["gbif_speciesID"] == japonica["taxonID"]
+    names = kept["gbif_scientificName"].to_dict()
+    assert names["Larus atricilla"] == "Leucophaeus atricilla atricilla"
+    assert names["Larus novaehollandiae"] == (
+        "Chroicocephalus novaehollandiae novaehollandiae"
+    )
+    assert names["Larus scopulinus"] == "Chroicocephalus novaehollandiae scopulinus"
+    assert names["Larus thayeri"] == "Larus glaucoides thayeri"
+    scopulinus = V2_MATCHES["Larus scopulinus"]["body"]["classification"]
+    assert kept.loc["Larus novaehollandiae", "taxonID"] == scopulinus[-2]["key"]
+    assert kept.loc["Larus scopulinus", "taxonID"] == scopulinus[-1]["key"]
+    assert kept.loc["Larus scopulinus", "gbif_speciesID"] == scopulinus[-2]["key"]
+
+
+def test_names_sharing_a_gbif_species_both_get_its_counts(monkeypatch):
+    def fake_match(names, **k):
+        return pd.DataFrame(
+            [
+                {
+                    "query": n,
+                    "canonicalName": "Chroicocephalus saundersi",
+                    "confidence": 100,
+                    "matchType": "EXACT",
+                    "needs_review": False,
+                    "taxonID": "5YGFL",
+                    "rank": "SPECIES",
+                    "genus": "Chroicocephalus",
+                    "matched_by": "WoRMS ID",
+                }
+                for n in names
+            ]
+        )
+
+    monkeypatch.setattr(geo_pipeline, "match_taxon_names", fake_match)
+    monkeypatch.setattr(
+        gbif, "create_session", lambda *a, **k: _FacetSession({"5YGFL": 12})
+    )
+    df, _ = geo_pipeline.run_gbif_search(
+        ["Larus saundersi", "Chroicocephalus saundersi"],
+        latitude=24.5,
+        longitude=54.4,
+        extents=[500],
+        db_path=None,
+    )
+
+    assert dict(zip(df["scientificName"], df["occurrences"])) == {
+        "Larus saundersi": 12,
+        "Chroicocephalus saundersi": 12,
+    }
+
+
+# --- search areas ---
+
+
+def test_area_params_circle_box_and_global():
+    assert area_params(24.5, 54.4, 500, "circle") == {"geoDistance": "24.5,54.4,500km"}
+    box = area_params(24.5, 54.4, 500, "box")["geometry"]
+    assert box.startswith("POLYGON((") and box.count(",") == 4
+    assert area_params(24.5, 54.4, "global", "circle") == {}
+    with pytest.raises(ValueError):
+        area_params(24.5, 54.4, 500, "square")
+
+
+def test_box_around_a_pole_is_every_longitude_up_to_the_pole():
+    """The circle's own points stop short of the pole it contains: the box
+    goes on to the pole."""
+    min_lat, max_lat, min_lon, max_lon = get_bounding_box(86.0, 15.0, 1000)
+    assert (max_lat, min_lon, max_lon) == (90.0, -180.0, 180.0)
+    assert 77 < min_lat < 77.1
+    assert get_bounding_box(-86.0, 15.0, 1000)[0] == -90.0
+
+
+def test_search_extents_are_whole_km():
+    """An extent is a key of the saved search: 500.0 is refused before any
+    request, as it would not match 500 once read back."""
+    with pytest.raises(ValueError, match="whole km"):
+        geo_pipeline.run_gbif_search(
+            ["Gadus morhua"], latitude=0, longitude=0, extents=[500.0, "global"]
+        )
+
+
+def test_a_km_extent_needs_the_site_and_global_alone_does_not(monkeypatch):
+    """A search around a site without its coordinates is refused before any
+    request (nothing could be counted, every species would be saved as absent);
+    worldwide counts need no site."""
+    with pytest.raises(ValueError, match="Latitude and longitude"):
+        geo_pipeline.run_gbif_search(["Gadus morhua"], extents=[250, "global"])
+
+    def fake_match(names, **k):
+        return pd.DataFrame(
+            [
+                {
+                    "query": n,
+                    "canonicalName": n,
+                    "confidence": 99,
+                    "matchType": "EXACT",
+                    "needs_review": False,
+                    "taxonID": "111",
+                    "rank": "SPECIES",
+                    "genus": n.split()[0],
+                    "kingdom": "Animalia",
+                    "status": "ACCEPTED",
+                }
+                for n in names
+            ]
+        )
+
+    monkeypatch.setattr(geo_pipeline, "match_taxon_names", fake_match)
+    monkeypatch.setattr(
+        gbif, "create_session", lambda *a, **k: _FacetSession({"111": 42})
+    )
+    df, _ = geo_pipeline.run_gbif_search(["Gadus morhua"], extents=["global"])
+    assert df[["scientificName", "occurrences", "gbif_extent"]].values.tolist() == [
+        ["Gadus morhua", 42, "global"]
+    ]

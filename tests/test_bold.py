@@ -1,9 +1,29 @@
-"""Tests for BOLD record cleaning / marker filtering (network-free)."""
+"""Tests for the BOLD client: record filters, the query's failure contract, and
+the reason each queried species gets no sequence. BOLD is faked at its HTTP
+boundary with its real answers (tests/fixtures/bold_records.json)."""
+
+import json
+from pathlib import Path
 
 import pandas as pd
+import pytest
+import requests
 
 from trident.clients import bold
-from trident.clients.bold import _clean_records, query_species
+from trident.clients.bold import (
+    _clean_records,
+    get_records_from_species_list,
+    outcomes_by_species,
+    query_species,
+    with_sequences,
+)
+from trident.pipelines.extra_pipeline import prepare_bold_other_names
+from trident.pipelines.names import (
+    bold_name_rows,
+    build_name_table,
+    gbif_name_rows,
+    replace_source_rows,
+)
 
 
 def _rec(**over):
@@ -25,89 +45,209 @@ def _rec(**over):
     return base
 
 
-def test_keep_only_coi5p_drops_other_markers():
+def test_records_kept_are_coi5p_and_not_mined_from_genbank_unless_asked():
     records = [
-        _rec(marker_code="COI-5P", processid="A"),
-        _rec(marker_code="COI-3P", processid="B"),
-        _rec(marker_code="16S", processid="C"),
+        _rec(processid="A"),
+        _rec(processid="B", marker_code="COI-3P"),
+        _rec(processid="C", marker_code="16S"),
+        _rec(processid="D", inst="Mined from GenBank, NCBI"),
     ]
-    df = _clean_records(records, keep_only_COI5P=True)
-    assert df["seq_id"].tolist() == ["A"]
-
-
-def test_keep_all_markers_when_flag_off():
-    records = [
-        _rec(marker_code="COI-5P", processid="A"),
-        _rec(marker_code="16S", processid="B"),
+    assert _clean_records(records)[0]["seq_id"].tolist() == ["A"]
+    assert _clean_records(records, keep_only_COI5P=False)[0]["seq_id"].tolist() == [
+        "A",
+        "B",
+        "C",
     ]
-    df = _clean_records(records, keep_only_COI5P=False)
-    assert set(df["seq_id"]) == {"A", "B"}
+    assert _clean_records(records, keep_ncbi=True)[0]["seq_id"].tolist() == ["A", "D"]
 
 
-def test_ncbi_mined_excluded_by_default():
-    records = [
-        _rec(processid="A", inst="Some Museum"),
-        _rec(processid="B", inst="Mined from GenBank, NCBI"),
-    ]
-    assert _clean_records(records)["seq_id"].tolist() == ["A"]
-    both = _clean_records(records, keep_ncbi=True)
-    assert set(both["seq_id"]) == {"A", "B"}
-
-
-def test_field_mapping():
-    df = _clean_records([_rec(processid="P9", taxid=42)])
+def test_a_record_becomes_a_row_with_its_taxon_and_link():
+    """No record gives an empty frame with the same columns."""
+    df, _ = _clean_records([_rec(processid="P9", taxid=42)])
     row = df.iloc[0]
     assert row["scientificName"] == "Balaenoptera physalus"
     assert row["specificEpithet"] == "physalus"
     assert row["dna_sequence"] == "ACGT"
-    assert row["taxonID"] == "42"
-    assert row["taxonID_db"] == "BOLD"
+    assert (row["taxonID"], row["taxonID_db"]) == ("42", "BOLD")
     assert row["seq_url"].endswith("/record/P9")
+    empty = _clean_records([])[0]
+    assert empty.empty and list(empty.columns) == list(df.columns)
 
 
-def test_empty_records_returns_empty_frame():
-    assert _clean_records([]).empty
-    assert isinstance(_clean_records([]), pd.DataFrame)
+# --- BOLD at its HTTP boundary, on its real answers for three species ---
+
+FIXTURE = json.loads((Path(__file__).parent / "fixtures/bold_records.json").read_text())
 
 
-# --- query_species failure contract (None = error, [] = genuine empty) ---
-# failure_sink in the pipeline relies on this distinction.
+class _Answer:
+    def __init__(self, status=200, body=None, text=""):
+        self.status_code, self._body, self.text = status, body, text
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code} Error", response=self)
+
+    def json(self):
+        return self._body
 
 
-def _stub_pipeline(
-    monkeypatch, *, query_id="qid", download="", preprocess_raises=False
-):
-    if preprocess_raises:
+class _BoldSession:
+    """BOLD's API answering from the fixture: the preprocessor, a query ID
+    (``{"query_id", "extent_limit"}`` as BOLD gives it) and the records as
+    JSONL, the records trimmed to the fields the client reads. *overrides*
+    replaces an endpoint's answer (preprocessor, query, download)."""
 
-        def _pre(*a, **k):
-            raise RuntimeError("403 Forbidden")
-    else:
+    def __init__(self, **overrides):
+        self.overrides = overrides
 
-        def _pre(*a, **k):
-            return {"successful_terms": [{"matched": "Gadus morhua"}]}
+    def get(self, url, params=None, timeout=None):
+        endpoint = url.rsplit("/", 1)[-1]
+        if endpoint in self.overrides:
+            return self.overrides[endpoint]
+        if endpoint == "preprocessor":
+            _, rank, name = params["query"].split(":", 2)
+            if rank == "species" and len(name.split()) == 3:
+                # BOLD refuses a subspecies name queried as a species.
+                return _Answer(status=400)
+            return _Answer(body=FIXTURE[name]["preprocessor"])
+        if endpoint == "query":
+            term = params["query"]
+            assert term.startswith("tax:"), f"queried a name BOLD does not know: {term}"
+            return _Answer(body={"query_id": term, "extent_limit": None})
+        query_id = url.rsplit("/", 2)[-2]
+        records = FIXTURE[query_id.split(":", 2)[2]]["records"]
+        return _Answer(text="\n".join(json.dumps(r) for r in records))
 
-    monkeypatch.setattr(bold, "_preprocess_query", _pre)
-    monkeypatch.setattr(bold, "_get_query_id", lambda *a, **k: query_id)
-    monkeypatch.setattr(bold, "_download_results", lambda *a, **k: download)
-
-
-def test_query_species_success_returns_records(monkeypatch):
-    _stub_pipeline(monkeypatch, download='{"processid": "P1"}\n')
-    assert query_species("Gadus morhua") == [{"processid": "P1"}]
-
-
-def test_query_species_error_returns_none(monkeypatch):
-    # An exception anywhere in the pipeline -> None (a failure, retried later).
-    _stub_pipeline(monkeypatch, preprocess_raises=True)
-    assert query_species("Gadus morhua") is None
-
-
-def test_query_species_no_query_id_returns_none(monkeypatch):
-    _stub_pipeline(monkeypatch, query_id=None)
-    assert query_species("Gadus morhua") is None
+    def close(self):
+        pass
 
 
-def test_query_species_empty_download_returns_empty_list(monkeypatch):
-    # A successful query with no records -> [] (a genuine empty, gets cached).
-    _stub_pipeline(monkeypatch, download="")
-    assert query_species("Gadus morhua") == []
+@pytest.mark.parametrize(
+    "overrides, expected",
+    [
+        ({"preprocessor": _Answer(status=403)}, None),
+        ({"preprocessor": _Answer(body={})}, None),
+        ({"query": _Answer(body={"extent_limit": None})}, None),
+        ({"download": _Answer(text="<html>Service unavailable</html>")}, None),
+        ({"download": _Answer(text='{"processid": "A-1"}\n{"processid": "A')}, None),
+        ({"download": _Answer(text="")}, (True, [])),
+        ({"download": _Answer(text="{}")}, (True, [])),
+        (
+            {"download": _Answer(text='{"processid": "A-1"}\n{"total": 1}')},
+            (True, [{"processid": "A-1"}]),
+        ),
+    ],
+    ids=[
+        "refused",
+        "no match",
+        "no query id",
+        "error page",
+        "cut off",
+        "no record",
+        "no record as JSON",
+        "other line skipped",
+    ],
+)
+def test_query_fails_only_when_bold_gave_no_usable_answer(overrides, expected):
+    """None is a failure (retried); a query with no record is a genuine empty."""
+    session = _BoldSession(**overrides)
+    assert query_species("Leucophaeus pipixcan", session=session) == expected
+
+
+def test_a_name_the_preprocessor_rejects_is_queried_as_written():
+    rejected = {"successful_terms": [], "failed_terms": ["Leucophaeus pipixcan"]}
+    session = _BoldSession(preprocessor=_Answer(body=rejected))
+    in_bold, records = query_species("Leucophaeus pipixcan", session=session)
+    assert in_bold and len(records) == 8
+
+
+def test_each_queried_species_gets_its_sequences_or_why_it_has_none():
+    # Larus pipixcan is a name BOLD does not know: its preprocessor answers
+    # with a search of record IDs, which _BoldSession refuses to query.
+    species = ["Leucophaeus pipixcan", "Chaetodon leucopleura", "Larus pipixcan"]
+    df, failed = get_records_from_species_list(
+        species, rate_limit_delay=0, session=_BoldSession()
+    )
+
+    assert failed == []
+    assert outcomes_by_species(df).to_dict() == {
+        "Leucophaeus pipixcan": bold.SEQUENCES,
+        "Chaetodon leucopleura": bold.GENBANK_ONLY,
+        "Larus pipixcan": bold.NOT_IN_BOLD,
+    }
+    sequences = df[df["bold_outcome"] == bold.SEQUENCES]
+    assert len(with_sequences(df)) == len(sequences) == 8
+    assert set(sequences["scientificName"]) == {"Leucophaeus pipixcan"}
+
+
+def test_a_species_bold_files_under_another_name_is_found_under_it():
+    # WoRMS accepts Larus pipixcan, which BOLD does not know; GBIF (and BOLD)
+    # call it Leucophaeus pipixcan. The other GBIF names stand for other
+    # species, so they are never searched: Chroicocephalus saundersi is
+    # another WoRMS species, Larus genei is the NCBI name of Chroicocephalus
+    # genei (a made-up lump, to test the rule), and GBIF lumps Larus
+    # novaehollandiae and Larus scopulinus as Chroicocephalus novaehollandiae.
+    gbif = {
+        "Larus pipixcan": "Leucophaeus pipixcan",
+        "Larus saundersi": "Chroicocephalus saundersi",
+        "Chroicocephalus saundersi": "Chroicocephalus saundersi",
+        "Larus ridibundus": "Larus genei",
+        "Larus novaehollandiae": "Chroicocephalus novaehollandiae",
+        "Larus scopulinus": "Chroicocephalus novaehollandiae",
+    }
+    ncbi = build_name_table(
+        pd.DataFrame(
+            {
+                "scientificName": ["Larus genei"],
+                "acceptedName": ["Chroicocephalus genei"],
+                "acceptedNameUsageID": [137149],
+                "matchedBy": ["name"],
+            }
+        )
+    )
+    gbif_rows = gbif_name_rows(
+        pd.DataFrame(
+            {
+                "scientificName": list(gbif),
+                "gbif_scientificName": list(gbif.values()),
+                "taxonID": ["6Q4RB", "5YGFL", "5YGFL", "9VMHX", "5YGFR", "5YGFR"],
+            }
+        )
+    )
+    name_table = replace_source_rows(ncbi, gbif_rows, "gbif")
+    species = [
+        "Larus pipixcan",
+        "Larus saundersi",
+        "Larus ridibundus",
+        "Larus novaehollandiae",
+        "Larus scopulinus",
+    ]
+    other_names = prepare_bold_other_names(species, name_table)
+    assert other_names == {"Larus pipixcan": [("Leucophaeus pipixcan", "gbif")]}
+
+    df, failed = get_records_from_species_list(
+        ["Larus pipixcan"], other_names, rate_limit_delay=0, session=_BoldSession()
+    )
+    assert failed == []
+    assert outcomes_by_species(df).to_dict() == {"Larus pipixcan": bold.SEQUENCES}
+    assert len(with_sequences(df)) == 8
+    assert bold_name_rows(df)[["species", "name", "matched_by"]].values.tolist() == [
+        ["Larus pipixcan", "Leucophaeus pipixcan", "gbif"]
+    ]
+
+
+def test_a_species_bold_has_only_under_a_subspecies_name_is_found_under_it():
+    # GBIF matches Larus thayeri to Larus glaucoides thayeri, a name BOLD
+    # refuses as a species (HTTP 400) and knows as a subspecies.
+    df, failed = get_records_from_species_list(
+        ["Larus thayeri"],
+        {"Larus thayeri": [("Larus glaucoides thayeri", "gbif")]},
+        rate_limit_delay=0,
+        session=_BoldSession(),
+    )
+    assert failed == []
+    assert outcomes_by_species(df).to_dict() == {"Larus thayeri": bold.SEQUENCES}
+    assert len(with_sequences(df)) == 6
+    assert bold_name_rows(df)[["species", "name", "matched_by"]].values.tolist() == [
+        ["Larus thayeri", "Larus glaucoides thayeri", "gbif"]
+    ]

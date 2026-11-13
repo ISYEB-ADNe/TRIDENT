@@ -1,17 +1,20 @@
-"""GBIF pipeline — produces the GEO (Geographic scope) results list.
+"""GBIF pipeline: the GEO (geographic scope) list.
 
 Step order:
     1. prepare_gbif_input(tax_df)                      → list[str]
+       prepare_gbif_worms_ids(tax_df)                  → dict[str, str]
     2. run_gbif_search(species_list, ...)               → (gbif_search_df, params)
     3. run_gbif_merge(gbif_search_df, tax_df, ...)      → (gbif_merge_df, params)
     4. run_gbif_filter(gbif_merge_df, ...)              → (gbif_filter_df, params)
     5. finalize_geo_results(gbif_filter_df, ...)        → (geo_df, params)
 
 Exploration:
-    build_geo_summary(gbif_merge_df)
+    build_geo_summary(gbif_merge_df, min_occurrences)
+    classify_gbif_extents(seq_df, min_occurrences, extents, priority_extent)
 """
 
 from collections.abc import Callable
+from numbers import Integral
 
 import pandas as pd
 
@@ -21,16 +24,24 @@ from trident.clients.gbif import (
     match_taxon_names,
     filter_taxon_matches,
     counts_for_area,
+    area_label,
     get_extent_column_name,
 )
 
-from trident.core.constants import GBIF_MIN_OCCURRENCES
+from trident.core.constants import (
+    GBIF_MIN_OCCURRENCES,
+    GBIF_AREA,
+)
+from trident.pipelines.tax_pipeline import TAX_COLUMNS
 from trident.core.database import save_to_db, FullCache, CustomCache, warn_empty_params
 from trident.core.utils import (
-    reorder_taxonomy_columns,
+    as_ids,
+    StepLog,
+    name_list,
+    pluralize,
+    species_for_sequences,
+    ensure_columns,
     preserve_sequence_order,
-    top_hit_per_group,
-    normalize_name,
 )
 
 
@@ -47,26 +58,70 @@ def prepare_gbif_input(df: pd.DataFrame) -> list[str]:
         List of unique, non-null scientific names to use as GBIF query taxa.
     """
 
-    species_list = df["scientificName"].dropna().unique().tolist()
-    logger.debug(f"Prepared GBIF input: {len(species_list)} unique species")
-    return species_list
+    return df["scientificName"].dropna().unique().tolist()
+
+
+def prepare_gbif_worms_ids(df: pd.DataFrame) -> dict[str, str]:
+    """Return the WoRMS AphiaID of each species, which the GBIF search matches
+    first.
+
+    Args:
+        df: TAX DataFrame with 'scientificName', 'taxonID' and 'taxonID_db'.
+
+    Returns:
+        Dict of scientific name to AphiaID, for the WoRMS rows with an ID.
+    """
+    worms = df[df["taxonID_db"] == "WORMS"]
+    aphia_ids = as_ids(worms["taxonID"])
+    known = aphia_ids.notna() & worms["scientificName"].notna()
+    return dict(zip(worms.loc[known, "scientificName"], aphia_ids[known].astype(str)))
 
 
 ### SEARCH WORKFLOW ###
+
+
+def _require_site(latitude, longitude, extents) -> None:
+    """Refuse a km extent without the site: nothing could be counted, and
+    the species would be saved as absent from GBIF."""
+    in_km = [e for e in extents or [] if e != "global"]
+    if in_km and (pd.isna(latitude) or pd.isna(longitude)):
+        raise ValueError(
+            "Latitude and longitude are needed for the "
+            f"{', '.join(f'{e} km' for e in in_km)} "
+            f"{pluralize(len(in_km), 'extent')}"
+        )
 
 
 def _gbif_search_params(
     species_list: list[str],
     latitude: float | None,
     longitude: float | None,
-    extents: list[float | None],
+    extents: list[int | str],
+    area: str,
     **kwargs,
 ):
-    """Extract parameters for GBIF search step."""
+    """Extract parameters for GBIF search step.
+
+    Extents are whole km (or "global"): an extent is a key of the saved
+    search, and 500.0 read back as text would no longer match 500. A numpy
+    integer is keyed as a plain int, which is saved as a number.
+    """
+    _require_site(latitude, longitude, extents)
+    not_whole = [
+        e
+        for e in extents
+        if e != "global" and (isinstance(e, bool) or not isinstance(e, Integral))
+    ]
+    if not_whole:
+        raise ValueError(
+            f"Search extents must be whole km or 'global', not {not_whole}"
+        )
+    extents = [e if e == "global" else int(e) for e in extents]
     params = {
         "gbif_latitude": latitude,
         "gbif_longitude": longitude,
         "gbif_extents": extents,
+        "gbif_area": area,
     }
     inputs = [
         {
@@ -74,6 +129,7 @@ def _gbif_search_params(
             "gbif_latitude": None if extent == "global" else latitude,
             "gbif_longitude": None if extent == "global" else longitude,
             "gbif_extent": extent,
+            "gbif_area": None if extent == "global" else area,
         }
         for species in species_list
         for extent in extents
@@ -82,15 +138,23 @@ def _gbif_search_params(
 
 
 def _gbif_search_params_rebuild(input_selected, original_inputs):
-    """Rebuild GBIF search parameters from stored kwargs."""
-
-    species_to_keep = {item["species"] for item in input_selected}
-    extents_to_keep = {item["gbif_extent"] for item in input_selected}
-    inputs = original_inputs.copy() | {
-        "species_list": list(species_to_keep),
-        "extents": list(extents_to_keep),
+    """The search's kwargs for the (species, extent) pairs not saved yet: each
+    extent counts only its own missing species."""
+    species_by_extent: dict = {}
+    for item in input_selected:
+        species_by_extent.setdefault(item["gbif_extent"], []).append(item["species"])
+    species = {s for names in species_by_extent.values() for s in names}
+    return original_inputs.copy() | {
+        "species_list": [
+            s for s in dict.fromkeys(original_inputs["species_list"]) if s in species
+        ],
+        "extents": [
+            e
+            for e in dict.fromkeys(original_inputs["extents"])
+            if e in species_by_extent
+        ],
+        "_species_by_extent": species_by_extent,
     }
-    return inputs
 
 
 @save_to_db(
@@ -100,69 +164,80 @@ def _gbif_search_params_rebuild(input_selected, original_inputs):
         rebuild_fn=_gbif_search_params_rebuild,
         match_map_dict={"species": "scientificName", "gbif_extent": "gbif_extent"},
     ),
+    log_as=("GBIF search", "occurrence count"),
 )
 def run_gbif_search(
     species_list: list[str],
     latitude: float | None = None,
     longitude: float | None = None,
-    extents: list[float | str] | None = None,
+    extents: list[int | str] | None = None,
+    area: str = GBIF_AREA,
+    worms_ids: dict[str, str] | None = None,
     progress_handler: Callable[[float, str], None] | None = None,
     user_agent: str | None = None,
+    _species_by_extent: dict[int | str, list[str]] | None = None,
     failure_sink: list | None = None,
+    result_sink: Callable | None = None,
 ) -> pd.DataFrame:
-    """Run GBIF occurrence search for a list of taxa.
+    """Count the GBIF occurrences of each species in each area.
 
     Args:
         species_list: Scientific names to match in GBIF.
-        latitude: Center latitude for bounding box calculation.
-        longitude: Center longitude for bounding box calculation.
-        extents: List of distances (km) from center to calculate bounding boxes, or "global".
+        latitude: Center latitude of the search areas (needed unless every
+            extent is "global").
+        longitude: Center longitude of the search areas (same).
+        extents: Distances (whole km) from the center, or "global".
+        area: "circle" (within each distance of the center) or "box" (the
+            bounding box of that circle).
+        worms_ids: WoRMS AphiaID of each name, matched first (see
+            ``prepare_gbif_worms_ids``).
         progress_handler: Optional callback for UI progress updates.
         user_agent: User-Agent header for HTTP requests.
+        _species_by_extent: Set by the cache only, for a resumed search: the
+            species to count in each extent, the pairs not saved yet.
         failure_sink: If provided, species whose name match errored (network or
             403, ``matchType == "ERROR"``) are appended here so the cache layer
             skips them and retries on the next run. A genuine no-match (needs
-            review) is a valid empty, not a failure.
+            review) is a valid empty, not a failure. A species whose
+            occurrence count errored in one area is appended with that area,
+            as (species, extent).
+        result_sink: Given by save_to_db, which saves each area as soon as its
+            counts are in.
 
     Returns:
-        DataFrame with GBIF taxon metadata and occurrence count columns.
+        One row per (species, extent) with GBIF data: the match columns
+        (filter_taxon_matches), occurrences and gbif_extent.
     """
+    log = StepLog("GBIF search", noun="species")
+    errored = []
 
-    # 1. Taxon Matching (0% -> 30%)
+    # 1. Taxon matching
     if progress_handler:
-        progress_handler(0.1, "Matching names against GBIF Backbone...")
+        progress_handler(0.1, "Matching names in GBIF...")
 
-    matches_df = match_taxon_names(species_list, user_agent=user_agent)
+    matches_df = match_taxon_names(
+        species_list, worms_ids=worms_ids, user_agent=user_agent
+    )
 
-    ## Errored matches (network/403) are retry-worthy failures, distinct from
-    ## genuine no-matches that need review.
+    # Errored matches (network/403) are retry-worthy failures, distinct from
+    # genuine no-matches that need review.
     if "matchType" in matches_df.columns:
         errored = matches_df[matches_df["matchType"] == "ERROR"]["query"].tolist()
-        if errored:
-            logger.warning(f"{len(errored)} GBIF taxa errored during matching")
-            if failure_sink is not None:
-                failure_sink.extend(errored)
+        if errored and failure_sink is not None:
+            failure_sink.extend(errored)
 
-    ## Log no-matches needing review
-    failed_matches = matches_df[
-        matches_df["needs_review"] | matches_df["taxonID"].isna()
-    ]["query"].tolist()
-    n_failed = len(failed_matches)
-    if n_failed:
-        logger.warning(
-            f"{n_failed} GBIF taxa need review or failed to match",
-            failed_taxa=failed_matches,
-        )
-
-    ## Filter to valid keys
+    # Filter to valid keys
     good_matches = filter_taxon_matches(matches_df)
-    taxon_keys = good_matches["taxonID"].astype(str).tolist()
 
+    # The species whose match did not fail: each of their areas is saved once
+    # counted, also for a species GBIF does not hold (a genuine empty).
+    match_failed = set(errored)
+    queried = [s for s in species_list if s not in match_failed]
     results = []
 
-    # 2. Extent-based counts (30% -> 90%)
-    failed_taxon_keys: set[str] = set()
-    if latitude is not None and longitude is not None and extents:
+    # 2. Counts in each area
+    species_by_extent = _species_by_extent or {e: species_list for e in extents or []}
+    if extents:
         n_extents = len(extents)
         for i, dist_km in enumerate(extents):
             if progress_handler:
@@ -170,63 +245,62 @@ def run_gbif_search(
                 label = get_extent_column_name(dist_km)
                 progress_handler(p_current, f"Querying {label} extent...")
 
+            wanted = set(species_by_extent[dist_km])
+            here = good_matches[good_matches["scientificName"].isin(wanted)]
+            in_area = [s for s in queried if s in wanted]
             res_df, ext_failed = counts_for_area(
-                taxon_keys, latitude, longitude, extent=dist_km, user_agent=user_agent
+                here["taxonID"].astype(str).tolist(),
+                latitude,
+                longitude,
+                extent=dist_km,
+                area=area,
+                user_agent=user_agent,
             )
-            results.append(res_df)
-            failed_taxon_keys.update(ext_failed)
+            # Names sharing a GBIF species each get its counts
+            area_df = here.merge(
+                res_df, on="taxonID", how="left", validate="many_to_many"
+            )
 
-    # 3. Finalizing (90% -> 100%)
+            # Occurrence fetches that errored return their taxon keys (not a
+            # count). Drop those species' rows in this area so a transient
+            # error is not cached as "absent", and route (species, area) to
+            # failure_sink for retry next run. Drop by taxonID (exact); the
+            # result's scientificName is the queried name, the cache-item key
+            # failure_sink needs.
+            area_errored = []
+            if ext_failed and "taxonID" in area_df.columns:
+                area_df = area_df[~area_df["taxonID"].isin(ext_failed)]
+                area_errored = sorted(
+                    set(here.loc[here["taxonID"].isin(ext_failed), "scientificName"])
+                )
+                errored += [s for s in area_errored if s not in errored]
+                if failure_sink is not None:
+                    failure_sink.extend((s, dist_km) for s in area_errored)
+            results.append(area_df)
+            if result_sink is not None:
+                done = [(s, dist_km) for s in in_area if s not in area_errored]
+                result_sink(area_df, done)
+
+    # 3. Finalizing
     if progress_handler:
         progress_handler(0.9, "Merging and finalizing GBIF data...")
 
     if not results:
-        logger.warning(
-            "No extent results to merge — returning empty GEO search DataFrame"
+        log.done("no area searched", errored)
+        return ensure_columns(
+            good_matches.iloc[:0].copy(), ["occurrences", "gbif_extent"]
         )
-        return pd.DataFrame()
 
-    counts_df = pd.concat(results, ignore_index=True)
-
-    gbif_search_df = good_matches.merge(
-        counts_df, on="taxonID", how="left", validate="one_to_many"
-    )
-
-    # Occurrence fetches that errored return their taxon keys (not a count). Drop
-    # those species' rows so a transient error is not cached as "absent", and
-    # route them to failure_sink for retry next run. Drop by taxonID (exact);
-    # failure_sink needs the *input* species_list strings (the cache-item keys),
-    # which strict matching guarantees equal to the result's canonicalName only
-    # case-insensitively, so map back via normalize_name.
-    if failed_taxon_keys and "taxonID" in gbif_search_df.columns:
-        gbif_search_df = gbif_search_df[
-            ~gbif_search_df["taxonID"].isin(failed_taxon_keys)
-        ]
-        errored_norm = set(
-            good_matches.loc[
-                good_matches["taxonID"].isin(failed_taxon_keys), "scientificName"
-            ]
-            .map(normalize_name)
-            .dropna()
-        )
-        errored_inputs = sorted(
-            s for s in species_list if normalize_name(s) in errored_norm
-        )
-        if errored_inputs:
-            logger.warning(
-                f"{len(errored_inputs)} GBIF taxa errored during occurrence fetch "
-                "(will retry on next run)"
-            )
-            if failure_sink is not None:
-                failure_sink.extend(errored_inputs)
+    gbif_search_df = pd.concat(results, ignore_index=True)
 
     n_species = (
         gbif_search_df["scientificName"].nunique()
         if "scientificName" in gbif_search_df.columns
         else len(gbif_search_df)
     )
-    logger.info(
-        f"GBIF search complete: {n_species} species, {len(results)} extents, {len(gbif_search_df)} rows"
+    log.done(
+        f"{n_species} species, {len(results)} {pluralize(len(results), 'area')}",
+        errored,
     )
 
     if progress_handler:
@@ -236,6 +310,18 @@ def run_gbif_search(
 
 
 ### MERGE PIPELINE ###
+
+# The GBIF search's columns the GEO list takes, and their GEO names: the
+# species' GBIF page, its occurrences and the area they were counted in.
+GEO_COLUMNS = {
+    "taxonURL": "geo_url",
+    "occurrences": "geo_occurrences",
+    "gbif_extent": "geo_extent",
+}
+
+# The columns of the GEO list: the TAX list's, with the species' GBIF page
+# and its occurrences in the filtering area.
+GEO_LIST_COLUMNS = [*TAX_COLUMNS, "geo_url", "geo_occurrences"]
 
 
 def _gbif_merge_params(
@@ -260,9 +346,14 @@ def _gbif_merge_params(
     table_name="gbif_merge",
     cache=CustomCache(
         prepare_fn=_gbif_merge_params,
-        match_map_dict={"gbif_extent": "gbif_extent"},
+        match_map_dict={"gbif_extent": "geo_extent"},
         fingerprint_on=["gbif_search_df"],
+        # Every extent's rows have the same columns, from this merge.
+        whole_result=True,
+        versioned=True,
     ),
+    log_reuse_as="GEO list",
+    bool_columns=("in_mol",),
 )
 @preserve_sequence_order("seq_id", "tax_df")
 def run_gbif_merge(
@@ -276,11 +367,12 @@ def run_gbif_merge(
     Args:
         gbif_search_df: GBIF search DataFrame with 'scientificName' and count/taxon columns.
         tax_df: TAX DataFrame with 'scientificName', 'seq_id', etc.
-        tax_params: TAX parameters (for caching).
-        gbif_search_params: GBIF search parameters (for caching).
+        tax_params: Params of finalize_tax_results, for the cache key only.
+        gbif_search_params: Params of run_gbif_search, for the cache key only.
 
     Returns:
-        DataFrame with GBIF data enriched with TAX sequence info.
+        The TAX rows of the species with GBIF data (inner join), one per
+        extent, with geo_url, geo_occurrences and geo_extent (GEO_COLUMNS).
     """
     if tax_params is None:
         tax_params = {}
@@ -288,14 +380,6 @@ def run_gbif_merge(
         gbif_search_params = {}
 
     # Validate inputs
-    if gbif_search_df.empty:
-        logger.warning("Empty GBIF DataFrame")
-        return pd.DataFrame()
-
-    if tax_df.empty:
-        logger.warning("Empty TAX DataFrame")
-        return gbif_search_df.copy()
-
     required_cols_gbif = {"scientificName"}
     required_cols_tax = {"scientificName", "seq_id"}
 
@@ -304,54 +388,41 @@ def run_gbif_merge(
     if missing_gbif or missing_tax:
         raise ValueError(f"Missing columns – GBIF: {missing_gbif}, TAX: {missing_tax}")
 
-    # Join on a normalized key (case / whitespace insensitive) so accidental
-    # spelling differences between WoRMS and GBIF do not silently drop species.
-    tax_df = tax_df.assign(_join_key=tax_df["scientificName"].map(normalize_name))
-    gbif_search_df = gbif_search_df.assign(
-        _join_key=gbif_search_df["scientificName"].map(normalize_name)
-    )
-    gbif_keys = set(gbif_search_df["_join_key"].dropna())
+    # The GBIF search's scientificName is the queried TAX name
+    gbif_names = set(gbif_search_df["scientificName"].dropna())
     unmatched = sorted(
-        tax_df.loc[~tax_df["_join_key"].isin(gbif_keys), "scientificName"]
+        tax_df.loc[~tax_df["scientificName"].isin(gbif_names), "scientificName"]
         .dropna()
         .unique()
     )
     if unmatched:
-        logger.warning(
-            f"{len(unmatched)} TAX names had no GBIF match: {unmatched[:20]}"
+        logger.info(
+            f"GEO list: {len(unmatched)} TAX {pluralize(len(unmatched), 'species')} "
+            f"without GBIF data ({name_list(unmatched)})"
         )
 
-    merged_df = (
-        tax_df.merge(
-            gbif_search_df,
-            on="_join_key",
-            how="left",
-            suffixes=("", "_gbif"),
-        )
-        .drop(columns="_join_key")
-        .copy()
-    )
-
-    # Keep TAX identifiers, add GBIF URL as separate column
-    gbif_suffix_cols = [c for c in merged_df.columns if c.endswith("_gbif")]
-    merged_df = merged_df.rename(columns={"taxonURL_gbif": "gbif_taxonURL"})
-    # taxonURL_gbif only exists when gbif_search_df carried a taxonURL column.
-    if "taxonURL_gbif" in gbif_suffix_cols:
-        gbif_suffix_cols.remove("taxonURL_gbif")
-    merged_df = merged_df.drop(columns=gbif_suffix_cols)
-    merged_df = reorder_taxonomy_columns(merged_df)
-
-    n_tax = merged_df["scientificName"].nunique()
-    n_gbif = gbif_search_df["scientificName"].nunique()
-    n_unmatched = n_tax - n_gbif
-    logger.info(
-        f"Merged GBIF+TAX: {n_tax} species ({n_gbif} matched, {n_unmatched} without GBIF data)"
-    )
-
-    return merged_df
+    # The GEO list keeps TAX's columns and adds GBIF's counts and taxon page
+    # only: GBIF's name of each species goes to the name table (gbif_name_rows).
+    gbif_counts = gbif_search_df.reindex(
+        columns=["scientificName", *GEO_COLUMNS]
+    ).rename(columns=GEO_COLUMNS)
+    # Only the TAX species with GBIF data: the others have no extent, so no
+    # cache entry could hold them, and joining them first would turn the
+    # counts into decimals.
+    return tax_df.merge(gbif_counts, on="scientificName", how="inner")
 
 
 ### FILTER PIPELINE ###
+
+
+def geo_filter_mask(df: pd.DataFrame, extent, min_occurrences: int) -> pd.Series:
+    """The GEO filter: rows of *df* (geo_extent, geo_occurrences) at *extent*
+    with at least *min_occurrences*. Extents are compared by name: 250, 250.0
+    and "250" (as saved) are the same extent."""
+    in_extent = df["geo_extent"].map(get_extent_column_name) == get_extent_column_name(
+        extent
+    )
+    return in_extent & (df["geo_occurrences"] >= min_occurrences)
 
 
 @save_to_db(
@@ -363,6 +434,8 @@ def run_gbif_merge(
         },
         inherit_from=["gbif_merge_params"],
     ),
+    log_reuse_as="GEO filter",
+    bool_columns=("in_mol",),
 )
 @preserve_sequence_order("seq_id", "gbif_merge_df")
 def run_gbif_filter(
@@ -377,7 +450,7 @@ def run_gbif_filter(
         gbif_merge_df: GBIF merge DataFrame.
         extent: Extent in km (numeric) or 'global' to select the filtering column.
         min_occurrences: Minimum number of occurrences required to keep a row.
-        gbif_merge_params: Parameters from run_gbif_merge (for caching).
+        gbif_merge_params: Params of run_gbif_merge, for the cache key only.
 
     Returns:
         Filtered DataFrame containing only rows meeting or exceeding the
@@ -386,32 +459,27 @@ def run_gbif_filter(
     if gbif_merge_params is None:
         gbif_merge_params = {}
 
-    logger.info(
-        f"Filtering GBIF data for extent={extent} and min_occurrences={min_occurrences}"
-    )
-
     # 1. Validation
     if (
-        "gbif_extent" not in gbif_merge_df.columns
-        or "occurrences" not in gbif_merge_df.columns
+        "geo_extent" not in gbif_merge_df.columns
+        or "geo_occurrences" not in gbif_merge_df.columns
     ):
         raise ValueError(
-            "DataFrame must contain 'gbif_extent' and 'occurrences' columns."
+            "DataFrame must contain 'geo_extent' and 'geo_occurrences' columns."
         )
 
     # 2. Filter rows
-    mask = (gbif_merge_df["gbif_extent"].astype(str) == str(extent)) & (
-        gbif_merge_df["occurrences"] >= min_occurrences
-    )
-
-    filtered_df = gbif_merge_df[mask].copy()
+    filtered_df = gbif_merge_df[
+        geo_filter_mask(gbif_merge_df, extent, min_occurrences)
+    ].copy()
 
     # 3. Cleanup
-    filtered_df = filtered_df.rename(columns={"occurrences": "gbif_occurrences"})
-    filtered_df = filtered_df.drop(columns=["gbif_extent"])
+    filtered_df = filtered_df[GEO_LIST_COLUMNS]
 
     logger.info(
-        f"Filtered GBIF data to {len(filtered_df)} species (threshold: {min_occurrences})"
+        f"GEO filter: {filtered_df['scientificName'].nunique()} species with at "
+        f"least {min_occurrences} GBIF {pluralize(min_occurrences, 'occurrence')} "
+        f"{area_label(extent, gbif_merge_params.get('gbif_area'))}"
     )
 
     return filtered_df
@@ -423,26 +491,18 @@ def run_gbif_filter(
 @save_to_db(
     "results_geo",
     cache=FullCache(inherit_from=["gbif_filter_params"]),
+    bool_columns=("in_mol",),
 )
 @preserve_sequence_order("seq_id", "gbif_filter_df")
 def finalize_geo_results(
     gbif_filter_df: pd.DataFrame,
     gbif_filter_params: dict | None = None,
-    ncbi_search_pairs: set[tuple[str, str]] | None = None,
 ) -> pd.DataFrame:
-    """Finalize the GEO list — remove (seq_id, species) pairs seen by NCBI but rejected by MOL.
-
-    A pair is removed when ``in_mol`` is False for that row AND the same
-    (seq_id, scientificName) pair appeared in the raw NCBI BLAST results.
-    This means NCBI evaluated the species for that sequence and it didn't
-    pass MOL filtering.
+    """Finalize the GEO list for export or downstream analysis.
 
     Args:
-        gbif_filter_df: Filtered GBIF occurrence DataFrame (with ``in_mol`` column).
-        gbif_filter_params: GBIF filter parameters (for caching).
-        ncbi_search_pairs: (seq_id, scientificName) tuples from raw NCBI
-            BLAST results.  Rows where ``in_mol=False`` AND the pair is in
-            this set are removed.
+        gbif_filter_df: Filtered GBIF occurrence DataFrame.
+        gbif_filter_params: Params of run_gbif_filter, for the cache key only.
 
     Returns:
         Finalized GEO DataFrame.
@@ -451,67 +511,11 @@ def finalize_geo_results(
         gbif_filter_params = {}
 
     geo_df = gbif_filter_df.copy()
-
-    if ncbi_search_pairs and "in_mol" in geo_df.columns:
-        pair_col = list(zip(geo_df["seq_id"], geo_df["scientificName"]))
-        rejected = ~geo_df["in_mol"].astype(bool) & pd.Series(
-            [p in ncbi_search_pairs for p in pair_col], index=geo_df.index
-        )
-        n_removed = rejected.sum()
-        if n_removed:
-            n_species = geo_df.loc[rejected, "scientificName"].nunique()
-            logger.info(
-                f"Removed {n_removed} rows ({n_species} species) "
-                f"seen by NCBI but rejected by MOL filtering"
-            )
-        geo_df = geo_df[~rejected]
-
-    logger.success(f"Finalized GEO list: {len(geo_df)} rows")
+    logger.success(f"GEO list: {species_for_sequences(geo_df)}")
     return geo_df
 
 
 ### EXPLORATION / SUMMARY ###
-
-
-def get_ncbi_rejected_rows(
-    gbif_filter_df: pd.DataFrame,
-    geo_df: pd.DataFrame,
-    ncbi_search_df: pd.DataFrame | None = None,
-) -> pd.DataFrame:
-    """Return rows removed during finalization, enriched with top NCBI hit stats.
-
-    These are (seq_id, species) pairs that NCBI found but MOL filtering rejected.
-    """
-    keys = ["seq_id", "scientificName"]
-    merged = gbif_filter_df.merge(
-        geo_df[keys].drop_duplicates(),
-        on=keys,
-        how="left",
-        indicator=True,
-    )
-    rejected = gbif_filter_df.loc[merged["_merge"] == "left_only"].copy()
-
-    if rejected.empty or ncbi_search_df is None:
-        return rejected
-
-    # Compute top identity/query_cover from raw NCBI search results
-    top_hits = top_hit_per_group(
-        ncbi_search_df[
-            ["seq_id", "scientificName", "identity_percentage", "query_cover"]
-        ],
-        keys=keys,
-        sort=["identity_percentage", "query_cover"],
-    ).rename(
-        columns={
-            "identity_percentage": "mol_top_identity_percentage",
-            "query_cover": "mol_top_query_cover",
-        }
-    )
-    rejected = rejected.drop(
-        columns=["mol_top_identity_percentage", "mol_top_query_cover"], errors="ignore"
-    ).merge(top_hits, on=keys, how="left")
-
-    return rejected
 
 
 @preserve_sequence_order("seq_id", "gbif_merge_df")
@@ -527,26 +531,26 @@ def build_geo_summary(
 
     Returns:
         DataFrame with one row per seq_id and columns giving, for each extent,
-        the number of taxa with occurrences ≥ min_occurrences.
+        the number of species with occurrences ≥ min_occurrences.
     """
     # 1. Filter and Clean
     df = gbif_merge_df.dropna(subset=["seq_id"]).copy()
 
-    if "gbif_extent" not in df.columns or "occurrences" not in df.columns:
+    if "geo_extent" not in df.columns or "geo_occurrences" not in df.columns:
         logger.warning(
-            "Required columns 'gbif_extent' or 'occurrences' missing from GEO data."
+            "Required columns 'geo_extent' or 'geo_occurrences' missing from GEO data."
         )
         return pd.DataFrame(columns=["seq_id"])
 
-    df["gbif_extent"] = df["gbif_extent"].astype(str)
+    df["geo_extent"] = df["geo_extent"].astype(str)
 
     # 2. Determine Presence
-    df["is_present"] = (df["occurrences"] >= min_occurrences).astype(int)
+    df["is_present"] = (df["geo_occurrences"] >= min_occurrences).astype(int)
 
     # 3. Pivot the Long data to Wide
     summary_pivot = df.pivot_table(
         index="seq_id",
-        columns="gbif_extent",
+        columns="geo_extent",
         values="is_present",
         aggfunc="sum",
         fill_value=0,
@@ -556,21 +560,18 @@ def build_geo_summary(
     # 4. Column Formatting
     summary_pivot.columns = [get_extent_column_name(c) for c in summary_pivot.columns]
 
-    seq_word = "sequence" if len(summary_pivot) == 1 else "sequences"
-    logger.info(f"Generated GEO summary for {len(summary_pivot)} unique {seq_word}.")
-
     return summary_pivot
 
 
 ### PER-SEQUENCE EXTENT CLASSIFICATION ###
 
-IDENTITY_COL = "mol_top_identity_percentage"
+IDENTITY_COL = "mol_identity"
 
 
 def classify_gbif_extents(
     seq_df: pd.DataFrame,
     min_occurrences: int,
-    extents: list[float],
+    extents: list[int | str],
     priority_extent: float | str | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     """Pivot one sequence's GBIF occurrences to wide form and bucket species by
@@ -581,10 +582,11 @@ def classify_gbif_extents(
 
     Args:
         seq_df: Long-form rows for a single seq_id (scientificName, in_mol,
-            gbif_taxonURL, gbif_extent, occurrences, optionally identity).
-        min_occurrences: Records within an extent needed to validate a species.
-        extents: Search extents (km floats and/or "global").
-        priority_extent: The extent currently driving results (km or "global").
+            geo_url, geo_extent, geo_occurrences, optionally mol_identity).
+        min_occurrences: Records within an extent needed to keep a species.
+        extents: Search extents (whole km and/or "global").
+        priority_extent: The filtering area: the extent Minimum occurrences
+            applies to (km or "global").
 
     Returns:
         (df_wide, classification) where df_wide is the species x extent table and
@@ -604,9 +606,9 @@ def classify_gbif_extents(
     # Pivot long -> wide (one row per species, one column per extent)
     df_wide = (
         seq_df.pivot_table(
-            index=["scientificName", "in_mol", "gbif_taxonURL"],
-            columns="gbif_extent",
-            values="occurrences",
+            index=["scientificName", "in_mol", "geo_url"],
+            columns="geo_extent",
+            values="geo_occurrences",
             fill_value=0,
         )
         .reset_index()
@@ -621,13 +623,13 @@ def classify_gbif_extents(
         df_wide = df_wide.merge(identity_map, on="scientificName", how="left")
 
     # Standardize column names (e.g. 500 -> "500 km")
-    non_extent_cols = {"scientificName", "in_mol", "gbif_taxonURL", IDENTITY_COL}
+    non_extent_cols = {"scientificName", "in_mol", "geo_url", IDENTITY_COL}
     df_wide.columns = [
         get_extent_column_name(c) if c not in non_extent_cols else c
         for c in df_wide.columns
     ]
 
-    # Local = validated in the priority extent
+    # Local: kept in the filtering area
     if priority_col in df_wide.columns:
         is_local = df_wide[priority_col] >= min_occurrences
     else:
@@ -656,7 +658,7 @@ def classify_gbif_extents(
         float(priority_extent) if priority_extent != "global" else float("inf")
     )
 
-    # Smaller extents: subset of validated species with stronger geographic evidence
+    # Smaller extents: the kept species also kept closer to the site
     smaller_cols = [
         get_extent_column_name(e)
         for e in sorted(
@@ -685,7 +687,7 @@ def classify_gbif_extents(
             }
         )
 
-    # Larger extents: species NOT validated at priority but validated further out
+    # Larger extents: species not kept in the filtering area but kept further out
     larger_cols = [
         get_extent_column_name(e)
         for e in sorted(
@@ -735,3 +737,26 @@ def classify_gbif_extents(
         "has_identity": has_identity,
         "buckets": buckets,
     }
+
+
+### EMPTY INPUT ###
+
+
+def empty_geo_results(tax_df: pd.DataFrame) -> pd.DataFrame:
+    """Return the GEO list of an empty TAX list, with its usual columns.
+
+    The GEO steps run on no species and without the database, so nothing is
+    queried or cached.
+    """
+    search_df, _ = run_gbif_search([], extents=[], db_path=None)
+    merge_df, _ = run_gbif_merge(
+        search_df, tax_df, tax_params={}, gbif_search_params={}, db_path=None
+    )
+    filter_df, _ = run_gbif_filter(
+        merge_df,
+        extent="global",
+        min_occurrences=GBIF_MIN_OCCURRENCES,
+        db_path=None,
+    )
+    geo_df, _ = finalize_geo_results(filter_df, db_path=None)
+    return geo_df

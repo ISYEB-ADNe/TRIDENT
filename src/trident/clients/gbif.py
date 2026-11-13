@@ -1,20 +1,33 @@
-"""Client for the GBIF (Global Biodiversity Information Facility) API
-and geographic bounding box calculations."""
+"""Client for the GBIF (Global Biodiversity Information Facility) API: name
+match to its current taxonomy (COL XR) and occurrence counts per search area
+(circle or box), with the map of the areas."""
 
 import re
+import threading
 from collections.abc import Callable
 from typing import Literal
+from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
 import requests
-from joblib import Parallel, delayed
 from loguru import logger
 
 
-from trident.core.constants import GBIF_CONFIDENCE
-from trident.core.http import create_session
-from trident.core.utils import ensure_columns, extract_specific_epithet
+from trident.core.constants import (
+    GBIF_CONFIDENCE,
+    GBIF_AREA,
+)
+from trident.core import stop
+from trident.core.http import create_session, request_label, with_optional_session
+from trident.core.utils import (
+    StepLog,
+    as_ids,
+    ensure_columns,
+    extract_specific_epithet,
+    name_list,
+    pluralize,
+)
 
 
 ### GEOGRAPHIC CALCULATIONS ###
@@ -58,7 +71,7 @@ def parse_coordinate(
 
     Args:
         coord: Coordinate as a number, decimal-degree string, or DMS string.
-        coord_type: ``"lat"`` or ``"lon"`` — used for range and direction validation.
+        coord_type: ``"lat"`` or ``"lon"``, for range and direction validation.
 
     Returns:
         Decimal-degree float.
@@ -140,6 +153,7 @@ def get_bounding_box(
 
     Returns:
         If ``return_circle`` is False: ``(min_lat, max_lat, min_lon, max_lon)``.
+        Around a pole the box is the band of every longitude up to that pole.
         If ``return_circle`` is True: ``(lats_array, lons_array)``.
     """
     # 1. Parse and Validate
@@ -179,121 +193,238 @@ def get_bounding_box(
 
     # The min/max of the circle points effectively creates the
     # 'smallest bounding box' that contains the circle.
-    return float(lats.min()), float(lats.max()), float(lons.min()), float(lons.max())
+    min_lat, max_lat = float(lats.min()), float(lats.max())
+    min_lon, max_lon = float(lons.min()), float(lons.max())
+    # The circle contains a pole: the box goes up to it, over every longitude
+    reach = np.degrees(angular_distance)
+    if latitude + reach >= 90:
+        max_lat = 90.0
+    if latitude - reach <= -90:
+        min_lat = -90.0
+    if max_lat == 90.0 or min_lat == -90.0:
+        min_lon, max_lon = -180.0, 180.0
+    return min_lat, max_lat, min_lon, max_lon
 
 
 ### GBIF API ###
 
+# GBIF's current taxonomy, the Catalogue of Life eXtended Release (COL XR).
+# Occurrence searches send it too: without it, GBIF reads the keys as keys of
+# the GBIF Backbone, frozen since 2023.
+COL_XR_CHECKLIST = "7ddf754f-d193-4cc9-b351-99906754a03b"
 
+# Ranks of the classification columns a GBIF match carries
+_TAXON_RANKS = ["kingdom", "phylum", "class", "order", "family", "genus"]
+
+
+def worms_lsid(aphia_id: str | int) -> str:
+    """WoRMS identifier of a record, as GBIF's matching service reads it."""
+    return f"urn:lsid:marinespecies.org:taxname:{aphia_id}"
+
+
+def _match_error(name: str, error: Exception) -> dict:
+    """Match result of a name whose request failed (network, 403): retried on
+    the next run, unlike a name GBIF does not know."""
+    logger.warning(
+        f"GBIF {name} failed: {str(error)[:100]} (check: {gbif_search_url(name)})"
+    )
+    return {
+        "query": name,
+        "confidence": 0,
+        "matchType": "ERROR",
+        "needs_review": True,
+        "taxonID": None,
+        "matched_by": None,
+        "left_out": None,
+    }
+
+
+@with_optional_session(retries=3, backoff_factor=1.0)
 def _match_single_taxon_name(
     name: str,
+    worms_id: str | None = None,
     session: requests.Session | None = None,
     user_agent: str | None = None,
 ) -> dict:
-    """Match a single taxon name to GBIF taxon keys via the species/match API.
+    """Match a single taxon to GBIF's current taxonomy (COL XR) via the v2
+    species/match API.
+
+    With a WoRMS ID, GBIF matches the ID first and checks it against the name.
+    It matches the name alone when its ID index lacks the ID (WoRMS records
+    newer than the index). An ID match can return another name for the same
+    species, e.g. Larus saundersi gives Chroicocephalus saundersi.
 
     Args:
         name: Species or taxon name to match.
+        worms_id: WoRMS AphiaID of the name, if known.
         session: Optional requests session for connection reuse.
         user_agent: User-Agent header, used only when creating an own session.
 
     Returns:
-        Dict with GBIF match metadata and taxon keys.
-        Includes 'needs_review' flag for low-confidence matches.
+        Dict with the match type and confidence, ``matched_by`` ("WoRMS ID" or
+        "name"), the GBIF species counted for the name (``taxonID``,
+        ``speciesID``, ``canonicalName``, ``note``, ``left_out``: see
+        _counted_species), its classification, and the 'needs_review' flag
+        for low-confidence matches.
     """
-    key_columns = [
-        "kingdomKey",
-        "phylumKey",
-        "classKey",
-        "orderKey",
-        "familyKey",
-        "genusKey",
-        "speciesKey",
-        "usageKey",
-        "acceptedUsageKey",
-    ]
+    params = {"scientificName": name, "checklistKey": COL_XR_CHECKLIST}
+    if worms_id:
+        params["scientificNameID"] = worms_lsid(worms_id)
 
-    own_session = session is None
-    if own_session:
-        session = create_session(user_agent=user_agent)
     try:
+        stop.check_stop()
         response = session.get(
-            "https://api.gbif.org/v1/species/match", params={"name": name}, timeout=15
+            "https://api.gbif.org/v2/species/match", params=params, timeout=15
         )
         response.raise_for_status()
         data = response.json()
 
-        data["query"] = name
+        usage = data.get("usage") or {}
+        accepted = data.get("acceptedUsage") or usage
+        diagnostics = data.get("diagnostics") or {}
+        ranks = {
+            str(taxon.get("rank", "")).lower(): taxon.get("name")
+            for taxon in data.get("classification") or []
+        }
+        match_type = diagnostics.get("matchType", "NONE")
+        confidence = diagnostics.get("confidence", 0)
+        matched_by = "WoRMS ID" if diagnostics.get("matchedID") else "name"
 
-        # Force key columns to string (handle float/None/empty)
-        for key_col in key_columns:
-            if key_col in data and data[key_col] not in [None, ""]:
-                data[key_col] = str(int(float(data[key_col])))
-            else:
-                data[key_col] = None
-
-        # Main taxonID as string
-        if data.get("status") == "SYNONYM" and data.get("acceptedUsageKey"):
-            data["taxonID"] = str(int(float(data["acceptedUsageKey"])))
-        elif data.get("speciesKey"):
-            data["taxonID"] = str(int(float(data["speciesKey"])))
-        else:
-            data["taxonID"] = None
-
-        data["needs_review"] = (
-            data.get("confidence", 0) < GBIF_CONFIDENCE
-            or data.get("matchType") == "NONE"
-        )
-
-        return data
+        return {
+            "query": name,
+            "worms_id": worms_id,
+            "confidence": confidence,
+            "matchType": match_type,
+            "status": usage.get("status"),
+            "rank": usage.get("rank"),
+            "matched_by": matched_by,
+            **_counted_species(
+                name,
+                usage,
+                accepted,
+                matched_by,
+                match_type,
+                data.get("classification"),
+            ),
+            **{rank: ranks.get(rank) for rank in _TAXON_RANKS},
+            "needs_review": confidence < GBIF_CONFIDENCE or match_type == "NONE",
+        }
 
     except Exception as e:
-        logger.debug(f"Match failed for '{name}': {str(e)[:100]}")
-        error_result = {
-            "query": name,
-            "confidence": 0,
-            "matchType": "ERROR",
-            "needs_review": True,
-            "taxonID": None,
-        }
-        for key_col in key_columns:
-            error_result[key_col] = None
-        return error_result
+        return _match_error(name, e)
 
-    finally:
-        if own_session:
-            session.close()
+
+def gbif_search_url(name: str) -> str:
+    """GBIF web search for a taxon name, for log lines to check it by hand."""
+    return f"https://www.gbif.org/species/search?q={quote(name)}"
+
+
+# Columns of match_taxon_names for an empty names list. Every match result,
+# success or error, already carries them; matched names carry more API fields.
+GBIF_MATCH_COLUMNS = ["query", "confidence", "matchType", "needs_review", "taxonID"]
 
 
 def match_taxon_names(
-    names: list[str], n_jobs: int = 10, user_agent: str | None = None
+    names: list[str],
+    worms_ids: dict[str, str] | None = None,
+    n_jobs: int = 10,
+    user_agent: str | None = None,
 ) -> pd.DataFrame:
-    """Match species/taxon names to GBIF taxon keys using parallel requests.
+    """Match species names to GBIF's current taxonomy (COL XR), by their WoRMS
+    ID when known, using parallel requests.
 
     Args:
         names: List of scientific names to match.
+        worms_ids: WoRMS AphiaID of each name, matched first.
         n_jobs: Number of parallel threads.
         user_agent: User-Agent header for HTTP requests.
+
+    Each thread has its own session, reused for all its names (a new session
+    per name would open a new connection each time): requests.Session is not
+    thread-safe, so sharing one across the threading backend can corrupt the
+    pool state.
 
     Returns:
         DataFrame with one row per name containing GBIF match metadata.
     """
+    worms_ids = worms_ids or {}
     if len(names) == 0:
-        logger.warning("Empty names list")
-        return pd.DataFrame()
+        logger.debug("Empty names list")
+        return pd.DataFrame(columns=GBIF_MATCH_COLUMNS)
 
-    # Each worker creates its own session: requests.Session is not thread-safe,
-    # so sharing one across the threading backend can corrupt the pool state.
-    results = Parallel(n_jobs=n_jobs, backend="threading", verbose=0)(
-        delayed(_match_single_taxon_name)(name, user_agent=user_agent) for name in names
-    )
+    log = StepLog("GBIF name match", len(names), "species")
+    local = threading.local()
+    sessions = []  # every thread's session, closed once all names are matched
+    sessions_lock = threading.Lock()
+
+    def thread_session():
+        if not hasattr(local, "session"):
+            local.session = create_session(user_agent=user_agent)
+            with sessions_lock:
+                sessions.append(local.session)
+        return local.session
+
+    def match(name):
+        # Once stopped, each match fails at once without a request
+        # (stop.check_stop), and stop.log_filter drops its log lines.
+        with log.query(name):
+            result = _match_single_taxon_name(
+                name, worms_ids.get(name), session=thread_session()
+            )
+        match_type = str(result.get("matchType", "")).lower()
+        check = f"check: {gbif_search_url(name)}"
+        if match_type == "error":
+            log.item(name, "failed", notable=True)  # its error is logged by the match
+        elif match_type == "none":
+            log.item(name, f"not in GBIF ({check})", notable=True)
+        elif result["needs_review"]:
+            confidence = result.get("confidence")
+            log.item(
+                name,
+                f"needs review ({match_type} match, confidence {confidence}; {check})",
+                notable=True,
+            )
+        elif result["taxonID"] is None:  # e.g. matched to its genus only
+            rank = str(result.get("rank", "")).lower()
+            log.item(
+                name, f"no species in GBIF, matched as {rank} ({check})", notable=True
+            )
+        elif reason := result.get("left_out"):
+            log.item(name, f"left out, {reason} ({check})", notable=True)
+        else:
+            by = result.get("matched_by")
+            note = result.get("note")
+            log.item(
+                name,
+                f"{match_type} match"
+                + (f" by {by}" if by else "")
+                + (f", {note}" if note else ""),
+                notable=bool(note),
+            )
+        return result
+
+    results = stop.run_threads(match, [(name,) for name in names], n_jobs)
+    # Closed once all names are matched. A stop can end run_threads while
+    # threads still use theirs: those are left to be released with them.
+    for session in sessions:
+        session.close()
 
     results_df = pd.DataFrame(results)
-    high_conf = len(results_df[results_df["confidence"] >= GBIF_CONFIDENCE])
-    review = len(results_df[results_df["needs_review"]])
-
-    logger.info(
-        f"Matched {high_conf}/{len(names)} species to GBIF backbone ({review} need review)"
+    errored = results_df["matchType"] == "ERROR"
+    matched = (
+        ~results_df["needs_review"]
+        & results_df["taxonID"].notna()
+        & results_df["left_out"].isna()
+    )
+    n_failed = int(errored.sum())
+    n_other = len(names) - int(matched.sum()) - n_failed
+    failed = f", {n_failed} failed" if n_failed else ""
+    n_by_name = int((matched & (results_df["matched_by"] == "name")).sum())
+    by_name = f" ({n_by_name} by name, not by WoRMS ID)" if n_by_name else ""
+    # The failed names are listed by the GBIF search, with its failed counts.
+    log.done(
+        f"{int(matched.sum())} matched{by_name}, {n_other} not "
+        f"matched to a species or left out{failed}"
     )
 
     return results_df
@@ -315,158 +446,291 @@ _GBIF_TAXON_COLS = [
     "taxonID",
     "taxonID_db",
     "taxonURL",
+    "gbif_scientificName",
+    "gbif_matched_by",
+    "aphia_id",
+    "gbif_note",
+    "gbif_speciesID",
 ]
+
+# Name match types that mean the queried species: the same name, or a variant
+# of it (e.g. a gender ending, Monocentris neozelanica -> neozelanicus). A fuzzy
+# match may be another species.
+_SAME_NAME_MATCHES = ["EXACT", "VARIANT"]
+
+
+# Latin gender endings of a species epithet (flexuosus, flexuosa, flexuosum;
+# niger, nigra, nigrum), longest first
+_GENDER_ENDINGS = ("rum", "um", "us", "is", "ra", "er", "a", "e")
+
+
+def _epithet_stem(name: str | None) -> str | None:
+    """The last epithet of a name (the species epithet of a binomial, the
+    subspecies one of a trinomial) without its gender ending."""
+    parts = (name or "").lower().split()
+    if len(parts) < 2:
+        return None
+    epithet = parts[-1]
+    for ending in _GENDER_ENDINGS:
+        if epithet.endswith(ending) and len(epithet) > len(ending) + 1:
+            return epithet[: -len(ending)]
+    return epithet
+
+
+def _counted_species(
+    query: str,
+    usage: dict,
+    accepted: dict,
+    matched_by: str,
+    match_type: str,
+    classification: list[dict] | None = None,
+) -> dict:
+    """The GBIF species whose occurrences count for the queried name.
+
+    A name match must give the same name or a variant of it: a fuzzy one may
+    be another species and is left out. WoRMS is the reference. A name GBIF
+    holds as a synonym of another species (Lestrolepis philippina, a species of
+    its own in WoRMS, a synonym of L. japonica in GBIF) is counted under its
+    own GBIF key, which holds the records published under that name; the
+    accepted key would add all those of L. japonica. A synonym that only moves
+    the species to another genus (same epithet, up to its gender ending) is the
+    same species, counted under the accepted key, which also holds the records
+    under the new genus.
+
+    A WoRMS species GBIF holds as a subspecies follows the same rule. Its
+    nominate subspecies (Larus atricilla -> Leucophaeus atricilla atricilla) is
+    the species itself, counted under the GBIF species, which also holds the
+    records named at species level only. Another subspecies (Larus thayeri ->
+    Larus glaucoides thayeri) is counted under its own key: the species key
+    would add all the records of L. glaucoides.
+
+    Args:
+        query: The queried (TAX) name.
+        usage: GBIF's usage of the match (``usage`` of the v2 answer).
+        accepted: Its accepted usage (``acceptedUsage``, or the usage itself).
+        matched_by: "WoRMS ID" or "name".
+        match_type: GBIF's match type.
+        classification: GBIF's classification of the match, from the top
+            rank down to the match.
+
+    Returns:
+        Dict with ``taxonID`` (the key whose occurrences are counted; None
+        when GBIF matched a higher rank only), ``speciesID`` (the key of
+        GBIF's species for the name: the accepted species of a synonym, the
+        species of a subspecies), ``canonicalName`` (GBIF's name
+        of the species, a subspecies name when GBIF holds it as one),
+        ``note`` (how a synonym or subspecies is counted, else None) and
+        ``left_out`` (why the match is not counted, else None).
+        A nominate subspecies keeps its own name: its name searches in other
+        sources (BOLD, the HYPO check) then miss the species' other
+        subspecies.
+    """
+    counted = {
+        "taxonID": accepted.get("key"),
+        "speciesID": None,
+        "canonicalName": accepted.get("canonicalName"),
+        "note": None,
+        "left_out": None,
+    }
+    species = accepted
+    if accepted.get("rank") != "SPECIES":
+        species = next(
+            (taxon for taxon in classification or [] if taxon.get("rank") == "SPECIES"),
+            None,
+        )
+        if species is None:  # matched to a genus or higher
+            return counted | {"taxonID": None}
+    counted["speciesID"] = species.get("key")
+    if matched_by != "WoRMS ID" and match_type not in _SAME_NAME_MATCHES:
+        return counted | {
+            "left_out": f"GBIF found only {accepted.get('canonicalName')}, by a "
+            f"{match_type.lower()} name match"
+        }
+    status = usage.get("status") or ""
+    synonym = "SYNONYM" in status or status == "MISAPPLIED"
+    if synonym and _epithet_stem(query) != _epithet_stem(accepted.get("canonicalName")):
+        return counted | {
+            "taxonID": usage.get("key"),
+            "canonicalName": usage.get("canonicalName"),
+            "note": "counted under its own name, a synonym in GBIF of "
+            f"{accepted.get('canonicalName')}",
+        }
+    if species is not accepted:
+        # The nominate subspecies repeats the species epithet
+        nominate = _epithet_stem(accepted.get("canonicalName")) == _epithet_stem(
+            species.get("name")
+        )
+        if nominate and _epithet_stem(query) == _epithet_stem(species.get("name")):
+            return counted | {
+                "taxonID": species.get("key"),
+                "note": f"GBIF subspecies {accepted.get('canonicalName')}, counted "
+                f"with all records of {species.get('name')} (its other subspecies "
+                "included)",
+            }
+        return counted | {
+            "note": f"GBIF subspecies {accepted.get('canonicalName')}, counted with "
+            "its own records only"
+        }
+    return counted
 
 
 def filter_taxon_matches(
     matches_df: pd.DataFrame,
     confidence_threshold: int = GBIF_CONFIDENCE,
-    strict_name_match: bool = True,
 ) -> pd.DataFrame:
-    """Filter GBIF matches by confidence and name quality.
+    """Keep the GBIF matches whose occurrences are those of the queried species.
+
+    A match is kept when GBIF found a species with enough confidence, through
+    the WoRMS ID or by name, unless the match has a ``left_out`` reason (the
+    match log names them). A synonym or subspecies in GBIF counts under the
+    key _counted_species chose. Several queried names can share one GBIF
+    species (e.g. a species WoRMS lists twice): each name keeps its row, with
+    the same occurrence counts.
 
     Args:
         matches_df: DataFrame from match_taxon_names()
         confidence_threshold: Min confidence score
-        strict_name_match: Require query == canonicalName
 
     Returns:
-        Filtered DataFrame with high-quality taxon matches only. Always carries
-        the standardised taxonomy columns, even when empty.
+        One row per kept name: ``scientificName`` is the queried name (the TAX
+        name the GEO merge joins on), ``gbif_scientificName`` GBIF's name of
+        the species (a subspecies name when GBIF holds it as one; taxonID is
+        then the key its occurrences are counted under), ``gbif_matched_by``
+        "WoRMS ID" or "name", ``aphia_id`` the WoRMS ID it was queried with,
+        ``gbif_note`` how a synonym or subspecies in GBIF is counted,
+        ``gbif_speciesID`` GBIF's species for the name (see _counted_species).
+        The classification columns and specificEpithet are those of GBIF's
+        species. Always carries the standardised taxonomy columns, even when
+        empty.
     """
     if matches_df.empty:
-        logger.warning("Empty DataFrame provided to filter_taxon_matches")
+        logger.debug("Empty DataFrame provided to filter_taxon_matches")
         return pd.DataFrame(columns=_GBIF_TAXON_COLS)
 
-    # Quality filters
-    mask = (
-        (
-            pd.to_numeric(matches_df["confidence"], errors="coerce")
-            >= confidence_threshold
-        )
-        & (matches_df["matchType"] != "NONE")
-        & matches_df["taxonID"].notna()
+    # Columns a match carries only on success: absent when every request failed
+    matches_df = ensure_columns(
+        matches_df.copy(),
+        [
+            "canonicalName",
+            "speciesID",
+            "matched_by",
+            "worms_id",
+            "note",
+            "left_out",
+            "rank",
+            *_TAXON_RANKS,
+        ],
     )
+    species = (
+        pd.to_numeric(matches_df["confidence"], errors="coerce") >= confidence_threshold
+    ) & matches_df["taxonID"].notna()
+    kept = matches_df[species & matches_df["left_out"].isna()]
 
-    if strict_name_match:
-        if "canonicalName" in matches_df.columns:
-            mask &= (
-                matches_df["query"].str.lower()
-                == matches_df["canonicalName"].str.lower()
-            )
-        else:
-            # No row carried a canonicalName (every match was NONE/ERROR), so
-            # none can satisfy the strict name check.
-            mask &= False
-
-    filtered_df = matches_df[mask].copy()
-
-    # Nothing passed: return an empty, correctly-columned frame before the
-    # row-wise steps below (apply(axis=1) on an empty frame yields a DataFrame,
-    # which cannot be assigned back to a single column).
-    if filtered_df.empty:
-        logger.warning("No matches passed quality filters")
+    if kept.empty:
+        logger.debug("No matches passed quality filters")
         return pd.DataFrame(columns=_GBIF_TAXON_COLS)
 
-    # Drop redundant/internal columns (keep useful taxonomy!)
-    drop_cols = [
-        "query",  # Replaced by canonicalName
-        "scientificName",  # canonicalName is cleaner
-        "confidence",  # Already filtered
-        "matchType",  # Already filtered
-        "synonym",  # Status tells us this
-        "usageKey",  # taxonID is what we need
-        "status",  # Resolved via taxonID
-        "needs_review",  # Already filtered
-        "species",  # Redundant with canonicalName
-    ]
-
-    # Safe drop (only existing columns)
-    existing_drops = [col for col in drop_cols if col in filtered_df.columns]
-    filtered_df = filtered_df.drop(columns=existing_drops).reset_index(drop=True)
-    filtered_df = filtered_df.rename(
-        columns={
-            "canonicalName": "scientificName",
-            "rank": "taxonRank",
-        }
-    )
-
-    # Remove duplicate taxonIDs (keep first)
-    before_dedup = len(filtered_df)
-    filtered_df = filtered_df.drop_duplicates(subset=["taxonID"], keep="first")
-
+    filtered_df = kept[_TAXON_RANKS].reset_index(drop=True)
+    filtered_df["scientificName"] = kept["query"].to_numpy()
+    filtered_df["taxonRank"] = kept["rank"].to_numpy()
+    filtered_df["taxonID"] = kept["taxonID"].astype(str).to_numpy()
     filtered_df["taxonID_db"] = "gbif"
-    filtered_df["taxonURL"] = filtered_df["taxonID"].apply(
-        lambda x: f"https://www.gbif.org/species/{x}" if pd.notna(x) else None
-    )
+    filtered_df["taxonURL"] = "https://www.gbif.org/taxon/" + filtered_df["taxonID"]
+    filtered_df["gbif_scientificName"] = kept["canonicalName"].to_numpy()
+    filtered_df["gbif_matched_by"] = kept["matched_by"].to_numpy()
+    filtered_df["aphia_id"] = as_ids(kept["worms_id"]).to_numpy()
+    filtered_df["gbif_note"] = kept["note"].to_numpy()
+    filtered_df["gbif_speciesID"] = kept["speciesID"].astype("string").to_numpy()
     filtered_df["specificEpithet"] = filtered_df.apply(
-        lambda row: extract_specific_epithet(row["scientificName"], row["genus"]),
+        lambda row: extract_specific_epithet(row["gbif_scientificName"], row["genus"]),
         axis=1,
     )
-
-    ensure_columns(filtered_df, _GBIF_TAXON_COLS)
     filtered_df = filtered_df[_GBIF_TAXON_COLS]
 
-    dups_removed = before_dedup - len(filtered_df)
-    dups_str = "duplicates" if dups_removed != 1 else "duplicate"
-    dups_message = f" ({dups_removed} {dups_str} removed)" if dups_removed > 0 else ""
+    shared = filtered_df[filtered_df.duplicated("taxonID", keep=False)]
+    same_species_names = [
+        " = ".join(names)
+        for names in shared.groupby("taxonID")["scientificName"].agg(list)
+    ]
+    shared_message = (
+        f"; {len(same_species_names)} GBIF "
+        f"{pluralize(len(same_species_names), 'species')} under several names, "
+        f"counted for each ({name_list(same_species_names)})"
+        if same_species_names
+        else ""
+    )
     logger.info(
-        f"Retained {len(filtered_df)}/{len(matches_df)} taxon keys after quality filtering{dups_message}"
+        f"GBIF search: {len(filtered_df)}/{len(matches_df)} species kept for the "
+        f"occurrence counts{shared_message}"
     )
 
     return filtered_df
 
 
-def _build_occurrence_params(
-    min_lat: float | None,
-    max_lat: float | None,
-    min_lon: float | None,
-    max_lon: float | None,
+SEARCH_AREAS = ["circle", "box"]
+
+
+def area_params(
+    latitude: float | str | None,
+    longitude: float | str | None,
+    extent: int | float | str,
+    area: str = GBIF_AREA,
 ) -> dict:
-    """Build GBIF occurrence search params with optional bounding box geometry.
+    """Occurrence search filter for one search area.
+
+    Worldwide for the "global" extent. Otherwise the occurrences within
+    *extent* km of the site ("circle", GBIF's geoDistance), or within the
+    bounding box of that circle ("box").
 
     Args:
-        min_lat: Southern bound of the bounding box.
-        max_lat: Northern bound of the bounding box.
-        min_lon: Western bound of the bounding box.
-        max_lon: Eastern bound of the bounding box.
+        latitude: Center latitude.
+        longitude: Center longitude.
+        extent: Search radius in km, or ``"global"``.
+        area: ``"circle"`` or ``"box"``.
 
     Returns:
-        GBIF API query params dict, including a ``geometry`` WKT polygon
-        when all bounds are provided.
+        GBIF occurrence search params: none, ``geoDistance`` or a ``geometry``
+        WKT polygon.
     """
-    params = {"hasCoordinate": "true", "limit": 10000}
-
-    if all(v is not None for v in [min_lat, max_lat, min_lon, max_lon]):
-        geometry = f"POLYGON(({min_lon} {min_lat},{max_lon} {min_lat},{max_lon} {max_lat},{min_lon} {max_lat},{min_lon} {min_lat}))"
-        params["geometry"] = geometry
-        logger.debug(f"Geometry: {min_lon},{min_lat} to {max_lon},{max_lat}")
-
-    return params
+    if isinstance(extent, str) and extent.lower() == "global":
+        return {}
+    if area == "circle":
+        lat = parse_coordinate(latitude, "lat")
+        lon = parse_coordinate(longitude, "lon")
+        return {"geoDistance": f"{lat},{lon},{float(extent):g}km"}
+    if area == "box":
+        min_lat, max_lat, min_lon, max_lon = get_bounding_box(
+            latitude, longitude, float(extent)
+        )
+        return {
+            "geometry": f"POLYGON(({min_lon} {min_lat},{max_lon} {min_lat},"
+            f"{max_lon} {max_lat},{min_lon} {max_lat},{min_lon} {min_lat}))"
+        }
+    raise ValueError(f"area must be one of {SEARCH_AREAS}, got {area!r}")
 
 
 def search_taxon_occurrences(
     taxon_keys: list[str],
-    min_lat: float | None = None,
-    max_lat: float | None = None,
-    min_lon: float | None = None,
-    max_lon: float | None = None,
+    area_filter: dict | None = None,
     batch_size: int = 100,
     user_agent: str | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
-    """Get GBIF occurrence counts for taxon keys with optional bounding box.
+    """Get GBIF occurrence counts for taxon keys, optionally within an area.
 
-    Queries the GBIF occurrence facet API in batches. Keys not found in any
-    response are filled with count=0. Keys whose batch request errored are
-    returned separately as failed keys (not counted) so the caller can retry
-    them rather than treat them as absent.
+    Counts only records with coordinates (hasCoordinate), the worldwide
+    count too. Queries the GBIF occurrence facet API in batches. The facet
+    lists every key the records fall under (each species, its ancestors and
+    the taxa below it), most records first, so a full list may have cut off
+    the rarest species: such a batch is split in two and asked again. A single species
+    comes right after its ancestors, so its own list never cuts it off. Keys
+    not found in any response are filled with count=0. Keys whose batch
+    request errored are returned separately as failed keys (not counted) so
+    the caller can retry them rather than treat them as absent.
 
     Args:
         taxon_keys: List of GBIF taxon key strings.
-        min_lat: Southern bound of the bounding box.
-        max_lat: Northern bound of the bounding box.
-        min_lon: Western bound of the bounding box.
-        max_lon: Eastern bound of the bounding box.
+        area_filter: Search params of the area (see ``area_params``); none
+            for worldwide counts.
         batch_size: Number of taxon keys per facet request.
         user_agent: User-Agent header for HTTP requests.
 
@@ -474,21 +738,22 @@ def search_taxon_occurrences(
         Tuple of (DataFrame with columns taxonID and count, list of taxon keys
         whose batch request failed).
     """
-    taxon_keys = list(set(taxon_keys))  # Remove duplicates
+    taxon_keys = list(dict.fromkeys(taxon_keys))  # Remove duplicates, keep order
 
     if len(taxon_keys) == 0:
         return pd.DataFrame(columns=["taxonID", "count"]), []
 
-    params_base = _build_occurrence_params(min_lat, max_lat, min_lon, max_lon)
-    params_base.update(
-        {
-            "facet": "taxonKey",
-            "facetLimit": 10 * batch_size,  # Get more facets to avoid missing keys
-            "limit": 0,
-        }
-    )
+    facet_limit = 10 * batch_size  # Room for the ancestors and taxa below
+    params_base = {
+        "hasCoordinate": "true",
+        **(area_filter or {}),
+        "facet": "taxonKey",
+        "facetLimit": facet_limit,
+        "limit": 0,
+        "checklistKey": COL_XR_CHECKLIST,
+    }
 
-    # Split into 100-species batches
+    # Split into batches of batch_size keys
     batches = [
         taxon_keys[i : i + batch_size] for i in range(0, len(taxon_keys), batch_size)
     ]
@@ -498,23 +763,35 @@ def search_taxon_occurrences(
     session = create_session(user_agent=user_agent)
     expected_keys = set(taxon_keys)
 
-    for batch in batches:
+    while batches:
+        batch = batches.pop(0)
         params = params_base.copy()
         params["taxonKey"] = batch
 
         try:
-            resp = session.get(
-                "https://api.gbif.org/v1/occurrence/search", params=params, timeout=30
-            )
+            with request_label(f"GBIF occurrences of {len(batch)} species"):
+                resp = session.get(
+                    "https://api.gbif.org/v1/occurrence/search",
+                    params=params,
+                    timeout=30,
+                )
             resp.raise_for_status()
             data = resp.json()
 
             facets = data.get("facets", [])
             counts = facets[0].get("counts", []) if facets else []
+            if len(counts) >= facet_limit and len(batch) > 1:
+                half = len(batch) // 2
+                batches[:0] = [batch[:half], batch[half:]]
+                continue
+            # Only the batch's own keys: a key outside it counts just the
+            # records it shares with the batch (a species asked for through
+            # one of its subspecies).
+            asked = set(batch)
             for facet in counts:
                 taxon_key = facet["name"]
 
-                if taxon_key in expected_keys:
+                if taxon_key in asked and taxon_key in expected_keys:
                     all_results.append(
                         {
                             "taxonID": taxon_key,
@@ -524,7 +801,9 @@ def search_taxon_occurrences(
                     expected_keys.discard(taxon_key)
 
         except Exception as e:
-            logger.error(f"Batch failed: {str(e)[:100]}")
+            logger.warning(
+                f"GBIF occurrences of {len(batch)} species failed: {str(e)[:100]}"
+            )
             # Report the batch's keys as failed (not as a count) so the caller
             # retries them instead of caching them as absent. Drop them from
             # expected_keys so the zero-fill below does not emit a misleading
@@ -548,13 +827,27 @@ def search_taxon_occurrences(
     return df, failed_keys
 
 
+def area_label(extent: int | str, area: str) -> str:
+    """A search area as the log names it: "within 250 km", "in the box around
+    250 km" or "worldwide".
+
+    Args:
+        extent: Search radius in km, or ``"global"``.
+        area: ``"circle"`` or ``"box"``.
+    """
+    name = get_extent_column_name(extent)
+    if name == "global":
+        return "worldwide"
+    return f"within {name}" if area == "circle" else f"in the box around {name}"
+
+
 def get_extent_column_name(extent: int | float | str) -> str:
     """Standardize the column name for GBIF occurrence counts.
 
     Converts numeric extents to ``"<int> km"`` and string extents to lowercase.
 
     Args:
-        extent: Extent value — numeric (km) or string (e.g. ``"global"``).
+        extent: Extent value: numeric (km) or string (e.g. ``"global"``).
 
     Returns:
         Standardized column name string (e.g. ``"100 km"``, ``"global"``).
@@ -574,18 +867,21 @@ def counts_for_area(
     latitude: float | None = None,
     longitude: float | None = None,
     extent: int | float | str = "global",
+    area: str = GBIF_AREA,
     progress_handler: Callable[[float, str], None] | None = None,
     user_agent: str | None = None,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, list[str]]:
     """Return GBIF occurrence counts for taxon keys within a geographic area.
 
-    Queries either the full global dataset or a bounding box around a point.
+    Queries either the full global dataset or the area around a point (see
+    ``area_params``).
 
     Args:
         taxon_keys: List of GBIF taxon key strings.
         latitude: Center latitude (required for non-global extents).
         longitude: Center longitude (required for non-global extents).
         extent: Search radius in km, or ``"global"`` for worldwide counts.
+        area: ``"circle"`` or ``"box"`` around the point.
         progress_handler: Optional callable ``(fraction, message)`` for UI
             progress updates. Receives values in [0, 1].
         user_agent: User-Agent header for HTTP requests.
@@ -597,7 +893,7 @@ def counts_for_area(
 
     col_name = get_extent_column_name(extent)
 
-    # No keys to query (e.g. no species cleared the backbone filter): skip the
+    # No keys to query (e.g. no species cleared the match filter): skip the
     # request and return an empty, correctly-columned frame so the caller's
     # reindex/merge does not fail.
     if not taxon_keys:
@@ -606,29 +902,27 @@ def counts_for_area(
     if progress_handler:
         progress_handler(0.1, f"Querying {col_name}...")
 
-    if isinstance(extent, str) and extent.lower() == "global":
-        counts, failed_keys = search_taxon_occurrences(
-            taxon_keys, user_agent=user_agent
-        )
-    else:
-        min_lat, max_lat, min_lon, max_lon = get_bounding_box(
-            latitude, longitude, extent
-        )
-        counts, failed_keys = search_taxon_occurrences(
-            taxon_keys, min_lat, max_lat, min_lon, max_lon, user_agent=user_agent
-        )
+    counts, failed_keys = search_taxon_occurrences(
+        taxon_keys,
+        area_params(latitude, longitude, extent, area),
+        user_agent=user_agent,
+    )
 
     # Failed keys are reported separately, not counted; exclude them so they are
-    # not zero-filled and mistaken for "absent".
+    # not zero-filled and mistaken for "absent". One row per key, even when
+    # several names share it.
     failed = set(failed_keys)
-    kept_keys = [k for k in taxon_keys if k not in failed]
+    kept_keys = [k for k in dict.fromkeys(taxon_keys) if k not in failed]
     df = counts.set_index("taxonID")["count"].reindex(kept_keys).fillna(0).reset_index()
     df.columns = ["taxonID", "occurrences"]
     df["gbif_extent"] = extent
 
     n_present = int((df["occurrences"] > 0).sum())
     n_absent = len(df) - n_present
-    logger.info(f"Queried {col_name}: {n_present} present, {n_absent} absent")
+    logger.info(
+        f"GBIF occurrences {area_label(extent, area)}: {n_present} species present, "
+        f"{n_absent} absent"
+    )
 
     if progress_handler:
         progress_handler(1.0, f"Finished {col_name}")
@@ -642,15 +936,22 @@ def counts_for_area(
 
 
 def plot_bounding_boxes(
-    latitude, longitude, extents, show_circles=True, title=None, padding=0.5
+    latitude,
+    longitude,
+    extents,
+    show_circles=True,
+    title=None,
+    padding=0.5,
+    show_boxes=True,
 ):
-    """Plot bounding boxes and optional circles for geographic extents.
+    """Plot the search areas of geographic extents: circles and bounding boxes.
 
     Args:
         latitude: Center latitude in decimal degrees.
         longitude: Center longitude in decimal degrees.
         extents: List of distances from center in kilometers.
         show_circles: If True, draw the circular perimeter for each extent.
+        show_boxes: If True, draw the bounding box of each circle.
         title: Optional plot title (empty/None to hide).
         padding: Padding around zones as fraction of range (default 0.5).
 
@@ -692,45 +993,48 @@ def plot_bounding_boxes(
                     lat=circle_lats,
                     mode="lines",
                     name=label,
-                    line=dict(color=color, width=1),
-                    fill="toself",
-                    fillcolor=color,
-                    opacity=0.1,
+                    line=dict(color=color, width=2),
                     hovertemplate=f"<b>Circle {label}</b><br>Lat: %{{lat:.4f}}<br>Lon: %{{lon:.4f}}<extra></extra>",
                 )
             )
 
-        # Build closed rectangle with interpolated edges
-        n = n_edge_points
-        bbox_lons = np.concatenate(
-            [
-                np.linspace(min_lon, max_lon, n),  # north
-                np.full(n, max_lon),  # east
-                np.linspace(max_lon, min_lon, n),  # south
-                np.full(n, min_lon),  # west
-                [min_lon],  # close
-            ]
-        )
-        bbox_lats = np.concatenate(
-            [
-                np.full(n, max_lat),  # north
-                np.linspace(max_lat, min_lat, n),  # east
-                np.full(n, min_lat),  # south
-                np.linspace(min_lat, max_lat, n),  # west
-                [max_lat],  # close
-            ]
-        )
-
-        fig.add_trace(
-            go.Scattergeo(
-                lon=bbox_lons,
-                lat=bbox_lats,
-                mode="lines",
-                name=label,
-                line=dict(color=color, width=2, dash="dash"),
-                hovertemplate=f"<b>BBox {label}</b><br>Lat: %{{lat:.4f}}<br>Lon: %{{lon:.4f}}<extra></extra>",
+        if show_boxes:
+            # Build closed rectangle with interpolated edges
+            n = n_edge_points
+            bbox_lons = np.concatenate(
+                [
+                    np.linspace(min_lon, max_lon, n),  # north
+                    np.full(n, max_lon),  # east
+                    np.linspace(max_lon, min_lon, n),  # south
+                    np.full(n, min_lon),  # west
+                    [min_lon],  # close
+                ]
             )
-        )
+            bbox_lats = np.concatenate(
+                [
+                    np.full(n, max_lat),  # north
+                    np.linspace(max_lat, min_lat, n),  # east
+                    np.full(n, min_lat),  # south
+                    np.linspace(min_lat, max_lat, n),  # west
+                    [max_lat],  # close
+                ]
+            )
+            if max_lon - min_lon >= 360:
+                # Around a pole the box is a band of every longitude
+                edge_lat = min_lat if max_lat == 90 else max_lat
+                bbox_lons = np.linspace(min_lon, max_lon, 8 * n)
+                bbox_lats = np.full(8 * n, edge_lat)
+
+            fig.add_trace(
+                go.Scattergeo(
+                    lon=bbox_lons,
+                    lat=bbox_lats,
+                    mode="lines",
+                    name=label,
+                    line=dict(color=color, width=2, dash="dash"),
+                    hovertemplate=f"<b>BBox {label}</b><br>Lat: %{{lat:.4f}}<br>Lon: %{{lon:.4f}}<extra></extra>",
+                )
+            )
 
     # Center point
     fig.add_trace(
@@ -756,6 +1060,9 @@ def plot_bounding_boxes(
         "geo": dict(
             center=dict(lon=longitude, lat=latitude),
             projection_type="azimuthal equal area",
+            # Without the rotation the projection stays centred on 0°E 0°N
+            # and points far from it come out stretched
+            projection_rotation=dict(lon=longitude, lat=latitude),
             projection_scale=proj_scale,
             resolution=50,
             showland=True,

@@ -1,39 +1,59 @@
-"""
-HYPO Analysis UI Module
+"""HYPO tab: the proxy search, its filter, the HYPO check and the HYPO list."""
 
-Handles UI rendering and user interaction for the hypothetical species
-validation pipeline (BOLD sequences validated via NCBI BLAST).
-"""
-
-import pandas as pd
 import streamlit as st
 
-from loguru import logger
 
 from trident.clients.ncbi import set_ncbi_email
 from trident.core import config
+from trident.core.constants import BLAST_DATABASE
+from trident.core.utils import (
+    failed_items,
+    format_setting,
+    pluralize,
+    species_for_sequences,
+)
 import trident.pipelines as pipe
-from trident.logging import get_log_level
-from trident.pipelines.results_pipeline import add_below_mol
+from trident.pipelines.results_pipeline import (
+    CHECK_DIFFERS,
+    CHECK_INPUT_COLUMNS,
+    CHECK_MATCHES,
+    CHECK_NOT_FOUND,
+    CHECK_NOTES,
+    CHECK_PARTIAL,
+)
 
 from trident.ui.ui import (
+    ready,
+    RANK_COLUMNS,
+    record_empty_step,
+    show_filter_success,
+    lazy_expander,
     styled_or_plain,
-    COL,
+    column_config,
+    BLAST_DATABASE_CAPTION,
+    BLAST_HELP,
     get_recent_param_sets,
     param_preset_selector,
-    persist_value,
-    save_widget,
+    setting_widget,
+    ev_exponent_widget,
     StreamlitLogSink,
+    blast_speed_settings,
+    stored_value,
+    count_progress,
     run_with_progress,
     reset_state_after,
     sequence_selector,
     run_step_workflow,
-    next_step_button,
     require_prerequisite,
-    highlight_below_mol,
+    check_legends,
+    highlight_check_result,
+    mol_query_cover,
+    with_check_result,
 )
 
 from trident.ui.defaults import (
+    HYPO_GIVE_UP_MINUTES_DEFAULT,
+    BLAST_MAX_THREADS,
     HYPO_MAX_HITS_DEFAULT,
     HYPO_EV_EXPONENT_DEFAULT,
     HYPO_IDENTITY_CUTOFF_DEFAULT,
@@ -43,6 +63,7 @@ from trident.ui.defaults import (
     HYPO_QUERY_COVER_DEFAULT,
     HYPO_IDENTITY_DEFAULT,
     HYPO_CHECK_EVALUE_EXPONENT_DEFAULT,
+    NCBI_MAX_HITS_LIMIT,
 )
 
 
@@ -62,148 +83,110 @@ def display_hypo_parameters():
     ]
 
     presets = get_recent_param_sets(
-        st.session_state.db_path, "hypo_search_inputs", db_cols
+        st.session_state.db_path,
+        "hypo_search_inputs",
+        db_cols,
+        only={"blast_database": BLAST_DATABASE},
     )
     param_preset_selector(
         presets,
         format_fn=lambda p: (
-            f"E-value: 1e-{p['hypo_ev_exponent']}, Max hits: {p['hypo_max_hits']}, Top: {p['hypo_ntop']}"
+            f"E-value: 1e-{p['hypo_ev_exponent']}, Max hits: {p['hypo_max_hits']}, "
+            f"Hits per score: {p['hypo_ntop']}, min hit identity: {p['hypo_identity_cutoff']}%"
         ),
         key="hypo_search_preset",
     )
+    st.caption(BLAST_DATABASE_CAPTION)
     stored = st.session_state.hypo_merge_params
 
-    def_hits = int(stored.get("hypo_max_hits") or HYPO_MAX_HITS_DEFAULT)
-    default_ev_exp = int(stored.get("hypo_ev_exponent") or HYPO_EV_EXPONENT_DEFAULT)
-    def_id_cutoff = int(
-        stored.get("hypo_identity_cutoff") or HYPO_IDENTITY_CUTOFF_DEFAULT
-    )
-    def_ntop = int(stored.get("hypo_ntop") or HYPO_NTOP_DEFAULT)
     # --- Row 1: Primary Scientific Parameters ---
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        persist_value("hypo_max_hits", def_hits)
-        max_hits = st.number_input(
-            "Max hits per query",
+        max_hits = setting_widget(
+            st.number_input,
+            "hypo_max_hits",
+            HYPO_MAX_HITS_DEFAULT,
             1,
-            1000,
-            help="Number of NCBI hits returned per sequence",
-            key="hypo_max_hits",
+            NCBI_MAX_HITS_LIMIT,
+            applied=stored,
+            help=BLAST_HELP["max_hits"],
         )
-        save_widget("hypo_max_hits")
-        active_hits = stored.get("hypo_max_hits", "None")
-        st.caption(f"Active in results: **{active_hits}**")
 
     with col2:
-        persist_value("hypo_ev_exponent", default_ev_exp)
-        ev_exponent = st.number_input(
-            "E-value exponent ($10^{-x}$)",
-            0,
-            50,
-            help="Exponent of the significance threshold for matches",
-            key="hypo_ev_exponent",
+        ev_exponent = ev_exponent_widget(
+            "hypo_ev_exponent", HYPO_EV_EXPONENT_DEFAULT, 50, stored
         )
-        save_widget("hypo_ev_exponent")
-        active_ev = stored.get("hypo_ev_exponent", "None")
-        threshold_str = (
-            f"(e-value: $10^{{-{active_ev}}}$)" if active_ev != "None" else ""
-        )
-        st.caption(f"Active in results: **{active_ev}** {threshold_str}")
 
     with col3:
-        persist_value("hypo_identity_cutoff", def_id_cutoff)
-        identity_cutoff = st.number_input(
-            "Identity Cutoff (%)",
+        identity_cutoff = setting_widget(
+            st.number_input,
+            "hypo_identity_cutoff",
+            HYPO_IDENTITY_CUTOFF_DEFAULT,
             0,
             100,
-            help="Minimum identity percentage to consider a valid NCBI hit",
-            key="hypo_identity_cutoff",
+            applied=stored,
+            shown=lambda v: f"{format_setting(v)}%",
+            help="Proxy hits below this identity are dropped, before the top hits "
+            "are kept.",
         )
-        save_widget("hypo_identity_cutoff")
-        active_id = stored.get("hypo_identity_cutoff", "None")
-        st.caption(f"Active in results: **{active_id}**%")
 
     with col4:
-        persist_value("hypo_ntop", def_ntop)
-        ntop = st.number_input(
-            "Top N hits to retain",
+        ntop = setting_widget(
+            st.number_input,
+            "hypo_ntop",
+            HYPO_NTOP_DEFAULT,
             1,
             100,
-            help="Number of top NCBI hits to retain per species after applying identity cutoff",
-            key="hypo_ntop",
+            applied=stored,
+            help=(
+                "Per BOLD sequence and hit species, the search keeps the hits "
+                "no other beats on both identity and query cover, so a short "
+                "fragment cannot push out a full-length hit. This sets how many "
+                "hits with the same identity and cover are kept."
+            ),
         )
-        save_widget("hypo_ntop")
-        active_ntop = stored.get("hypo_ntop", "None")
-        st.caption(f"Active in results: **{active_ntop}**")
 
-    # --- Row 2: Advanced Settings  ---
-    with st.expander(
-        "🛠️ Advanced Search Settings",
-        expanded=False,
-    ):
-        st.markdown(
-            "These settings affect processing speed but not biological results, and should be left at default values most of the time."
-        )
-        tcol1, tcol2 = st.columns(2)
+    batch_size, threads, give_up = blast_speed_settings(
+        "hypo",
+        HYPO_BATCH_SIZE_DEFAULT,
+        HYPO_NUM_THREADS_DEFAULT,
+        HYPO_GIVE_UP_MINUTES_DEFAULT,
+    )
 
-        with tcol1:
-            persist_value("hypo_batch_size", HYPO_BATCH_SIZE_DEFAULT)
-            batch_size = st.number_input(
-                "Batch size",
-                1,
-                100,
-                help="Number of sequences processed in each batch for NCBI BLAST requests",
-                key="hypo_batch_size",
-            )
-            save_widget("hypo_batch_size")
-        with tcol2:
-            persist_value("hypo_num_threads", HYPO_NUM_THREADS_DEFAULT)
-            threads = st.number_input(
-                "Parallel Threads",
-                1,
-                10,
-                help="Number of batches processed in parallel for NCBI BLAST requests",
-                key="hypo_num_threads",
-            )
-            save_widget("hypo_num_threads")
-
-    return max_hits, ev_exponent, identity_cutoff, ntop, batch_size, threads
+    return max_hits, ev_exponent, identity_cutoff, ntop, batch_size, threads, give_up
 
 
-def hypo_search_job(*, force_rerun, retry_empty=False, status, progress_bar, params):
+def hypo_search_job(
+    *, force_rerun, retry_empty=False, status, progress_bar, params, queries_df
+):
     """Run HYPO BLAST search + merge job."""
 
     # 1. Setup Logging
     logsink = StreamlitLogSink(status, prefix="hypo_")
-    handler_id = logger.add(
-        logsink.write, filter=logsink.thread_filter, level=get_log_level()
-    )
 
     # 2. Get Data
     extra_df = st.session_state.extra_df
-    geo_df = st.session_state.geo_df
-    sequences_dict = pipe.prepare_hypo_input(extra_df, geo_df)
+    sequences_dict = pipe.prepare_hypo_input(extra_df, queries_df)
     email = config.contact_email()
-    total_sequences = len(extra_df)
-    progress_info = {"current": 0, "total": total_sequences}
-    name_str = "sequence" if total_sequences == 1 else "sequences"
+    # save_to_db sets the total to the searches this run executes.
+    progress_info = {"current": 0, "total": 0}
 
     # 3. Search (background thread for progress tracking)
-    def _poll():
-        curr = progress_info["current"]
-        if total_sequences > 0:
-            percent = min(curr / total_sequences, 1.0)
-            progress_bar.progress(
-                percent,
-                text=f"Search: {curr} / {total_sequences} {name_str} blasted...",
-            )
+    _poll = count_progress(
+        progress_bar,
+        progress_info,
+        lambda curr, total: (
+            f"Search: {curr}/{total} BOLD {pluralize(total, 'sequence')} blasted..."
+        ),
+    )
 
     hypo_search_df, hypo_search_params = run_with_progress(
         logsink.wrap(pipe.run_hypo_search, before=lambda: set_ncbi_email(email)),
         sequences_dict,
         batch_size=params["batch_size"],
         num_threads=params["num_threads"],
+        give_up_minutes=params["give_up_minutes"],
         ev_exponent=params["hypo_ev_exponent"],
         max_hits=params["hypo_max_hits"],
         identity_cutoff=params["hypo_identity_cutoff"],
@@ -213,13 +196,15 @@ def hypo_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
         db_path=st.session_state.db_path,
         progress_handler=progress_info,
         logsink=logsink,
+        progress=progress_info,
         on_poll=_poll,
     )
 
-    # 4. Merge (fast — no progress bar needed)
+    # 4. Merge (fast: no progress bar needed)
     hypo_merge_df, hypo_merge_params = pipe.run_hypo_merge(
         hypo_search_df,
         extra_df,
+        queries_df,
         hypo_search_params=hypo_search_params,
         extra_params=st.session_state.extra_params,
         force_rerun=force_rerun,
@@ -229,8 +214,11 @@ def hypo_search_job(*, force_rerun, retry_empty=False, status, progress_bar, par
 
     # 5. Save Results and Cleanup
     st.session_state.hypo_merge_df = hypo_merge_df
+    st.session_state.hypo_search_failed = pipe.failed_search_candidates(
+        failed_items(hypo_search_df, whole=True), extra_df, queries_df
+    )
     st.session_state.hypo_merge_params = hypo_merge_params
-    logger.remove(handler_id)
+    logsink.close()
     progress_bar.empty()
     reset_state_after("hypo_merge_df")
 
@@ -242,7 +230,7 @@ def hypo_search_workflow():
         st.markdown("### ⚙️ Search Configuration and Execution")
 
         # Parameter Inputs (NCBI BLAST parameters)
-        max_hits, ev_exponent, identity_cutoff, ntop, batch_size, n_threads = (
+        max_hits, ev_exponent, identity_cutoff, ntop, batch_size, n_threads, give_up = (
             display_hypo_parameters()
         )
         current_params = {
@@ -252,10 +240,28 @@ def hypo_search_workflow():
             "hypo_ntop": ntop,
             "batch_size": batch_size,
             "num_threads": n_threads,
+            "give_up_minutes": give_up,
         }
         st.divider()
 
-        unique_records = len(st.session_state.extra_df)
+        extra_df = st.session_state.extra_df
+        queries_df = pipe.hypo_queries(
+            st.session_state.tax_df,
+            st.session_state.mol_df,
+            st.session_state.name_table,
+        )
+        n_searches, n_seqs = pipe.count_hypo_searches(extra_df, queries_df)
+        n_skipped = extra_df["seq_id"].nunique() - n_seqs
+        ready_text = (
+            f"Ready to run **{n_searches:,}** BOLD proxy searches against NCBI "
+            f"for **{n_seqs:,}** sequences."
+        )
+        if n_skipped:
+            ready_text += (
+                f" {n_skipped:,} {pluralize(n_skipped, 'sequence')} without a MOL "
+                f"species in the TAX list {pluralize(n_skipped, 'is')} "
+                "not searched."
+            )
 
         mode = run_step_workflow(
             df_key="hypo_merge_df",
@@ -270,45 +276,38 @@ def hypo_search_workflow():
             ],
             current_params=current_params,
             job_fn=hypo_search_job,
-            job_kwargs={"params": current_params},
-            new_string=f"Ready to analyze **{unique_records:,}** BOLD sequences against NCBI.",
+            job_kwargs={"params": current_params, "queries_df": queries_df},
+            new_string=ready_text,
             btn_key="hypo_search_apply",
+            failed_key="hypo_search_failed",
             logs_prefix="hypo_",
             threaded=True,
-            status_label=f"🔍 Running NCBI BLAST on **{unique_records}** sequences...",
+            status_label=f"🔍 Running **{n_searches:,}** proxy searches on NCBI BLAST...",
         )
 
     # Raw Results Preview
     if mode != "NEW" and st.session_state.hypo_merge_df is not None:
-        with st.expander(
-            f"Inspect full HYPO search results ({len(st.session_state.hypo_merge_df)} records)",
-            expanded=False,
-        ):
-            st.dataframe(
-                st.session_state.hypo_merge_df,
-                width="stretch",
-                hide_index=True,
-                column_order=[
+        with lazy_expander(
+            f"Inspect full HYPO search results ({len(st.session_state.hypo_merge_df):,} hits)",
+            key="hypo_search_results",
+        ) as is_open:
+            if is_open:
+                shown = [
                     "seq_id",
                     "scientificName",
-                    "scientificName_hit",
-                    "identity_percentage",
-                    "query_cover",
-                    "hit_url",
-                    "hit_def",
-                ],
-                column_config={
-                    "seq_id": COL["seq_id"],
-                    "scientificName": COL["scientificName"],
-                    "scientificName_hit": st.column_config.TextColumn(
-                        "BLAST Hit Species"
-                    ),
-                    "identity_percentage": COL["identity_percentage"],
-                    "query_cover": COL["query_cover"],
-                    "hit_url": COL["hit_url"],
-                    "hit_def": COL["hit_def"],
-                },
-            )
+                    "proxy_hit_species",
+                    "proxy_identity",
+                    "proxy_query_cover",
+                    "proxy_hit_url",
+                    "proxy_hit_def",
+                ]
+                st.dataframe(
+                    st.session_state.hypo_merge_df,
+                    width="stretch",
+                    hide_index=True,
+                    column_order=shown,
+                    column_config=column_config(shown),
+                )
 
 
 # --------------------------------------------------------------------
@@ -327,41 +326,35 @@ def hypo_filter_controls():
     param_preset_selector(
         presets,
         format_fn=lambda p: (
-            f"QC: {p['hypo_query_cover']}%, identity: {p['hypo_identity']}%"
+            f"query cover: {p['hypo_query_cover']}%, proxy identity: {p['hypo_identity']}%"
         ),
         key="hypo_filter_preset",
     )
     stored = st.session_state.hypo_filter_params
 
-    def_qc = int(stored.get("hypo_query_cover") or HYPO_QUERY_COVER_DEFAULT)
-    def_identity = int(stored.get("hypo_identity") or HYPO_IDENTITY_DEFAULT)
-
     col1, col2 = st.columns(2)
     with col1:
-        persist_value("hypo_query_cover", def_qc)
-        query_cover = st.slider(
-            "Query Coverage (%)",
+        query_cover = setting_widget(
+            st.slider,
+            "hypo_query_cover",
+            HYPO_QUERY_COVER_DEFAULT,
+            applied=stored,
             min_value=0,
             max_value=100,
             help="Minimum query cover percentage to filter NCBI hits",
-            key="hypo_query_cover",
         )
-        save_widget("hypo_query_cover")
-        active_qc = stored.get("hypo_query_cover", "None")
-        st.caption(f"Active in results: **{active_qc}**")
     with col2:
-        persist_value("hypo_identity", def_identity)
-        identity = st.slider(
-            "Identity (%)",
+        identity = setting_widget(
+            st.slider,
+            "hypo_identity",
+            HYPO_IDENTITY_DEFAULT,
+            applied=stored,
             min_value=90,
             max_value=100,
             step=1,
-            help="Minimum identity percentage to filter NCBI hits",
-            key="hypo_identity",
+            help="A candidate is a hypothetical species when its proxy hits a MOL "
+            "species of the sequence at or above this identity.",
         )
-        save_widget("hypo_identity")
-        active_id = stored.get("hypo_identity", "None")
-        st.caption(f"Active in results: **{active_id}**")
 
     return query_cover, identity
 
@@ -391,16 +384,11 @@ def _filter_success_message():
 
     merged = st.session_state.hypo_merge_df
     total = len(merged) if merged is not None else 0
-    base = (
-        f"✅ Filtering complete: {len(hypo_filter_df):,}/{total:,} sequences retained"
-    )
-
-    # Empty filter results come back from the cache with no columns at all.
-    if "scientificName" in hypo_filter_df.columns and not hypo_filter_df.empty:
+    tail = "."
+    if not hypo_filter_df.empty:
         n_species = hypo_filter_df["scientificName"].nunique()
-        st.success(f"{base} ({n_species:,} unique species).")
-    else:
-        st.success(f"{base}.")
+        tail = f" ({n_species:,} unique species)."
+    show_filter_success(len(hypo_filter_df), total, "hits", tail)
 
 
 def hypo_filter_workflow():
@@ -426,7 +414,7 @@ def hypo_filter_workflow():
             current_params=current_params,
             job_fn=hypo_filter_job,
             job_kwargs={"query_cover": qc, "identity": identity},
-            new_string=f"Ready to filter **{len(st.session_state.hypo_merge_df):,}** sequences.",
+            new_string=f"Ready to filter **{len(st.session_state.hypo_merge_df):,}** hits.",
             btn_key="hypo_filter_apply",
             status_label="🔬 Filtering HYPO results...",
             before_button=_filter_success_message,
@@ -434,35 +422,27 @@ def hypo_filter_workflow():
 
     # Results Preview
     if st.session_state.hypo_filter_df is not None:
-        with st.expander(
-            f"Inspect filtered HYPO results ({len(st.session_state.hypo_filter_df)} records)",
-            expanded=False,
-        ):
-            st.dataframe(
-                st.session_state.hypo_filter_df,
-                width="stretch",
-                hide_index=True,
-                column_order=[
+        with lazy_expander(
+            f"Inspect filtered HYPO results ({len(st.session_state.hypo_filter_df):,} hits)",
+            key="hypo_filter_results",
+        ) as is_open:
+            if is_open:
+                shown = [
                     "seq_id",
                     "scientificName",
-                    "scientificName_hit",
-                    "identity_percentage",
-                    "query_cover",
-                    "hit_url",
-                    "hit_def",
-                ],
-                column_config={
-                    "seq_id": COL["seq_id"],
-                    "scientificName": COL["scientificName"],
-                    "scientificName_hit": st.column_config.TextColumn(
-                        "BLAST Hit Species"
-                    ),
-                    "identity_percentage": COL["identity_percentage"],
-                    "query_cover": COL["query_cover"],
-                    "hit_url": COL["hit_url"],
-                    "hit_def": COL["hit_def"],
-                },
-            )
+                    "proxy_hit_species",
+                    "proxy_identity",
+                    "proxy_query_cover",
+                    "proxy_hit_url",
+                    "proxy_hit_def",
+                ]
+                st.dataframe(
+                    st.session_state.hypo_filter_df,
+                    width="stretch",
+                    hide_index=True,
+                    column_order=shown,
+                    column_config=column_config(shown),
+                )
 
 
 # --------------------------------------------------------------------
@@ -476,37 +456,26 @@ def display_hypo_check_controls():
     db_cols = ["hypo_check_ev_exponent"]
 
     presets = get_recent_param_sets(
-        st.session_state.db_path, "hypo_check_inputs", db_cols
+        st.session_state.db_path,
+        "hypo_check_inputs",
+        db_cols,
+        only={"blast_database": BLAST_DATABASE},
     )
     param_preset_selector(
         presets,
         format_fn=lambda p: f"E-value: 1e-{p['hypo_check_ev_exponent']}",
         key="hypo_check_preset",
     )
+    st.caption(BLAST_DATABASE_CAPTION)
     stored = st.session_state.hypo_check_params
-
-    default_ev_exp = int(
-        stored.get("hypo_check_ev_exponent") or HYPO_CHECK_EVALUE_EXPONENT_DEFAULT
-    )
 
     with st.expander(
         "🛠️ Advanced Search Settings",
         expanded=False,
     ):
-        persist_value("hypo_check_ev_exponent", default_ev_exp)
-        ev_exponent = st.number_input(
-            "E-value exponent ($10^{-x}$)",
-            0,
-            10,
-            help="Exponent of the significance threshold for matches",
-            key="hypo_check_ev_exponent",
+        ev_exponent = ev_exponent_widget(
+            "hypo_check_ev_exponent", HYPO_CHECK_EVALUE_EXPONENT_DEFAULT, 10, stored
         )
-        save_widget("hypo_check_ev_exponent")
-        active_ev = stored.get("hypo_check_ev_exponent", "None")
-        threshold_str = (
-            f"(e-value: $10^{{-{active_ev}}}$)" if active_ev != "None" else ""
-        )
-        st.caption(f"Active in results: **{active_ev}** {threshold_str}")
 
     return ev_exponent
 
@@ -516,9 +485,6 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
 
     # Setup Logging
     logsink = StreamlitLogSink(status, prefix="hypo_check_")
-    handler_id = logger.add(
-        logsink.write, filter=logsink.thread_filter, level=get_log_level()
-    )
 
     # Get Data
     hypo_filter_df = st.session_state.hypo_filter_df
@@ -530,40 +496,47 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
     )
     total_sequences = len(sequences_df)
     progress_info = {"current": 0, "total": total_sequences}
-    name_str = "sequence" if total_sequences == 1 else "sequences"
 
     # Check (background thread for progress tracking)
-    def _poll():
-        curr = progress_info["current"]
-        if total_sequences > 0:
-            percent = min(curr / total_sequences, 1.0)
-            progress_bar.progress(
-                percent,
-                text=f"Check: {curr} / {total_sequences} {name_str} processed...",
-            )
+    _poll = count_progress(
+        progress_bar,
+        progress_info,
+        lambda curr, total: (
+            f"Check: {curr}/{total} sequence {pluralize(total, 'check')} done..."
+        ),
+    )
 
     # Save check results
     hypo_check_df, hypo_check_params = run_with_progress(
         logsink.wrap(pipe.run_hypo_check, before=lambda: set_ncbi_email(email)),
         hypo_filter_df=hypo_filter_df,
+        check_queries=pipe.hypo_check_queries(
+            sequences_df["scientificName"].unique().tolist(),
+            st.session_state.name_table,
+        ),
         ev_exponent=params["hypo_check_ev_exponent"],
+        num_threads=params["num_threads"],
+        give_up_minutes=params["give_up_minutes"],
         db_path=st.session_state.db_path,
         force_rerun=force_rerun,
         retry_empty=retry_empty,
         progress_handler=progress_info,
         logsink=logsink,
+        progress=progress_info,
         on_poll=_poll,
     )
     st.session_state.hypo_check_df = hypo_check_df
+    st.session_state.hypo_check_failed = failed_items(hypo_check_df, whole=True)
     st.session_state.hypo_check_params = hypo_check_params
     st.session_state.hypo_check_summary_df = pipe.build_hypo_check_summary(
-        hypo_check_df
+        hypo_check_df, mol_query_cover()
     )
 
-    # Finalize — build final HYPO species list
+    # Finalize: build the HYPO list
     hypo_df, hypo_params = pipe.finalize_hypo_results(
         hypo_filter_df=hypo_filter_df,
         hypo_check_df=hypo_check_df,
+        query_cover=mol_query_cover(),
         hypo_filter_params=st.session_state.hypo_filter_params,
         hypo_check_params=hypo_check_params,
         db_path=st.session_state.db_path,
@@ -571,116 +544,130 @@ def hypo_check_job(*, force_rerun, retry_empty=False, status, progress_bar, para
     )
     st.session_state.hypo_df = hypo_df
     st.session_state.hypo_params = hypo_params
+    reset_state_after("hypo_df")
 
     progress_bar.empty()
-    logger.remove(handler_id)
+    logsink.close()
+
+
+# The tabs of the check results, by HYPO check result (see CHECK_NOTES for
+# what each means), with what Results does with it.
+CHECK_TABS = {
+    CHECK_MATCHES: ("Matches", ""),
+    CHECK_DIFFERS: (
+        "Differs",
+        "Species flagged in Results.",
+    ),
+    CHECK_PARTIAL: (
+        "Partial hit",
+        "Species marked for review in Results.",
+    ),
+    CHECK_NOT_FOUND: ("No hit in GenBank", ""),
+}
 
 
 def hypo_check_display():
     res_df = st.session_state.hypo_check_df
     summary_df = st.session_state.hypo_check_summary_df
-    n_found = res_df[res_df["hit_found"].astype(bool)]["scientificName"].nunique()
-    n_not_found = res_df[~res_df["hit_found"].astype(bool)]["scientificName"].nunique()
-
-    tab_summary, tab_no_hits, tab_full = st.tabs(
+    if res_df.empty:
+        if st.session_state.hypo_check_failed:
+            st.info("No check results: every check query failed.")
+        else:
+            st.info("No check results to show.")
+        return
+    summary = with_check_result(
+        summary_df.rename(
+            columns={
+                "identity_percentage": "hypo_check_identity",
+                "query_cover": "hypo_check_query_cover",
+            }
+        )
+    )
+    by_result = {
+        result: summary[summary["hypo_check_result"] == result] for result in CHECK_TABS
+    }
+    tabs = st.tabs(
         [
-            f"Species Found ({n_found})",
-            f"Species Not Found ({n_not_found})",
+            *(f"{label} ({len(by_result[r])})" for r, (label, _) in CHECK_TABS.items()),
             "Raw BLAST Data",
         ]
     )
-    with tab_summary:
-        found_df = add_below_mol(
-            summary_df[summary_df["hit_count"] > 0].copy(),
-            st.session_state.mol_df,
-            st.session_state.ncbi_search_df,
-            identity_col="identity_percentage",
-        )
-
-        st.caption("Best hit matching in the NCBI database.")
-        if found_df["below_mol"].any():
-            st.caption(
-                ":orange[■] Found in NCBI but would not have passed the MOL filter"
+    for tab, (result, (_, consequence)) in zip(tabs, CHECK_TABS.items()):
+        with tab:
+            caption = f"{CHECK_NOTES[result]}. {consequence}".strip()
+            if result != CHECK_NOT_FOUND:
+                caption += " Best check hit of each sequence and species."
+            st.caption(caption)
+            shown = ["seq_id", "scientificName"]
+            if result != CHECK_NOT_FOUND:
+                shown += [
+                    "n_hits",
+                    "hypo_check_identity",
+                    "hypo_check_query_cover",
+                    "hit_url",
+                ]
+            st.dataframe(
+                by_result[result],
+                width="stretch",
+                hide_index=True,
+                column_order=shown,
+                column_config=column_config(shown),
             )
-        st.dataframe(
-            styled_or_plain(found_df, highlight_below_mol),
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "seq_id": COL["seq_id"],
-                "scientificName": COL["scientificName"],
-                "hit_count": COL["hit_count"],
-                "identity_percentage": COL["identity_percentage"],
-                "query_cover": COL["query_cover"],
-                "hit_url": COL["hit_url"],
-                "below_mol": None,
-            },
-        )
-
-    with tab_no_hits:
-        st.caption("No NCBI matches were found for these species.")
-        st.dataframe(
-            summary_df[summary_df["hit_count"] == 0],
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "seq_id": COL["seq_id"],
-                "scientificName": COL["scientificName"],
-                "hit_count": None,
-                "identity_percentage": None,
-                "query_cover": None,
-                "hit_url": None,
-            },
-        )
-    with tab_full:
+    with tabs[-1]:
+        shown = [
+            "seq_id",
+            "scientificName",
+            "hit_found",
+            "identity_percentage",
+            "query_cover",
+            "hit_url",
+            "hit_def",
+            "scientificName_NCBI",
+        ]
         st.dataframe(
             res_df,
             width="stretch",
             hide_index=True,
-            column_order=[
-                "seq_id",
-                "scientificName",
-                "hit_found",
-                "identity_percentage",
-                "query_cover",
-                "hit_url",
-                "hit_def",
-                "scientificName_NCBI",
-            ],
-            column_config={
-                "seq_id": COL["seq_id"],
-                "scientificName": COL["scientificName"],
-                "hit_found": st.column_config.CheckboxColumn("Hit Found"),
-                "identity_percentage": COL["identity_percentage"],
-                "query_cover": COL["query_cover"],
-                "hit_url": COL["hit_url"],
-                "hit_def": COL["hit_def"],
-                "scientificName_NCBI": st.column_config.TextColumn("NCBI Species"),
-                "dna_sequence": None,
-            },
+            column_order=shown,
+            column_config=column_config(shown),
         )
 
 
 def hypo_final_check_workflow():
-    """Handle NCBI final check execution."""
+    """Handle the HYPO check."""
 
     with st.container(border=True):
-        st.markdown("### 🔬 NCBI Marker Verification")
+        st.markdown("### 🔬 HYPO Check")
         st.caption(
-            "Verify whether each candidate species actually has the target marker "
-            "in GenBank by BLASTing the original sequences against NCBI."
+            "BLAST each sequence against the GenBank records of its HYPO species."
         )
 
         # Parameter Inputs
         ev_exponent = display_hypo_check_controls()
         current_params = {
             "hypo_check_ev_exponent": ev_exponent,
+            # The search's "Parallel Threads" setting also applies to the check.
+            "num_threads": min(
+                stored_value("hypo_num_threads", HYPO_NUM_THREADS_DEFAULT),
+                BLAST_MAX_THREADS,
+            ),
+            # And so does its "Give up after" setting.
+            "give_up_minutes": stored_value(
+                "hypo_give_up", HYPO_GIVE_UP_MINUTES_DEFAULT
+            ),
         }
         st.divider()
 
         hypo_filter_df = st.session_state.hypo_filter_df
         if hypo_filter_df.empty:
             st.info("No HYPO species to check.")
+            # The step ran and found no hypothetical species.
+            record_empty_step(
+                "hypo_df",
+                "hypo_params",
+                lambda: pipe.empty_hypo_results(st.session_state.extra_df),
+                params=st.session_state.hypo_filter_params,
+            )
             return
         unique_species = hypo_filter_df["scientificName"].nunique()
 
@@ -693,8 +680,9 @@ def hypo_final_check_workflow():
             current_params=current_params,
             job_fn=hypo_check_job,
             job_kwargs={"params": current_params},
-            new_string=f"Ready to check **{unique_species:,}** species against NCBI.",
+            new_string=f"Ready to check **{unique_species:,}** species in GenBank.",
             btn_key="hypo_check_apply",
+            failed_key="hypo_check_failed",
             logs_prefix="hypo_check_",
             threaded=True,
             status_label="🔍 Running NCBI BLAST...",
@@ -703,7 +691,7 @@ def hypo_final_check_workflow():
         # Results
         if mode != "NEW" and st.session_state.hypo_check_df is not None:
             st.divider()
-            st.markdown("#### Verification Results")
+            st.markdown("#### HYPO Check Results")
             hypo_check_display()
 
 
@@ -717,76 +705,47 @@ def render_hypo_metrics():
 
     c1, c2, c3 = st.columns(3)
     c1.metric(
-        "Total Records",
+        "Candidates",
         len(df),
-        help="Total number of validated HYPO records",
+        help="Hypothetical species, counted once per sequence.",
     )
     c2.metric(
-        "Confirmed Species",
+        "Hypothetical Species",
         df["scientificName"].nunique(),
-        help="Unique species validated via the HYPO pipeline",
+        help="Distinct hypothetical species.",
     )
     c3.metric(
-        "Sequences with Confirmed Species",
+        "Sequences",
         df["seq_id"].nunique(),
-        help="Number of initial sequences that have at least one confirmed species via HYPO",
+        help="Sequences with at least one hypothetical species.",
     )
 
 
 def display_hypo_sequence_metrics(seq_df):
-    c1, c2 = st.columns(2)
-    c1.metric(
-        "Number of Records",
-        len(seq_df),
-        help="Number of BOLD sequences validated via NCBI for this sequence ID",
-    )
-    c2.metric(
-        "Confirmed Species",
+    st.metric(
+        "Hypothetical Species",
         seq_df["scientificName"].nunique(),
-        help="Unique species validated via the HYPO pipeline for this sequence ID",
+        help="Hypothetical species of this sequence.",
     )
 
 
 def display_hypo_sequence_table(seq_df):
-    display_df = add_below_mol(
-        seq_df.copy(),
-        st.session_state.mol_df,
-        st.session_state.ncbi_search_df,
-    )
-    if display_df["below_mol"].any():
-        st.caption(":orange[■] Found in NCBI but would not have passed the MOL filter")
+    display_df = with_check_result(seq_df)
+    if legends := check_legends(display_df):
+        st.caption("  \n".join(legends))
+    shown = [
+        "scientificName",
+        "hypo_check_result",
+        "taxonURL",
+        *RANK_COLUMNS,
+        "scientificNameAuthorship",
+    ]
     st.dataframe(
-        styled_or_plain(display_df, highlight_below_mol),
+        styled_or_plain(display_df, highlight_check_result),
         width="stretch",
         hide_index=True,
-        column_order=[
-            "scientificName",
-            "taxonURL",
-            "genus",
-            "specificEpithet",
-            "family",
-            "order",
-            "class",
-            "phylum",
-            "kingdom",
-            "scientificNameAuthorship",
-        ],
-        column_config={
-            "seq_id": None,
-            "dna_sequence": None,
-            "scientificName": COL["scientificName"],
-            "taxonURL": COL["taxonURL"],
-            "family": COL["family"],
-            "genus": COL["genus"],
-            "specificEpithet": COL["specificEpithet"],
-            "scientificNameAuthorship": COL["scientificNameAuthorship"],
-            "taxonID": None,
-            "kingdom": COL["kingdom"],
-            "phylum": COL["phylum"],
-            "class": COL["class"],
-            "order": COL["order"],
-            "below_mol": None,
-        },
+        column_order=shown,
+        column_config=column_config(shown),
     )
 
 
@@ -797,7 +756,7 @@ def display_hypo_sequence():
     df = st.session_state.hypo_df
     seq_df = df[(df["seq_id"] == selected_seq)]
     if seq_df.empty:
-        st.info("No sequences retained for this step.")
+        st.info("No species validated by HYPO for this sequence.")
         return
 
     display_hypo_sequence_metrics(seq_df)
@@ -812,65 +771,34 @@ def display_hypo_summary():
     # All unique proxy species per (seq_id, scientificName)
     proxies = (
         hypo_filter_df.groupby(["seq_id", "scientificName"], observed=False)[
-            "scientificName_hit"
+            "proxy_hit_species"
         ]
         .apply(lambda s: ", ".join(sorted(s.unique())))
-        .reset_index(name="validated_by")
+        .reset_index(name="proxy_hit_species")
     )
 
-    # NCBI check marker status
-    check_cols = ["seq_id", "scientificName", "ncbi_top_identity_percentage"]
-    check_status = hypo_df[[c for c in check_cols if c in hypo_df.columns]].copy()
-    if "ncbi_top_identity_percentage" not in check_status.columns:
-        check_status["ncbi_top_identity_percentage"] = pd.NA
-    check_status["in_ncbi"] = check_status["ncbi_top_identity_percentage"].notna()
-    check_status = add_below_mol(
-        check_status,
-        st.session_state.mol_df,
-        st.session_state.ncbi_search_df,
-    )
+    # The HYPO check's result of each candidate
+    check_status = with_check_result(hypo_df.reindex(columns=CHECK_INPUT_COLUMNS))
 
-    summary = proxies.merge(
-        check_status[
-            [
-                "seq_id",
-                "scientificName",
-                "in_ncbi",
-                "ncbi_top_identity_percentage",
-                "below_mol",
-            ]
-        ],
-        on=["seq_id", "scientificName"],
-        how="left",
-    )
-    summary["in_ncbi"] = summary["in_ncbi"].fillna(False)
-    summary["below_mol"] = summary["below_mol"].fillna(False)
+    summary = proxies.merge(check_status, on=["seq_id", "scientificName"], how="left")
 
-    if summary["below_mol"].any():
-        st.caption(":orange[■] Found in NCBI but would not have passed the MOL filter")
+    if legends := check_legends(summary):
+        st.caption("  \n".join(legends))
 
+    shown = [
+        "seq_id",
+        "scientificName",
+        "proxy_hit_species",
+        "hypo_check_result",
+        "hypo_check_identity",
+        "hypo_check_query_cover",
+    ]
     st.dataframe(
-        styled_or_plain(summary, highlight_below_mol),
+        styled_or_plain(summary, highlight_check_result),
         width="stretch",
         hide_index=True,
-        column_config={
-            "seq_id": COL["seq_id"],
-            "scientificName": COL["scientificName"],
-            "validated_by": st.column_config.TextColumn(
-                "Validated By (CO1 proxy)",
-                help="BOLD proxy species whose CO1 sequence confirmed this candidate.",
-            ),
-            "in_ncbi": st.column_config.CheckboxColumn(
-                "In NCBI",
-                help="Whether the species was also found in the NCBI marker check.",
-            ),
-            "ncbi_top_identity_percentage": st.column_config.NumberColumn(
-                "NCBI Identity (%)",
-                format="%.2f",
-                help="Identity of the best NCBI hit for the target marker.",
-            ),
-            "below_mol": None,
-        },
+        column_order=shown,
+        column_config=column_config(shown),
     )
 
 
@@ -882,61 +810,33 @@ def display_hypo_results():
         render_hypo_metrics()
         display_hypo_summary()
 
-        with st.expander(
-            f"View full HYPO list ({len(st.session_state.hypo_df)} records)",
-            expanded=False,
-        ):
-            st.dataframe(
-                st.session_state.hypo_df,
-                width="stretch",
-                hide_index=True,
-                column_order=[
+        with lazy_expander(
+            f"View full HYPO list ({species_for_sequences(st.session_state.hypo_df)})",
+            key="hypo_full_list",
+        ) as is_open:
+            if is_open:
+                shown = [
                     "seq_id",
                     "scientificName",
                     "taxonURL",
-                    "scientificName_hit",
-                    "identity_percentage",
-                    "query_cover",
-                    "ncbi_top_identity_percentage",
-                    "ncbi_top_query_cover",
+                    "proxy_hit_species",
+                    "proxy_identity",
+                    "proxy_query_cover",
+                    "hypo_check_identity",
+                    "hypo_check_query_cover",
                     "family",
                     "order",
                     "class",
                     "phylum",
                     "kingdom",
-                ],
-                column_config={
-                    "seq_id": COL["seq_id"],
-                    "scientificName": COL["scientificName"],
-                    "taxonURL": COL["taxonURL"],
-                    "scientificName_hit": st.column_config.TextColumn(
-                        "Validated By (CO1 proxy)"
-                    ),
-                    "identity_percentage": st.column_config.NumberColumn(
-                        "Proxy Identity (%)",
-                        format="%.2f",
-                        help="BLAST identity of the CO1 proxy hit.",
-                    ),
-                    "query_cover": st.column_config.NumberColumn(
-                        "Proxy Query Cover (%)",
-                        format="%.2f",
-                        help="Query coverage of the CO1 proxy hit.",
-                    ),
-                    "ncbi_top_identity_percentage": st.column_config.NumberColumn(
-                        "NCBI Identity (%)",
-                        format="%.2f",
-                    ),
-                    "ncbi_top_query_cover": st.column_config.NumberColumn(
-                        "NCBI Query Cover (%)",
-                        format="%.2f",
-                    ),
-                    "family": COL["family"],
-                    "order": COL["order"],
-                    "class": COL["class"],
-                    "phylum": COL["phylum"],
-                    "kingdom": COL["kingdom"],
-                },
-            )
+                ]
+                st.dataframe(
+                    st.session_state.hypo_df,
+                    width="stretch",
+                    hide_index=True,
+                    column_order=shown,
+                    column_config=column_config(shown),
+                )
 
     with st.container(border=True):
         st.markdown("### 🔬 HYPO List per (M)OTU/ASV")
@@ -949,14 +849,15 @@ def display_hypo_results():
 
 
 def hypo_analysis():
-    """Main HYPO analysis workflow — hypothetical species validation."""
+    """Main HYPO analysis workflow: hypothetical species validation."""
 
-    st.header("🔗 HYPO: BOLD/NCBI BLAST Search")
+    st.header("🔗 HYPO: Hypothetical Species")
     st.caption(
-        "Step 5: BOLD sequences from the EXTRA list are BLASTed against the NCBI database "
-        "to check whether each species can be confirmed for its associated input sequence. "
-        "A species is validated only if the BLAST hit matches one already linked to that sequence ID "
-        "from the earlier pipeline steps (MOL → TAX → GEO)."
+        "Step 5: The BOLD sequences of the EXTRA list (CO1 proxies) are BLASTed "
+        "against GenBank. A candidate is a hypothetical species when its proxy hits "
+        "a MOL species of the same sequence (one that passed the MOL filter, in the "
+        "area or not) at the proxy identity or above. The HYPO check then looks for "
+        "the candidate's own target marker in GenBank."
     )
     st.divider()
 
@@ -969,32 +870,32 @@ def hypo_analysis():
 
     # Early exit: no BOLD sequences to validate
     if st.session_state.extra_df.empty:
-        st.info(
-            "ℹ️ **No BOLD sequences to validate.**\n\n"
-            "All species were previously validated via NCBI and GBIF in steps 1 to 3."
+        st.info("The EXTRA list is empty: no BOLD sequence to validate.")
+        record_empty_step(
+            "hypo_df",
+            "hypo_params",
+            lambda: pipe.empty_hypo_results(st.session_state.extra_df),
         )
-        st.session_state.hypo_df = pd.DataFrame()
-        st.session_state.hypo_params = None
-        reset_state_after("hypo_df")
         return
 
     # HYPO Data Acquisition
     hypo_search_workflow()
 
     # HYPO Data Filtering
-    if st.session_state.hypo_merge_df is not None:
+    if ready("hypo_merge_df") is not None:
         st.divider()
         hypo_filter_workflow()
 
     # Final NCBI Check
-    if st.session_state.hypo_filter_df is not None:
+    if ready("hypo_filter_df") is not None:
         st.divider()
         hypo_final_check_workflow()
 
     # Final HYPO Results (only after check completes)
-    if st.session_state.hypo_df is not None and not st.session_state.hypo_df.empty:
+    # The HYPO list shows while its failed checks wait; Results waits for them.
+    hypo_df = st.session_state.hypo_df
+    if hypo_df is not None and not hypo_df.empty:
         st.divider()
         display_hypo_results()
-        next_step_button("Open Results ➔", "results")
 
     st.divider()

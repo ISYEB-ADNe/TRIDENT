@@ -1,19 +1,12 @@
-"""
-TRIDENT Streamlit application entry point.
+"""TRIDENT Streamlit application entry point.
 
 Run with: uv run trident  (or: streamlit run src/trident/ui/app.py)
 """
 
-from pathlib import Path
-
 import streamlit as st
 from trident.ui import ui
 from trident.core import config
-from trident.clients.ncbi import reload_ncbi_credentials
 from trident.logging import LOG_LEVELS, get_log_level, set_log_level, setup_logging
-
-# Resolve the logo next to this module so it works from any working directory.
-LOGO = str(Path(__file__).with_name("logo.png"))
 
 # Tab configuration: (Display Name, Session State Key)
 TAB_CONFIG = {
@@ -29,46 +22,47 @@ TAB_CONFIG = {
 
 
 def _app_config():
-    """Settings panel — expander (open if email missing)."""
-    email_from_config = config.get(config.CONTACT_EMAIL)
-    email_is_preset = bool(email_from_config)
+    """Settings panel: an expander, open when the email is missing."""
+    # Pre-filled from a preset (secrets or environment), always editable: the
+    # address typed wins for the session.
+    st.session_state.setdefault(
+        "_settings_email", config.get(config.CONTACT_EMAIL) or ""
+    )
+    email_missing = not config.is_email(st.session_state.get("_settings_email"))
 
-    # Initialize the widget key from preset or stored value
-    if email_is_preset:
-        st.session_state.setdefault("_settings_email", email_from_config)
-    else:
-        st.session_state.setdefault("_settings_email", "")
-
-    email_missing = not email_is_preset and not st.session_state.get("_settings_email")
-
-    label = "Settings" if not email_missing else "⚠️ Settings — contact email required"
+    label = "Settings" if not email_missing else "⚠️ Settings: contact email required"
     with st.expander(label, expanded=email_missing):
         email = st.text_input(
             "Contact email",
             key="_settings_email",
-            disabled=email_is_preset,
             help=(
-                "Sent with every request to NCBI, GBIF, WoRMS and BOLD. "
-                "Required by these services to identify your application. "
-                "Pre-fill via CONTACT_EMAIL in secrets.toml or .env."
+                "Required to start or open an analysis. Sent with every request "
+                "to NCBI, GBIF, WoRMS and BOLD, so they can reach you in case of "
+                "heavy use. "
+                "Pre-fill via CONTACT_EMAIL in .streamlit/secrets.toml."
             ),
         )
-        if not email_is_preset and email:
-            config.set(config.CONTACT_EMAIL, email)
-            reload_ncbi_credentials()
+        # Each BLAST job sets its own email from the session (set_ncbi_email).
+        if config.is_email(email):
+            config.set(config.CONTACT_EMAIL, email.strip())
+        else:
+            # A cleared or mistyped field holds no address, preset or not.
+            config.set(config.CONTACT_EMAIL, "")
+            if email:
+                st.error("Enter a full email address, like name@example.org.")
 
         current_level = get_log_level()
         level = st.selectbox(
             "Execution detail",
             LOG_LEVELS,
             index=LOG_LEVELS.index(current_level) if current_level in LOG_LEVELS else 0,
-            format_func=lambda level: "Standard" if level == "INFO" else "Verbose",
+            format_func=lambda level: ui.LOG_LEVEL_LABELS.get(level, level),
             help=(
-                "Controls how much detail appears in the status boxes "
-                "while a step is running. "
+                "Controls how much detail the steps' logs show, also for the "
+                "lines already logged. "
                 "**Standard** shows progress and key results. "
-                "**Verbose** adds internal details like cache hits, API calls, "
-                "and parameter values — useful for troubleshooting."
+                "**Verbose** adds every item and the details useful to report a "
+                "problem."
             ),
         )
         if level != current_level:
@@ -78,7 +72,7 @@ def _app_config():
 def get_tab_label(tab_id: str) -> str:
     """Builds tab labels with dynamic checkmarks."""
     name, state_key = TAB_CONFIG.get(tab_id, (tab_id, None))
-    is_complete = state_key and st.session_state.get(state_key) is not None
+    is_complete = state_key and ui.ready(state_key) is not None
     return f"{'✅ ' if is_complete else ''}{name}"
 
 
@@ -91,10 +85,10 @@ def main():
     # for large runs (the styled_or_plain fallback still guards extreme cases).
     ui.apply_styler_limit()
 
-    st.set_page_config(layout="wide", page_title="TRIDENT", page_icon=LOGO)
+    st.set_page_config(layout="wide", page_title="TRIDENT", page_icon=ui.logo_png())
     ui.init_session_state()
 
-    st.logo(LOGO, size="large")
+    st.logo(ui.logo_png(), size="large")
 
     st.title("TRIDENT")
     st.caption("Taxonomic Resolution and IDentification using Environmental dNa Traces")
@@ -118,6 +112,21 @@ def main():
         width="stretch",
         label_visibility="collapsed",
     )
+
+    # The control keeps the selected tab by its displayed label: when a step
+    # finishes and its label gains a ✅, the selection is lost on the next rerun
+    # (clicking the active tab also deselects it). Reopen the last tab shown,
+    # with a single rerun: if that does not restore it, show it without looping.
+    if current_tab is None:
+        last_tab = st.session_state.get("last_tab", "start")
+        if not st.session_state.get("tab_restoring"):
+            st.session_state.tab_restoring = True
+            st.session_state.requested_tab = last_tab
+            st.rerun()
+        current_tab = last_tab
+    else:
+        st.session_state.tab_restoring = False
+    st.session_state.last_tab = current_tab
 
     # Tab Content Rendering
     if current_tab == "start":
@@ -159,6 +168,29 @@ def main():
         from trident.ui import dashboard
 
         dashboard.dashboard_main()
+
+    _step_navigation(current_tab)
+
+
+# The tabs of the analysis in order; Parameters is not a step.
+STEP_TABS = [tab for tab in TAB_CONFIG if tab != "parameters"]
+
+
+def _step_navigation(tab_id: str):
+    """Under every step after Start, whatever the tab showed: back to the step
+    before, and on to the next once this one is done (its ✅ in the tab bar).
+    Start offers the next step in its own analysis box."""
+    if tab_id not in STEP_TABS[1:]:
+        return
+    i = STEP_TABS.index(tab_id)
+    back = STEP_TABS[i - 1]
+    after = STEP_TABS[i + 1 : i + 2]
+    state_key = TAB_CONFIG[tab_id][1]
+    done = after and state_key and ui.ready(state_key) is not None
+    ui.step_buttons(
+        back=(f"⬅ {TAB_CONFIG[back][0]}", back),
+        next_=(f"{TAB_CONFIG[after[0]][0]} ➔", after[0]) if done else None,
+    )
 
 
 if __name__ == "__main__":

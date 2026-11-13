@@ -1,6 +1,6 @@
 [project]
 name = "trident"
-version = "0.1.0"
+version = "0.2.0"
 description = "Taxonomic Resolution and IDentification using Environmental dNa Traces"
 readme = "README.md"
 authors = [
@@ -14,11 +14,12 @@ dependencies = [
     "joblib>=1.5.2",
     "loguru>=0.7.3",
     "numpy>=1.26",
-    "pandas>=2.3.2",
-    "plotly>=5.0",
-    "python-dotenv>=1.1.1",
+    "pandas>=3.0",
+    "pillow>=10.0",
+    "plotly>=5.23",
     "requests>=2.32.5",
-    "streamlit>=1.49.0",
+    "streamlit>=1.58.0",
+    "urllib3>=2",
 ]
 
 [project.urls]
@@ -42,9 +43,12 @@ dev = [
     "pre-commit>=4.3.0",
     "pytest>=8.4.1",
     "ruff>=0.12.10",
+    "watchdog>=6.0.0",
 ]
 
 [tool.codespell]
 # Domain false positives: OTU (Operational Taxonomic Unit, as in "(M)OTU/ASV").
 ignore-words-list = "OTU"
-skip = "*.ipynb,uv.lock,*.lock,./results,./data"
+# Paths as codespell walks them: "./x" from the repository root (CI), "x" when
+# given as an argument (codespell src tests).
+skip = "*.ipynb,uv.lock,*.lock,./results,./data,./tests/fixtures,tests/fixtures"

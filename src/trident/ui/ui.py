@@ -1,23 +1,52 @@
-"""
-Streamlit UI components and helpers.
-Contains all Streamlit-specific UI functions that are reusable across the app.
-"""
+"""Streamlit UI components and helpers shared by the tabs."""
 
 import concurrent.futures
+import contextlib
 import functools
+import io
 import logging
 import os
 import queue
 import sqlite3
 import threading
-import time
+import uuid
 from dataclasses import dataclass, field, fields, asdict
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 from loguru import logger
+from PIL import Image
+
+from trident.clients.ncbi import BLAST_SLOW_THREADS
+from trident.core.constants import BLAST_DATABASE
+from trident.core.utils import SETTING_LABELS, format_setting, name_list
+from trident.core import stop
+from trident.core.database import get_connection, table_columns
+from trident.pipelines.names import replace_source_rows, same_species_groups
+from trident.pipelines.results_pipeline import (
+    CHECK_DIFFERS,
+    CHECK_MATCHES,
+    CHECK_NOTES,
+    CHECK_PARTIAL,
+    CHECK_INPUT_COLUMNS,
+    FAILED_STEPS,
+    add_check_result,
+    lookup_check_results,
+)
+from trident.logging import get_log_level
+from trident.ui.defaults import (
+    BLAST_GIVE_UP_MINUTES_MIN,
+    BLAST_MAX_THREADS,
+    NCBI_ENFORCE_LOW_IDENTITY_DEFAULT,
+    NCBI_GAP_MIN_TOP_DEFAULT,
+    NCBI_GAP_SIZE_DEFAULT,
+    NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT,
+    NCBI_METHOD_DEFAULT,
+    NCBI_QUERY_COVER_DEFAULT,
+)
 
 
 # Suppress Streamlit's thread context warnings (Streamlit uses standard logging internally)
@@ -29,143 +58,324 @@ logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").set
 # SHARED COLUMN CONFIGS
 # -------------------------------------------------------------------
 
+_Text = st.column_config.TextColumn
+_Number = st.column_config.NumberColumn
+_Link = st.column_config.LinkColumn
+_Check = st.column_config.CheckboxColumn
+
+
+def _percent(label: str, help: str) -> st.column_config.NumberColumn:
+    return _Number(label, format="%.2f", help=help)
+
+
+def _count(label: str, help: str) -> st.column_config.NumberColumn:
+    return _Number(label, format="%d", help=help)
+
+
+def _link(label: str) -> st.column_config.LinkColumn:
+    return _Link(label, display_text="🔗 View")
+
+
+# The display settings of every column the app shows, by column name: a tab
+# lists the columns it shows and takes their settings with column_config().
 COL = {
-    "seq_id": st.column_config.TextColumn(
-        "Sequence ID", help="Unique identifier from the FASTA header."
+    # The (M)OTU/ASV
+    "seq_id": _Text(
+        "Sequence ID", help="Identifier of the (M)OTU/ASV, from the FASTA header."
     ),
-    "dna_sequence": st.column_config.TextColumn(
-        "DNA Sequence", help="Raw genetic sequence (A, T, C, G)."
-    ),
-    "seq_length": st.column_config.NumberColumn(
-        "Nucleotides", format="%d bp", help="Number of base pairs in the sequence."
-    ),
-    "scientificName": st.column_config.TextColumn(
+    "dna_sequence": _Text("DNA Sequence", help="The (M)OTU/ASV sequence."),
+    "seq_length": _count("Length (bp)", "Length of the sequence in base pairs."),
+    # Taxonomy (Darwin Core)
+    "scientificName": _Text(
         "Scientific Name",
+        help="Species name: as NCBI gives it in the MOL step, the WoRMS "
+        "accepted name from TAX on.",
     ),
-    "verbatimIdentification": st.column_config.TextColumn(
+    "kingdom": _Text("Kingdom"),
+    "phylum": _Text("Phylum"),
+    "class": _Text("Class"),
+    "order": _Text("Order"),
+    "family": _Text("Family"),
+    "genus": _Text("Genus"),
+    "specificEpithet": _Text("Epithet", help="Species epithet."),
+    "scientificNameAuthorship": _Text(
+        "Authorship",
+        help="Author and year of the name, as WoRMS gives them; in parentheses "
+        "when the species is no longer in the genus it was described in.",
+    ),
+    "taxonRank": _Text("Rank", help="Taxonomic rank of the species."),
+    "taxonID": _Text(
+        "Taxon ID", help="Identifier of the taxon in the taxonomy database."
+    ),
+    "taxonID_db": _Text("Taxon DB", help="Taxonomy database of the taxon ID."),
+    "taxonURL": _link("WoRMS Link"),
+    "genusID": _count(
+        "WoRMS Genus ID", "WoRMS ID of the genus the species was listed under."
+    ),
+    "ncbi_synonyms": _Text(
         "NCBI synonym",
-        help="NCBI/BLAST name(s) for this species that differ from the WoRMS-accepted name (synonyms/misspellings). Blank when NCBI already used the accepted name.",
+        help="Names NCBI uses for this species that differ from its WoRMS name "
+        "(synonyms or spelling variants).",
     ),
-    "identity_percentage": st.column_config.NumberColumn(
+    "same_species_as": _Text(
+        "Possibly same species as",
+        help="Another source (in brackets) counts these species as one. WoRMS "
+        "may keep one species under two names, or the sources may disagree. "
+        "The names are kept and counted apart.",
+    ),
+    # BLAST hits (MOL search and list, HYPO check)
+    "identity_percentage": _percent(
         "Identity (%)",
-        format="%.2f",
-        help="Percentage of matching bases in the alignment.",
+        "Percentage of matching bases in the best alignment with the GenBank record.",
     ),
-    "query_cover": st.column_config.NumberColumn(
-        "Query Coverage (%)",
-        format="%.2f",
-        help="Percentage of the query sequence covered by the hit.",
+    "query_cover": _percent(
+        "Query Cover (%)",
+        "Percentage of the query sequence covered by the best alignment with the "
+        "GenBank record.",
     ),
-    "hit_url": st.column_config.LinkColumn(
-        "NCBI Link",
-        display_text="🔗 View",
+    "hit_url": _link("NCBI Link"),
+    "hit_def": _Text("Hit Definition", help="Title of the GenBank record."),
+    "ncbi_taxid": _count("NCBI Taxon ID", "NCBI taxonomy ID of the hit's species."),
+    "align_length": _count(
+        "Alignment Length", "Length of the aligned region in base pairs."
     ),
-    "ncbi_top_hit_url": st.column_config.LinkColumn(
-        "NCBI Link",
-        display_text="🔗 View",
+    "identities": _count("Identities", "Number of identical bases in the alignment."),
+    "gaps": _count("Gaps", "Number of gaps introduced in the alignment."),
+    "query_start": _count(
+        "Query Start", "Start position of the alignment on the query sequence."
     ),
-    "hit_def": st.column_config.TextColumn(
-        "Hit Definition",
+    "query_end": _count(
+        "Query End", "End position of the alignment on the query sequence."
     ),
-    "hit_count": st.column_config.NumberColumn(
-        "Hit Count", format="%d", help="Total number of hits found for this species."
+    "filter_method": _Text(
+        "Filter Method",
+        help="How the MOL filter kept the hits of the sequence: above a "
+        "barcoding gap, or within a similarity range of the best hit.",
     ),
-    "top_identity": st.column_config.NumberColumn(
-        "Top Identity (%)",
-        format="%.2f",
-        help="Highest identity percentage found for this sequence.",
+    # MOL summaries
+    "n_blast_hits": _count("BLAST Hits", "Hits NCBI BLAST returned for this sequence."),
+    "max_identity": _percent("Max Identity (%)", "Highest identity among the hits."),
+    "min_identity": _percent("Min Identity (%)", "Lowest identity among the hits."),
+    "identity_range": _percent(
+        "Identity Range (%)", "Spread between the highest and lowest identity."
     ),
-    "hits_count": st.column_config.NumberColumn(
-        "Hits", format="%d", help="Total number of hits for this sequence."
+    "n_hits": _count("Hits", "Number of hits."),
+    "n_species": _count("Species", "Number of species."),
+    "top_identity": _percent(
+        "Top Identity (%)", "Highest identity found for this sequence."
     ),
-    "species_count": st.column_config.NumberColumn(
-        "Species", format="%d", help="Total number of unique species for this sequence."
+    # Best MOL hit of a species (TAX on)
+    "mol_identity": _percent(
+        "MOL Identity (%)", "Identity of the sequence's best MOL hit on this species."
     ),
-    "filter_method": st.column_config.TextColumn("Filter Method"),
-    "genus": st.column_config.TextColumn("Genus"),
-    "specificEpithet": st.column_config.TextColumn("Epithet"),
-    "align_length": st.column_config.NumberColumn(
-        "Alignment Length",
-        format="%d",
-        help="Length of the aligned region in base pairs.",
+    "mol_query_cover": _percent("MOL Query Cover (%)", "Query cover of that hit."),
+    "mol_hit_url": _link("NCBI Link"),
+    "in_mol": _Check("In MOL", help="The species is a MOL species of this sequence."),
+    # TAX
+    "n_mol_species": _count(
+        "MOL Species", "Species of the sequence's MOL list (by their WoRMS name)."
     ),
-    "identities": st.column_config.NumberColumn(
-        "Identities", format="%d", help="Number of identical bases in the alignment."
+    "n_tax_species": _count("TAX Species", "Species of the sequence's TAX list."),
+    "n_both": _count("In Both", "Species in both the MOL and the TAX lists."),
+    "n_added": _count("Added", "Species added by TAX."),
+    "accepted_name": _Text(
+        "WoRMS Accepted Name",
+        help="WoRMS lists the MOL name as a synonym of this name, or links them "
+        "through the NCBI taxid.",
     ),
-    "gaps": st.column_config.NumberColumn(
-        "Gaps", format="%d", help="Number of gaps introduced in the alignment."
+    "note": _Text(
+        "Why",
+        help="Empty: WoRMS has no record of the name. Otherwise WoRMS has "
+        "records but none gives one accepted species, so the name is kept as "
+        "NCBI gives it.",
     ),
-    "query_start": st.column_config.NumberColumn(
-        "Query Start",
-        format="%d",
-        help="Start position of the alignment on the query sequence.",
+    "genus_in_tax": _Check(
+        "Genus in TAX",
+        help="The genus of this name is in the TAX list: its species are "
+        "candidates for the sequence anyway.",
     ),
-    "query_end": st.column_config.NumberColumn(
-        "Query End",
-        format="%d",
-        help="End position of the alignment on the query sequence.",
+    "mol_species": _Text(
+        "MOL Species in It", help="The MOL species that belong to this genus."
     ),
-    "mol_top_identity_percentage": st.column_config.NumberColumn(
-        "MOL Identity (%)",
-        format="%.2f",
-        help="Identity percentage of the best NCBI hit for this species in the MOL step.",
+    "sequences": _Text(
+        "Kept for Sequences",
+        help="Sequences whose TAX list keeps this genus, out of the sequences "
+        "with this genus name.",
     ),
-    "mol_top_query_cover": st.column_config.NumberColumn(
-        "MOL Query Coverage (%)",
-        format="%.2f",
-        help="Query coverage of the best NCBI hit for this species in the MOL step.",
-    ),
-    "taxonURL": st.column_config.LinkColumn("WoRMS Link", display_text="🔗 View"),
-    "scientificNameAuthorship": st.column_config.TextColumn("Authorship"),
-    "family": st.column_config.TextColumn("Family"),
-    "kingdom": st.column_config.TextColumn("Kingdom"),
-    "phylum": st.column_config.TextColumn("Phylum"),
-    "class": st.column_config.TextColumn("Class"),
-    "order": st.column_config.TextColumn("Order"),
-    "taxonRank": st.column_config.TextColumn(
-        "Rank", help="Taxonomic rank of the species."
-    ),
-    "taxonID": st.column_config.NumberColumn(
-        "Taxon ID",
-        format="%d",
-        help="Unique identifier in the source taxonomy database.",
-    ),
-    "taxonID_db": st.column_config.TextColumn(
-        "Taxon DB", help="Source taxonomy database for the taxon ID."
-    ),
-    "bold_seq_url": st.column_config.LinkColumn("BOLD Link", display_text="🔗 View"),
-    "bold_dna_sequence": st.column_config.TextColumn(
-        "BOLD DNA Sequence", width="large"
-    ),
-    "gbif_taxonURL": st.column_config.LinkColumn("GBIF Link", display_text="🔗 View"),
-    "occurrences": st.column_config.NumberColumn(
-        "Occurrences",
-        format="%d",
-        help="Number of GBIF occurrence records for this species in the search area.",
-    ),
-    "gbif_occurrences": st.column_config.NumberColumn(
+    # GEO
+    "geo_url": _link("GBIF Link"),
+    "geo_occurrences": _count(
         "GBIF Occurrences",
-        format="%d",
-        help="Number of GBIF occurrence records for this species in the selected filtering area.",
+        "Number of GBIF occurrence records with coordinates of this species in "
+        "the search area "
+        "(the filtering area in the GEO list).",
     ),
-    "gbif_extent": st.column_config.TextColumn(
-        "Extent", help="Geographic search extent used for this record."
+    "geo_extent": _Text("Extent", help="Search area of the occurrence count."),
+    "gbif_scientificName": _Text(
+        "Name in GBIF",
+        help="The name GBIF gives the species, when it differs from WoRMS; a "
+        "subspecies name when GBIF holds it as one (see the GBIF match log).",
     ),
-    "total_records": st.column_config.NumberColumn(
-        "BOLD Records", format="%d", help="Total BOLD sequences found."
+    # EXTRA
+    "proxy_id": _Text("BOLD Process ID", help="The BOLD record of the proxy."),
+    "proxy_sequence": _Text(
+        "BOLD DNA Sequence", width="large", help="The proxy's CO1 sequence."
     ),
-    "species_queried": st.column_config.NumberColumn(
-        "Species Queried",
-        format="%d",
-        help="Total species queried in BOLD for this sequence.",
+    "proxy_url": _link("BOLD Link"),
+    "bold_scientificName": _Text(
+        "Name in BOLD",
+        help="The name searched in BOLD, when the species was found under "
+        "another of its names (NCBI or GBIF).",
     ),
-    "species_found": st.column_config.NumberColumn(
-        "Species Found", format="%d", help="Species with at least one BOLD record."
+    "bold_outcome": _Text("Why", help="Why the species has no usable BOLD sequence."),
+    "bold_url": _link("BOLD Link"),
+    "n_bold_sequences": _count(
+        "BOLD Sequences", "BOLD sequences kept by the filter, as proxies."
     ),
-    "species_missing": st.column_config.NumberColumn(
-        "Species Missing", format="%d", help="Species queried but not found in BOLD."
+    "n_species_queried": _count(
+        "Species Queried", "Species of this sequence searched in BOLD."
+    ),
+    "n_species_found": _count(
+        "Species Found", "Species with at least one usable BOLD sequence."
+    ),
+    "n_species_missing": _count(
+        "Species Missing", "Species without a usable BOLD sequence."
+    ),
+    # HYPO
+    "proxy_hit_species": _Text(
+        "MOL Species Hit",
+        help="The MOL species of this sequence that the BLAST of the candidate's "
+        "BOLD CO1 sequence hit.",
+    ),
+    "proxy_identity": _percent(
+        "Proxy Identity (%)", "Identity of the CO1 proxy to that MOL species."
+    ),
+    "proxy_query_cover": _percent("Proxy Query Cover (%)", "Query cover of that hit."),
+    "proxy_hit_def": _Text("Hit Definition", help="Title of the GenBank record."),
+    "proxy_hit_url": _link("NCBI Link"),
+    "hit_found": _Check(
+        "Hit Found", help="The check found the target marker of the species in GenBank."
+    ),
+    "scientificName_NCBI": _Text(
+        "Check Hit Species", help="The GenBank species of the check hit."
+    ),
+    "hypo_check_identity": _percent(
+        "Check Identity (%)",
+        "Identity of the best hit the HYPO check found for the target marker "
+        "(empty: marker not found in GenBank).",
+    ),
+    "hypo_check_query_cover": _percent(
+        "Check Query Cover (%)", "Query cover of that hit."
+    ),
+    "hypo_check_hit_url": _link("NCBI Link"),
+    "hypo_check_result": _Text(
+        "HYPO Check",
+        help=" ".join(
+            f"{result[0].upper()}{result[1:]}: {note}."
+            for result, note in CHECK_NOTES.items()
+        )
+        + " The MOL filter is the same as in MOL for this sequence.",
+    ),
+    # Results
+    "validation_step": _Text(
+        "Validation",
+        help="MOL+GEO: a MOL species of the sequence that GEO kept. HYPO: a "
+        "hypothetical species, validated through its BOLD CO1 proxy.",
+    ),
+    "via_mol_identity": _percent(
+        "Via Identity (%)",
+        "HYPO: this sequence's best MOL identity to the MOL species its proxy hit.",
+    ),
+    "keep": _Check("Keep", help="Uncheck to exclude the candidate from this sequence."),
+    "best_identity": _percent(
+        "Best Identity (%)",
+        "Best NCBI identity among the sequence's candidates: the MOL hit, or "
+        "the HYPO check hit of a HYPO species (hits covering at least the MOL "
+        "query cover). A HYPO species without check hit counts with the MOL "
+        "hit of the species its CO1 proxy hit.",
+    ),
+    "paths": _Text(
+        "Validation",
+        help="The validation of the sequence's candidates (see Validation).",
+    ),
+    # Species flow table
+    "species": _Text("Species"),
+    "origin": _Text("Origin", help="NCBI hit, or added by TAX."),
+    "outcome": _Text("Ended At", help="The step where the name ended."),
+    "identity": _percent(
+        "Best NCBI Identity (%)",
+        "Best identity among this sequence's NCBI hits on the name.",
     ),
 }
+
+
+# The classification columns the tables show, from the genus up.
+RANK_COLUMNS = [
+    "genus",
+    "specificEpithet",
+    "family",
+    "order",
+    "class",
+    "phylum",
+    "kingdom",
+]
+
+
+def column_config(columns, **overrides) -> dict:
+    """The display settings of *columns* (from COL), with *overrides* for a
+    table that labels a column otherwise. A column without settings raises:
+    Streamlit would hide it."""
+    return {col: overrides[col] if col in overrides else COL[col] for col in columns}
+
+
+# The names the Settings panel gives the log levels.
+LOG_LEVEL_LABELS = {"INFO": "Standard", "DEBUG": "Verbose"}
+
+
+def shown_log_lines(entries: list, level: str) -> list[str]:
+    """The lines of a step's log, kept as (level, line), shown at *level* (the
+    chosen detail, read at each display: changing it also shows or hides the
+    lines already logged). A plain line, kept before levels were, is shown."""
+    threshold = logger.level(level).no
+    return [
+        entry[1] if isinstance(entry, tuple) else entry
+        for entry in entries
+        if not isinstance(entry, tuple) or logger.level(entry[0]).no >= threshold
+    ]
+
+
+# Help text for the NCBI BLAST settings shared by the MOL and HYPO tabs.
+BLAST_HELP = {
+    "max_hits": (
+        "Maximum number of GenBank records returned per query sequence; "
+        "lower-scoring hits beyond this limit are not retrieved."
+    ),
+    "ev_exponent": (
+        "Maximum E-value, as 10^-x: only hits at or below this "
+        "threshold are kept. A larger x is stricter."
+    ),
+    "batch_size": (
+        "Number of query sequences sent together in one NCBI BLAST search. NCBI "
+        "asks for fewer, larger searches: above about 100 searches a day it moves "
+        "a user to a slower queue. A search too heavy for NCBI is split into "
+        "smaller ones; if many batches fail, lower the batch size."
+    ),
+    "num_threads": (
+        "Number of BLAST searches run at NCBI at the same time. More can speed up "
+        "large inputs, but NCBI throttles heavy use, so too many can make batches "
+        "fail. A search left waiting at NCBI makes way for another one, up to "
+        f"{BLAST_SLOW_THREADS} more."
+    ),
+    "give_up": (
+        "Minutes a BLAST search may wait at NCBI. NCBI sometimes leaves a search "
+        "waiting for hours: past this time, it is sent again once, then counted "
+        "as failed (re-run the step to retry it). Most searches take 1 to 3 "
+        "min; raise it if large batches keep failing this way."
+    ),
+}
+
+# Shown above the BLAST settings: the database is fixed, not a setting.
+BLAST_DATABASE_CAPTION = f"Searches NCBI's {BLAST_DATABASE} database (Core Nucleotide)."
 
 # --------------------------------------------------------------------
 # SESSION STATE MANAGEMENT
@@ -174,48 +384,66 @@ COL = {
 
 @dataclass
 class AppState:
+    """Session state of an analysis, in pipeline order: reset_state_after
+    resets the fields after a given one, so the order matters."""
+
     fasta_uploader_key: int = 0
     analysis_name: str = ""
     db_path: str = ""
     sequences_id: list[str] | None = None
     sequences_df: "pd.DataFrame | None" = None
+    # The failed items the user chose to go on without, by failed-list field
+    # (see held_steps): kept across step resets, cleared with the analysis.
+    continued_failures: dict[str, list] = field(default_factory=dict)
 
-    ncbi_logs: list[str] = field(default_factory=list)
+    # The *_logs fields hold each step's log lines, written and read by
+    # prefix (StreamlitLogSink, display_run_button).
+    ncbi_logs: list[tuple[str, str]] = field(default_factory=list)
     ncbi_search_flag: bool = False
     ncbi_search_params: dict[str, Any] = field(default_factory=dict)
+    ncbi_search_failed: list[str] = field(default_factory=list)
     ncbi_search_df: "pd.DataFrame | None" = None
     ncbi_filter_flag: bool = False
     mol_params: dict[str, Any] = field(default_factory=dict)
-    mol_species: list[str] = field(default_factory=list)
     mol_summary_df: "pd.DataFrame | None" = None
     mol_df: "pd.DataFrame | None" = None
 
-    worms_logs: list[str] = field(default_factory=list)
+    worms_logs: list[tuple[str, str]] = field(default_factory=list)
     worms_search_flag: bool = False
     tax_params: dict[str, Any] = field(default_factory=dict)
     tax_species: list[str] = field(default_factory=list)
     tax_summary_df: "pd.DataFrame | None" = None
+    tax_failed: list[str] = field(default_factory=list)
+    tax_homonyms: "pd.DataFrame | None" = None
+    tax_mol_rejected: "pd.DataFrame | None" = None
+    name_table: "pd.DataFrame | None" = None
     tax_df: "pd.DataFrame | None" = None
 
-    gbif_logs: list[str] = field(default_factory=list)
+    gbif_logs: list[tuple[str, str]] = field(default_factory=list)
     gbif_search_flag: bool = False
     gbif_search_params: dict[str, Any] = field(default_factory=dict)
+    gbif_search_failed: list[str] = field(default_factory=list)
     gbif_search_df: "pd.DataFrame | None" = None
     gbif_filter_flag: bool = False
-    gbif_filter_df: "pd.DataFrame | None" = None
     geo_params: dict[str, Any] = field(default_factory=dict)
-    geo_species: list[str] = field(default_factory=list)
     geo_and_mol_species: list[str] = field(default_factory=list)
     geo_summary_df: "pd.DataFrame | None" = None
     geo_df: "pd.DataFrame | None" = None
 
-    bold_logs: list[str] = field(default_factory=list)
+    bold_logs: list[tuple[str, str]] = field(default_factory=list)
     bold_search_flag: bool = False
     bold_search_params: dict[str, Any] = field(default_factory=dict)
-    bold_input_species: list[str] = field(default_factory=list)
+    # None until computed (an empty list is a computed result).
+    bold_input_species: list[str] | None = None
+    # pipe.needs_proxy of the GEO list (see proxy_mask in extra.py).
+    bold_proxy_mask: "pd.Series | None" = None
     bold_missing_species: list[str] = field(default_factory=list)
-    bold_search_df: "pd.DataFrame | None" = None
-    bold_filter_logs: list[str] = field(default_factory=list)
+    bold_search_failed: list[str] = field(default_factory=list)
+    # names_source: the name_table rows of this search go with it on a reset.
+    bold_search_df: "pd.DataFrame | None" = field(
+        default=None, metadata={"names_source": "bold"}
+    )
+    bold_filter_logs: list[tuple[str, str]] = field(default_factory=list)
     bold_filter_flag: bool = False
     bold_filter_df: "pd.DataFrame | None" = None
     bold_species: list[str] = field(default_factory=list)
@@ -223,22 +451,33 @@ class AppState:
     extra_params: dict[str, Any] = field(default_factory=dict)
     extra_df: "pd.DataFrame | None" = None
 
-    hypo_logs: list[str] = field(default_factory=list)
+    hypo_logs: list[tuple[str, str]] = field(default_factory=list)
     hypo_search_flag: bool = False
     hypo_merge_params: dict[str, Any] = field(default_factory=dict)
+    # (seq_id, scientificName) candidates, as hypo_check_failed.
+    hypo_search_failed: list[tuple[str, str]] = field(default_factory=list)
     hypo_merge_df: "pd.DataFrame | None" = None
     hypo_filter_flag: bool = False
     hypo_filter_params: dict[str, Any] = field(default_factory=dict)
     hypo_filter_df: "pd.DataFrame | None" = None
-    hypo_check_logs: list[str] = field(default_factory=list)
+    hypo_check_logs: list[tuple[str, str]] = field(default_factory=list)
     hypo_check_flag: bool = False
     hypo_check_params: dict[str, Any] = field(default_factory=dict)
+    hypo_check_failed: list[tuple[str, str]] = field(default_factory=list)
     hypo_check_df: "pd.DataFrame | None" = None
     hypo_check_summary_df: "pd.DataFrame | None" = None
     hypo_params: dict[str, Any] = field(default_factory=dict)
     hypo_df: "pd.DataFrame | None" = None
 
     excluded_results: list[str] = field(default_factory=list)
+    # The keys each bulk button excluded, so a second click restores them.
+    bulk_excluded: dict[str, list[str]] = field(default_factory=dict)
+    # Results' lost-at steps and the tables they came from (see _lost_at in
+    # results.py); any reset drops it, and with it the old tables.
+    lost_at_memo: dict[str, Any] | None = None
+    # The HYPO check's results and what they came from (see
+    # hypo_check_results).
+    check_result_memo: dict[str, Any] | None = None
 
     # reset=False: not a pipeline output, so reset_state_after leaves it intact
     # (it is the cross-tab widget persistence store).
@@ -289,19 +528,91 @@ def coerce_stored_value(value, default):
         return default
 
 
-def persist_value(key: str, default):
-    """Pre-seed a widget key from the persistent override store.
+# Widgets whose first argument is their options (st.*, or a container's,
+# e.g. col.selectbox): a seed must be one of them.
+_OPTION_WIDGETS = {"selectbox", "radio", "segmented_control", "select_slider", "pills"}
 
-    Call BEFORE creating the widget. Only acts when the key is absent
-    from session_state (e.g. after a tab switch removed it). When the
-    widget is already on screen, the key exists and this is a no-op.
+
+def setting_widget(
+    widget: Callable,
+    key: str,
+    default,
+    *args,
+    applied: dict | None = None,
+    caption: bool = True,
+    shown: Callable | None = None,
+    label: str | None = None,
+    **kwargs,
+):
+    """A step setting: ``widget(label, *args, key=key, **kwargs)`` (e.g.
+    ``st.slider``), labelled ``SETTING_LABELS[key]`` unless *label*.
+
+    Its value is remembered across tabs (``save_widget``). When the widget is
+    not on screen yet, it starts at the value last set in it, else at the value
+    the step's results used (*applied*, the params the step returned), else at
+    *default*, as the type of *default* (``coerce_stored_value``). An option
+    widget (``_OPTION_WIDGETS``) skips a value it does not offer, matched by
+    its text ("250" is 250, "global" stays "global"). Once the step has run
+    (its params hold *key*), a caption gives the value the results used
+    ("Active in results"), formatted by *shown* or ``format_setting``;
+    *caption* False leaves it out. Returns the widget's value.
     """
+    applied = applied or {}
     if key not in st.session_state:
         overrides = st.session_state._widget_overrides
-        if key in overrides:
-            st.session_state[key] = coerce_stored_value(overrides[key], default)
+        candidates = [overrides[key]] if key in overrides else []
+        if applied.get(key) is not None:
+            candidates.append(applied[key])
+        if getattr(widget, "__name__", "") in _OPTION_WIDGETS:
+            offered = {
+                str(c): c for c in kwargs.get("options", args[0] if args else [])
+            }
+            seed = next(
+                (offered[str(v)] for v in candidates if str(v) in offered), default
+            )
         else:
-            st.session_state[key] = default
+            seed = (
+                coerce_stored_value(candidates[0], default) if candidates else default
+            )
+        st.session_state[key] = seed
+    value = widget(label or SETTING_LABELS[key], *args, key=key, **kwargs)
+    save_widget(key)
+    if caption and key in applied:
+        used = applied[key]
+        active = shown(used) if shown else format_setting(used, key)
+        st.caption(f"Active in results: **{active}**")
+    return value
+
+
+def style_slider(key: str, label: str, default, *args, **kwargs):
+    """A display slider (plot or map style): kept across tabs, no caption."""
+    return setting_widget(
+        st.slider, key, default, *args, label=label, caption=False, **kwargs
+    )
+
+
+def ev_exponent_widget(key: str, default: int, high: int, applied: dict):
+    """The E-value exponent of a BLAST search (x in 10^-x), with the E-value
+    it stands for in the caption."""
+    return setting_widget(
+        st.number_input,
+        key,
+        default,
+        0,
+        high,
+        applied=applied,
+        label=f"{SETTING_LABELS[key]} ($10^{{-x}}$)",
+        shown=lambda v: f"{format_setting(v)} (E-value: $10^{{-{format_setting(v)}}}$)",
+        help=BLAST_HELP["ev_exponent"],
+    )
+
+
+def stored_value(key: str, default):
+    """The value last set in widget *key* (saved by ``save_widget``) with the
+    type of *default*, or *default*; also read while the widget is not on
+    screen."""
+    overrides = st.session_state._widget_overrides
+    return coerce_stored_value(overrides[key], default) if key in overrides else default
 
 
 def save_widget(key: str):
@@ -310,6 +621,64 @@ def save_widget(key: str):
     Call AFTER creating the widget.
     """
     st.session_state._widget_overrides[key] = st.session_state[key]
+
+
+def blast_speed_settings(prefix: str, batch_size: int, threads: int, give_up: int):
+    """The "Advanced Search Settings" expander of a BLAST search (MOL, HYPO).
+
+    Widgets ``{prefix}_batch_size``, ``{prefix}_num_threads`` and
+    ``{prefix}_give_up``, seeded with the given defaults. Returns the batch
+    size, the parallel threads and the minutes before giving up.
+    """
+
+    def speed_input(name, label, low, high, default):
+        return setting_widget(
+            st.number_input,
+            f"{prefix}_{name}",
+            default,
+            low,
+            high,
+            label=label,
+            help=BLAST_HELP[name],
+        )
+
+    with st.expander("🛠️ Advanced Search Settings", expanded=False):
+        st.markdown(
+            "These settings affect processing speed but not biological results, "
+            "and should be left at default values most of the time."
+        )
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            batch_size = speed_input("batch_size", "Batch size", 1, 100, batch_size)
+        with col2:
+            threads = speed_input(
+                "num_threads", "Parallel threads", 1, BLAST_MAX_THREADS, threads
+            )
+        with col3:
+            # No upper limit: a job waiting longer is still polled.
+            give_up = speed_input(
+                "give_up",
+                "Give up after (min)",
+                BLAST_GIVE_UP_MINUTES_MIN,
+                None,
+                give_up,
+            )
+    return batch_size, threads, give_up
+
+
+def count_progress(progress_bar, progress_info: dict, text: Callable[[int, int], str]):
+    """An ``on_poll`` for ``run_with_progress`` drawing a count job's progress.
+
+    *progress_info* holds the job's ``current`` and ``total``; *text* turns
+    them into the bar's text. Nothing is drawn while the total is unknown (0).
+    """
+
+    def poll():
+        curr, total = progress_info["current"], progress_info["total"]
+        if total > 0:
+            progress_bar.progress(min(curr / total, 1.0), text=text(curr, total))
+
+    return poll
 
 
 def reset_state_after(key_name: str):
@@ -333,6 +702,18 @@ def reset_state_after(key_name: str):
         if name in no_reset:
             continue
         st.session_state[name] = default[name]
+        # A step reset forgets that the user went on without its failures.
+        st.session_state.get("continued_failures", {}).pop(name, None)
+        if name.endswith("_flag"):
+            drop_jobs(name)
+    for f in flds[start_idx:]:
+        source = f.metadata.get("names_source")
+        if source and st.session_state.get("name_table") is not None:
+            st.session_state.name_table = replace_source_rows(
+                st.session_state.name_table,
+                st.session_state.name_table.iloc[:0],
+                source,
+            )
 
 
 # --------------------------------------------------------------------
@@ -343,6 +724,8 @@ def reset_state_after(key_name: str):
 def get_analysis_status(
     df_name: str, params_name: str, current_params: dict, keys: list[str] = None
 ) -> str:
+    """NEW when the step has no result, IDENTICAL when *current_params* equal
+    the ones of its result (only *keys*, if given), CHANGED otherwise."""
     stored_df = st.session_state.get(df_name)
     stored_params = st.session_state.get(params_name)
 
@@ -362,15 +745,27 @@ def get_analysis_status(
     return "IDENTICAL" if is_identical else "CHANGED"
 
 
+# The choices next to a step's run button: reuse what is saved for the
+# settings, also ask again for the items saved without a result, or ask for
+# everything again.
+REUSE_SAVED = "Reuse saved results"
+RETRY_EMPTY = "Ask again for empty results"
+ERASE_SAVED = "Erase saved results"
+CACHE_MODES = [REUSE_SAVED, RETRY_EMPTY, ERASE_SAVED]
+
+
 def display_run_button(
-    mode: str, new_string: str, btn_key: str, logs_prefix: str = ""
+    mode: str, new_string: str, btn_key: str, logs_prefix: str = "", starts: int = 0
 ) -> tuple[bool, str]:
     """Renders the standardized status message and button.
 
+    The button's key is *btn_key* with the number of times the step was
+    started (*starts*): a click on the button still on screen from before the
+    step started (a double click) has the old key, and Streamlit ignores it
+    instead of starting the step again.
+
     Returns:
-        Tuple of (clicked, cache_mode) where cache_mode is the selected cache
-        option string ("Use cached results" / "Retry empty results" /
-        "Erase cached results").
+        Tuple of (clicked, cache_mode), cache_mode one of CACHE_MODES.
     """
 
     # Initialize variables with defaults for the button
@@ -382,44 +777,55 @@ def display_run_button(
         st.info(new_string)
         btn_label = "▶️ Start Analysis"
         btn_type = "primary"
-        btn_help = "Begin fresh analysis"
+        btn_help = (
+            "Runs this step. Results already saved in this analysis for the "
+            "same settings are read from it, unless you choose Erase."
+        )
 
     elif mode == "IDENTICAL":
         if logs_prefix:
-            with st.expander(
-                "✅ Analysis Run Complete, View Execution Logs", expanded=False
-            ):
-                if st.session_state.get(f"{logs_prefix}logs"):
-                    st.text("\n".join(st.session_state[f"{logs_prefix}logs"]))
+            with st.expander("✅ Step done: view its log", expanded=False):
+                entries = st.session_state.get(f"{logs_prefix}logs") or []
+                lines = shown_log_lines(entries, get_log_level())
+                if lines:
+                    st.text("\n".join(lines))
                 else:
                     st.info("No logs available for this session.")
         # Define button for re-running even if identical
         btn_label = "🔄 Re-run with Same Settings"
         btn_type = "secondary"
-        btn_help = "Re-run using cache — only retries failed or missing items"
+        btn_help = (
+            "Reuses the saved results and asks only for the failed or missing ones"
+        )
 
     else:  # This handles "CHANGED"
         st.warning("⚠️ Settings have changed since the last run.")
         btn_label = "🚀 Run with New Settings"
         btn_type = "primary"
-        btn_help = "Overwrite previous results with new parameters"
+        btn_help = "Run with the new settings"
 
     c1, c2 = st.columns([2, 1])
     with c1:
         clicked = st.button(
-            btn_label, type=btn_type, help=btn_help, width="stretch", key=btn_key
+            btn_label,
+            type=btn_type,
+            help=btn_help,
+            width="stretch",
+            key=f"{btn_key}_{starts}",
         )
     with c2:
         cache_mode = st.selectbox(
-            "Cache",
-            options=[
-                "Use cached results",
-                "Retry empty results",
-                "Erase cached results",
-            ],
+            "Saved results",
+            options=CACHE_MODES,
             index=0,
             key=f"{btn_key}_cache_mode",
             label_visibility="collapsed",
+        )
+    if cache_mode == ERASE_SAVED:
+        st.caption(
+            "⚠️ Deletes the results saved for these settings when you run it, "
+            "before the new ones are made: a run that fails or is stopped does "
+            "not bring them back."
         )
     return clicked, cache_mode
 
@@ -440,31 +846,63 @@ def run_step_workflow(
     threaded: bool = False,
     status_label: str = "",
     before_button: Callable[[], None] | None = None,
+    stoppable: bool = True,
+    failed_key: str | None = None,
 ) -> str:
-    """Handle execution + button for a pipeline step. Returns mode."""
+    """Handle execution + button for a pipeline step. Returns mode.
+
+    A threaded step gets a stop button while it runs, unless not *stoppable*
+    (a local computation, which has no queries to keep). A search step names
+    the AppState field of its failed items (*failed_key*, see FAILED_STEPS):
+    their banner shows under the button whenever the step has a result.
+    """
     mode = get_analysis_status(df_key, params_key, current_params, keys=compare_keys)
 
     if st.session_state.get(flag_key):
-        cache_mode = st.session_state.get(f"{btn_key}_cache_mode", "Use cached results")
-
-        # Force re-run when settings changed or user explicitly ignores cache.
-        # IDENTICAL re-runs reuse cached items by default — only failed/missing
-        # items are re-executed (important for PartialCache steps).
-        force = mode == "CHANGED" or "Erase" in cache_mode
-        retry = "Retry" in cache_mode
-        if threaded:
-            progress_bar = st.progress(0, text="Initializing...")
-            with st.status(status_label, expanded=False) as status:
-                job_fn(
-                    force_rerun=force,
-                    retry_empty=retry,
-                    status=status,
-                    progress_bar=progress_bar,
-                    **(job_kwargs or {}),
-                )
+        # The run uses the settings of the click, not the widgets' current
+        # values: a setting edited while it runs (a rerun) leaves it going, and
+        # shows as "Settings have changed" once it is done.
+        run = st.session_state[STEP_RUNS][flag_key]
+        st.session_state[_JOB_STEP] = flag_key
+        # Erasing or asking again is for one run: the next one reuses what this
+        # one saved. Set here, before the selector is drawn again.
+        st.session_state[f"{btn_key}_cache_mode"] = REUSE_SAVED
+        # A stopped step keeps no result (run_with_progress raises StepStopped):
+        # its finished queries are cached, and running it again with the same
+        # settings continues from there.
+        try:
+            if threaded:
+                if stoppable:
+                    _stop_button(flag_key, btn_key)
+                progress_bar = st.progress(0, text="Initializing...")
+                with st.status(status_label, expanded=False) as status:
+                    job_fn(
+                        force_rerun=run["force"],
+                        retry_empty=run["retry"],
+                        status=status,
+                        progress_bar=progress_bar,
+                        **run["job_kwargs"],
+                    )
+            else:
+                with st.status(status_label, expanded=False):
+                    job_fn(
+                        force_rerun=run["force"],
+                        retry_empty=run["retry"],
+                        **run["job_kwargs"],
+                    )
+        except stop.StepStopped:
+            pass
+        except Exception:
+            # Shown once: the step does not start again on the next rerun.
+            st.session_state[flag_key] = False
+            raise
         else:
-            with st.status(status_label, expanded=False):
-                job_fn(force_rerun=force, retry_empty=retry, **(job_kwargs or {}))
+            # A stop clicked once the jobs had all finished came too late.
+            st.session_state.get(STOPPED_STEPS, set()).discard(flag_key)
+            # The new run's failures are the user's to accept again; a
+            # stopped or failed run leaves the last ones, and the choice.
+            if failed_key:
+                st.session_state.continued_failures.pop(failed_key, None)
 
         st.session_state[flag_key] = False
         st.session_state["requested_tab"] = tab_id
@@ -473,76 +911,257 @@ def run_step_workflow(
     if before_button:
         before_button()
 
-    clicked, _ = display_run_button(
-        mode, new_string, btn_key=btn_key, logs_prefix=logs_prefix
+    if flag_key in st.session_state.get(STOPPED_STEPS, ()):
+        st.info(
+            "⏹️ Search stopped. The results already received are kept: run the "
+            "step again to continue where it stopped."
+        )
+    runs = st.session_state.setdefault(STEP_RUNS, {})
+    starts = runs.get(flag_key, {}).get("starts", 0)
+    clicked, cache_mode = display_run_button(
+        mode, new_string, btn_key=btn_key, logs_prefix=logs_prefix, starts=starts
     )
+    if failed_key and mode != "NEW":
+        show_failed_items_banner(failed_key)
     if clicked:
+        # Only ERASE_SAVED forces a fresh run. Otherwise the step
+        # reuses the items saved for its current settings and runs the others,
+        # whether the settings changed or a stopped run continues: every
+        # setting in *compare_keys* is part of the step's cache key.
+        runs[flag_key] = {
+            "force": cache_mode == ERASE_SAVED,
+            "retry": cache_mode == RETRY_EMPTY,
+            "job_kwargs": job_kwargs or {},
+            "starts": starts + 1,
+        }
+        drop_jobs(flag_key)
         st.session_state[flag_key] = True
         st.rerun()
 
     return mode
 
 
-def next_step_button(label: str, tab_id: str):
-    """Render a right-aligned navigation button."""
-    cols = st.columns([5, 1])
-    with cols[1]:
-        if st.button(label, type="secondary", width="stretch"):
-            st.session_state["requested_tab"] = tab_id
+def reset_for_new_analysis(key_name: str):
+    """Reset the app for a newly loaded analysis.
+
+    Clears the pipeline state after *key_name*, as ``reset_state_after`` does,
+    and also the settings remembered across tabs (``_widget_overrides``), so
+    nothing from the previous analysis (coordinates, thresholds, selected
+    sequence) carries over to the new one.
+    """
+    reset_state_after(key_name)
+    # The jobs still running belong to the previous analysis: stopped, so the
+    # next run of their step does not wait for them.
+    for job in st.session_state.get(RUNNING_JOBS, {}).values():
+        if not job["future"].done():
+            job["stop"].set()
+    st.session_state._widget_overrides = {}
+    # Forget which preset each selector last applied, or a preset equal to the
+    # last one would not be applied again to the now empty settings.
+    for key in [k for k in st.session_state if str(k).startswith(PRESET_MARKER)]:
+        del st.session_state[key]
+
+
+def show_filter_success(kept: int, total: int, noun: str, tail: str = "") -> None:
+    """Say how many of the search's *total* rows (*noun*) a filter kept."""
+    st.success(f"✅ Filtering complete: {kept:,}/{total:,} {noun} kept{tail}")
+
+
+# Green, the colour of a step done: a next-step button shows once its step has
+# a result. Streamlit gives a keyed widget the class st-key-<key>.
+NEXT_STEP_STYLE = """<style>
+[class*="st-key-next_step_"] button {
+    background-color: #1e8e3e; border-color: #1e8e3e; color: white;
+}
+[class*="st-key-next_step_"] button:hover,
+[class*="st-key-next_step_"] button:focus,
+[class*="st-key-next_step_"] button:active {
+    background-color: #176f30; border-color: #176f30; color: white;
+}
+</style>"""
+
+
+def step_buttons(
+    back: tuple[str, str] | None = None, next_: tuple[str, str] | None = None
+):
+    """The navigation row of a tab, each button a (label, tab id): on the
+    left the way back to the step before, grey; on the right the next step,
+    green, given once this step is done."""
+    st.html(NEXT_STEP_STYLE)
+    left, _, right = st.columns([1, 4, 1])
+    for col, button, key in ((left, back, "back_step"), (right, next_, "next_step")):
+        if button and col.button(button[0], key=f"{key}_{button[1]}", width="stretch"):
+            st.session_state["requested_tab"] = button[1]
             st.rerun()
 
 
+def failed_item_label(item) -> str:
+    """A failed item as the app shows it: a (sequence, species) candidate as
+    "sequence: species"."""
+    return ": ".join(map(str, item)) if isinstance(item, tuple) else str(item)
+
+
+# The AppState fields in pipeline order, by name.
+_FIELD_ORDER = {f.name: i for i, f in enumerate(fields(AppState))}
+
+
+def _accepted(name: str) -> bool:
+    """Whether the user went on without every failed item of *name* (a
+    failed-item field) still standing."""
+    failed = st.session_state.get(name) or []
+    accepted = (st.session_state.get("continued_failures") or {}).get(name)
+    return accepted is not None and set(failed) <= set(accepted)
+
+
+def held_steps(key: str) -> list[str]:
+    """The failed-item fields before *key* in AppState (the steps before it)
+    with failed items the user has not chosen to go on without: until they
+    are retried or accepted, nothing after them uses their results."""
+    return [
+        name
+        for name in FAILED_STEPS
+        if _FIELD_ORDER[name] < _FIELD_ORDER[key]
+        and st.session_state.get(name)
+        and not _accepted(name)
+    ]
+
+
+def ready(key: str):
+    """The session value *key*, or None while a step before it is held (see
+    held_steps)."""
+    return None if held_steps(key) else st.session_state.get(key)
+
+
+def continued_failures() -> dict[str, list]:
+    """The failed items the user went on without, by failed-item field, for
+    the steps whose failures still stand."""
+    return {
+        name: list(failed)
+        for name in FAILED_STEPS
+        if (failed := st.session_state.get(name)) and _accepted(name)
+    }
+
+
+def held_message(key: str, where: str) -> str | None:
+    """What waits for the first step held before *key*, and what to do (see
+    held_steps); None when no step is held. *where* says what waits."""
+    held = held_steps(key)
+    if not held:
+        return None
+    step = FAILED_STEPS[held[0]].step
+    return (
+        f"⚠️ Some queries of the {step} failed: {where}. Run that step again, "
+        "or go on with incomplete results on its tab."
+    )
+
+
 def require_prerequisite(key: str, message: str) -> bool:
-    """Check that a session state key exists, show info message if not."""
+    """Check that a session state key exists and no step before it is held,
+    show info message if not."""
+    if held := held_message(key, "this step waits for it"):
+        st.warning(held)
+        return False
     if st.session_state.get(key) is None:
         st.info(message)
         return False
     return True
 
 
-def show_missing_results_banner(
-    input_values, result_df, key_col: str, item_label: str = "items"
+def record_empty_step(
+    df_key: str,
+    params_key: str,
+    build_empty: Callable[[], pd.DataFrame],
+    *,
+    params: dict | None = None,
 ) -> None:
-    """Warn when items from THIS run's input are absent from its result.
+    """Record the empty result of a step that has nothing to process.
 
-    Compares the current input against the current result (not the whole cache
-    history). A missing item means the source returned no records this run,
-    either a genuine empty or a failed query; "Retry empty results" re-queries.
+    *build_empty* returns the step's empty result with its usual columns (the
+    pipelines' ``empty_*_results``). Once recorded, later tabs and Results see
+    a finished, empty step rather than one not run yet. *params* are the
+    settings recorded for the step; None (the default) shows it as skipped in
+    the dashboard. Recorded once; a change upstream resets it. Called only
+    behind require_prerequisite or ready() (see held_steps), so an empty list
+    never comes from failed queries the user has not accepted.
     """
-    inputs = set(input_values or [])
-    if not inputs:
+    if st.session_state.get(df_key) is not None:
         return
-    found = set()
-    if result_df is not None and not result_df.empty and key_col in result_df.columns:
-        found = set(result_df[key_col].dropna().unique())
-    n_missing = len(inputs - found)
-    if n_missing:
+    st.session_state[df_key] = build_empty()
+    st.session_state[params_key] = params
+    reset_state_after(df_key)
+
+
+def show_failed_items_banner(failed_key: str) -> None:
+    """Warn about items whose query failed in the last run of a step, with a
+    button to go on with incomplete results.
+
+    Failed items are not cached (see ``failure_sink`` in ``save_to_db``), so a
+    run of the step asks for them again. Until then the next steps wait (see
+    held_steps), unless the user goes on with incomplete results, which
+    Results then lists.
+    """
+    failed = list(st.session_state.get(failed_key) or [])
+    if not failed:
+        return
+    items = FAILED_STEPS[failed_key]
+    shown = name_list([failed_item_label(item) for item in failed], shown=10)
+    outcome = (
+        "failed after retries or was given up"
+        if items.gives_up
+        else "failed after retries"
+    )
+    request = items.request or f"the {items.source} request"
+    head = (
+        f"⚠️ {len(failed)} {items.label(len(failed))} {items.lost}: {request} {outcome}"
+    )
+    if _accepted(failed_key):
         st.warning(
-            f"⚠️ {n_missing}/{len(inputs)} {item_label} returned no records. If you "
-            "expected data (e.g. after a failed query), set Cache to "
-            "**Retry empty results** and re-run."
+            f"{head}. You went on with incomplete results: Results lists "
+            f"them.\n\n{shown}"
         )
+        return
+    st.warning(
+        f"{head}. The next steps wait until you run the step again, or go on "
+        f"with incomplete results.\n\n{shown}"
+    )
+    if st.button(
+        "Go on with incomplete results",
+        key=f"continue_{failed_key}",
+        type="secondary",
+        help=(
+            "Go on with the results that came back: Results will be incomplete "
+            f"and will list the failed {items.label(len(failed))}."
+        ),
+    ):
+        st.session_state.continued_failures[failed_key] = failed
+        st.rerun()
+
+
+# Widget key of the selected sequence, shared by every tab's selector.
+SELECTED_SEQUENCE_KEY = "selected_sequence"
 
 
 def sequence_selector(
     show_sequence: bool = True,
-    format_fn: Callable[[str], str] | None = None,
+    labels: dict[str, str] | None = None,
 ) -> str:
+    """Select a sequence, searchable by ID, kept from one tab to the next.
+    *labels* gives the text shown for each sequence (its ID by default).
+    """
     sequences = st.session_state.sequences_id
-    if format_fn:
-        options = {seq: format_fn(seq) for seq in sequences}
-        selected_sequence = st.selectbox(
-            "Select a sequence:",
-            sequences,
-            index=0,
-            format_func=lambda s: options[s],
-        )
-    else:
-        selected_sequence = st.selectbox(
-            "Select a sequence:",
-            sequences,
-            index=0,
-        )
+    # The labels are computed before the selectbox, which may call format_func
+    # outside the script run (e.g. in tests), where session state is empty.
+    labels = labels or {}
+    selected_sequence = setting_widget(
+        st.selectbox,
+        SELECTED_SEQUENCE_KEY,
+        sequences[0],
+        sequences,
+        label="Select a sequence (type to search):",
+        caption=False,
+        format_func=lambda seq: labels.get(seq, str(seq)),
+        filter_mode="contains",
+    )
     sequences_df = st.session_state.sequences_df
     dna_sequence = sequences_df.loc[
         sequences_df["seq_id"] == selected_sequence, "dna_sequence"
@@ -563,28 +1182,77 @@ class StreamlitLogSink:
     On Cloud, concurrent sessions share one process and one global
     ``loguru.logger``.  This sink only accepts log messages from threads
     registered via ``allow_current_thread()`` or ``wrap()``, preventing
-    cross-session log leakage.
+    cross-session log leakage. ``wrap()`` also tags the call's log context
+    with this sink, so threads the call spawns in a copy of its context (the
+    BLAST batch workers, see ``stop.run_threads``) are accepted too.
     """
 
     def __init__(self, container=None, prefix=""):
         self.container = container
         self.prefix = prefix
         self.log_queue = queue.Queue()
-        self._allowed_threads: set[int] = {threading.get_ident()}
+        # Thread objects by ident: an ident is reused once its thread ends, by
+        # any session's thread, so only a thread still alive is accepted.
+        self._allowed_threads: dict[int, threading.Thread] = {
+            threading.get_ident(): threading.current_thread()
+        }
+        # Unique per sink (id() can be reused once a sink is freed).
+        self._tag = uuid.uuid4().hex
 
         # Initialize session state logs
-        log_key = f"{self.prefix}logs"
-        st.session_state[log_key] = []
+        self.lines: list[tuple[str, str]] = []  # (level, line)
+        st.session_state[f"{self.prefix}logs"] = self.lines
+
+        self._taken_over = False
+        # The detail shown, read once: changing it reruns the script, and the
+        # step's next sink redraws the log (take_over).
+        self.level = get_log_level()
+        # Every line is kept, at any detail: shown_log_lines picks those shown.
+        self._handler_id = logger.add(
+            self.write, filter=self.thread_filter, level="DEBUG"
+        )
+
+    def close(self):
+        """Stop receiving log messages (call when the job is over)."""
+        if self._handler_id is not None:
+            logger.remove(self._handler_id)
+            self._handler_id = None
+
+    def take_over(self, old: "StreamlitLogSink"):
+        """Continue the log of a job started by an interrupted script run.
+
+        The log becomes the job's log so far (the lines this sink got before
+        repeat steps the job already logged), then this sink receives the job's
+        next lines in place of *old*, which is closed.
+        """
+        if self._tag == old._tag:
+            return  # already taken over, by an earlier job of the same step
+        # Accept the job's records before closing old, so none falls between.
+        self._tag = old._tag
+        # This sink's own threads come first (thread_filter drops ended ones).
+        # A copy: a job of the old run may still register a thread.
+        for ident, thread in list(old._allowed_threads.items()):
+            self._allowed_threads.setdefault(ident, thread)
+        # The abandoned run may still be polling old: stop it draining.
+        old._taken_over = True
+        old.close()
+        self.lines[:] = old.lines + old._drain()
+        for line in shown_log_lines(self.lines, self.level):
+            self._show(line)
 
     def allow_current_thread(self):
         """Register the calling thread so this sink accepts its log messages."""
-        self._allowed_threads.add(threading.get_ident())
+        self._allowed_threads[threading.get_ident()] = threading.current_thread()
 
     def thread_filter(self, record):
-        """Loguru filter: accept only 'trident' messages from registered threads."""
-        if not record["name"].startswith("trident"):
+        """Loguru filter: accept only 'trident' messages from registered
+        threads, or tagged with this sink by ``wrap()``."""
+        if not record["name"].startswith("trident") or not stop.log_filter(record):
             return False
-        return record["thread"].id in self._allowed_threads
+        if record["extra"].get("log_sink") == self._tag:
+            return True
+        thread = self._allowed_threads.get(record["thread"].id)
+        return thread is not None and thread.is_alive()
 
     def wrap(self, fn, before=None):
         """Return a wrapper that registers its thread before calling *fn*.
@@ -599,7 +1267,8 @@ class StreamlitLogSink:
             self.allow_current_thread()
             if before:
                 before()
-            return fn(*args, **kwargs)
+            with logger.contextualize(log_sink=self._tag):
+                return fn(*args, **kwargs)
 
         return wrapper
 
@@ -609,44 +1278,52 @@ class StreamlitLogSink:
         """Called by loguru from any thread - adds to queue"""
         text = message.record["message"]
         dt = message.record["time"].strftime("%H:%M:%S")
-        icon = self._LEVEL_ICONS.get(message.record["level"].name, "🔹")
-        line = f"{icon} [{dt}] {text}"
+        level = message.record["level"].name
+        line = f"{self._LEVEL_ICONS.get(level, '🔹')} [{dt}] {text}"
 
         # Put in queue (thread-safe)
-        self.log_queue.put(line)
+        self.log_queue.put((level, line))
+
+    def _show(self, line) -> bool:
+        try:
+            self.container.write(line)
+            return True
+        except Exception:
+            return False
+
+    def _drain(self) -> list[tuple[str, str]]:
+        """Return and remove the queued (level, line) entries."""
+        lines = []
+        while True:
+            try:
+                lines.append(self.log_queue.get_nowait())
+            except queue.Empty:
+                return lines
 
     def flush_to_ui(self):
         """Called from main thread to display queued logs"""
-        log_key = f"{self.prefix}logs"
-        displayed_count = 0
-
-        if log_key not in st.session_state or st.session_state[log_key] is None:
-            st.session_state[log_key] = []
-
-        # Process all queued logs
-        while True:
-            try:
-                line = self.log_queue.get_nowait()
-            except queue.Empty:
-                break
-
-            st.session_state[log_key].append(line)
-            try:
-                self.container.write(line)
-                displayed_count += 1
-            except Exception:
-                pass
-
-        return displayed_count
+        if self._taken_over:
+            return 0
+        entries = self._drain()
+        self.lines.extend(entries)
+        return sum(self._show(line) for line in shown_log_lines(entries, self.level))
 
 
-# Streamlit's default Styler cap is 262144 cells; above it st.dataframe raises.
-# We raise it (apply_styler_limit) so the colored full-list views render for
-# realistic large runs, and use the SAME ceiling as the graceful-degrade point
-# in styled_or_plain. One constant drives both, so the config and the fallback
-# never drift: <= ceiling -> colored Styler renders; > ceiling -> plain frame
-# (no crash) even on a pathologically huge run.
+# Pandas' Styler cap (262144 cells by default, above which st.dataframe
+# raises), raised by apply_styler_limit, and the size above which
+# styled_or_plain shows a plain table: one value, so they cannot drift.
 STYLER_MAX_CELLS = 2_000_000
+
+
+@functools.cache
+def logo_png(width: int = 480) -> bytes:
+    """The app logo as a PNG at most *width* pixels wide, made once: given the
+    1920 px file, Streamlit would decode and shrink it on every run."""
+    with Image.open(Path(__file__).with_name("logo.png")) as image:
+        image.thumbnail((width, width))
+        png = io.BytesIO()
+        image.save(png, format="PNG")
+    return png.getvalue()
 
 
 def apply_styler_limit() -> None:
@@ -680,10 +1357,22 @@ def styled_or_plain(df, *row_style_fns, max_cells: int = STYLER_MAX_CELLS):
     return styler
 
 
+@contextlib.contextmanager
+def lazy_expander(label: str, key: str, icon: str | None = None):
+    """A closed expander that yields whether it is open, for content drawn only
+    then (``if is_open:``). Streamlit otherwise runs the content of a closed
+    expander on every rerun, and a large table costs seconds to draw and send.
+    Opening or closing it reruns the app."""
+    section = st.expander(label, key=key, icon=icon, on_change="rerun")
+    with section:
+        yield section.open
+
+
 def run_with_progress(
     fn,
     *args,
     logsink: "StreamlitLogSink | None" = None,
+    progress: dict | None = None,
     on_poll: Callable[[], None] | None = None,
     poll_interval: float = 0.5,
     **kwargs,
@@ -699,25 +1388,157 @@ def run_with_progress(
         fn: The callable to run in the background (e.g. a ``logsink.wrap(...)``).
         *args, **kwargs: Passed straight through to ``fn``.
         logsink: Log sink to flush each tick and once at the end, if provided.
+        progress: The dict the job updates and ``on_poll`` reads, if any.
         on_poll: Zero-arg callback invoked each tick (typically updates the
             progress bar from a shared ``progress_info`` dict).
-        poll_interval: Seconds to sleep between ticks.
+        poll_interval: Longest wait between two ticks, in seconds.
 
     Returns:
         Whatever ``fn`` returns.
+
+    Raises:
+        StepStopped: the step was stopped (``_stop_button``). The job's
+            finished items are cached, but its result is dropped.
     """
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(fn, *args, **kwargs)
-        while not future.done():
-            if on_poll is not None:
-                on_poll()
+    # A rerun requested while the job runs (e.g. a widget event) abandons this
+    # script run but not the job's thread. The next run calls here again with
+    # the step's run flag still set: wait on the same job instead of starting
+    # a second one, and take over its log and progress. A step runs one job at
+    # a time: a dropped job (its step reset) is waited for first. It is only
+    # stopped by the user (the stop button, which covers it too).
+    jobs = st.session_state.setdefault(RUNNING_JOBS, {})
+    step = st.session_state.get(_JOB_STEP)
+    key = (step, fn.__name__)
+    job = jobs.get(key)
+    if job is not None and job["dropped"]:
+        if not job["future"].done():
+            waiting = st.empty()
+            # Polled with a Streamlit call each tick, so a click on the stop
+            # button (a rerun) takes effect instead of waiting for the job.
+            while not job["future"].done():
+                waiting.info("Finishing the previous search first...")
+                concurrent.futures.wait([job["future"]], timeout=poll_interval)
+            waiting.empty()
+        job = None
+    if job is None:
+        if step in st.session_state.get(STOPPED_STEPS, ()):
+            # Stopped between two jobs of the step: start no further one.
             if logsink is not None:
-                logsink.flush_to_ui()
-            time.sleep(poll_interval)
-        result = future.result()
+                logsink.close()
+            raise stop.StepStopped()
+        event = threading.Event()
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(_run_stoppable, event, fn, args, kwargs)
+        executor.shutdown(wait=False)
+        job = jobs[key] = {
+            "future": future,
+            "progress": progress,
+            "dropped": False,
+            "stop": event,
+        }
+    elif logsink is not None and job["logsink"] is not None:
+        logsink.take_over(job["logsink"])
+    job["logsink"] = logsink
+
+    future = job["future"]
+    while not future.done():
+        if progress is not None and job["progress"] is not progress:
+            progress.update(job["progress"])
+        if on_poll is not None:
+            on_poll()
         if logsink is not None:
             logsink.flush_to_ui()
-    return result
+        # Returns as soon as the job ends: a step whose results are all saved
+        # does not wait a whole tick.
+        concurrent.futures.wait([future], timeout=poll_interval)
+    # A finished job stays until its step is run again or reset (drop_jobs):
+    # the abandoned run may still be polling it, and either run may finish first.
+    error = future.exception()
+    stopped = job["stop"].is_set()
+    if error is None and not stopped:
+        if logsink is not None:
+            logsink.flush_to_ui()
+        return future.result()
+    # Not kept (a stopped job's result lacks the items it skipped): the next
+    # run of the step tries again.
+    if jobs.get(key) is job:
+        del jobs[key]
+    if logsink is not None:
+        logsink.flush_to_ui()
+        logsink.close()
+    if not stopped:
+        raise error
+    if error is not None and not isinstance(error, stop.StepStopped):
+        # Most likely caused by the stop (its items all failed), but kept in
+        # the console (this thread is not stopped).
+        logger.opt(exception=error).warning("The stopped search ended with an error")
+    raise stop.StepStopped() from error
+
+
+def _run_stoppable(event: threading.Event, fn, args, kwargs):
+    """Run a job with *event* as its stop signal (see ``trident.core.stop``)."""
+    with stop.stoppable(event):
+        return fn(*args, **kwargs)
+
+
+def _stop_button(flag_key: str, btn_key: str):
+    """Stop button of a running step. Its running jobs send no further request
+    (the next one raises StepStopped, see ``trident.core.stop``); a request
+    already sent finishes, and a BLAST job being polled is dropped."""
+    stopped = st.session_state.setdefault(STOPPED_STEPS, set())
+    # Not a bare "Stop": Streamlit's own Stop (top right) ends the script run,
+    # not the job, which goes on and is re-attached to by the next run.
+    if flag_key not in stopped and st.button(
+        "Stop the search",
+        key=f"{btn_key}_stop",
+        icon=":material/stop_circle:",
+        help=(
+            "Stops the search now: queries still running are dropped. Results "
+            "already received are kept: run the step again to continue where "
+            "it stopped."
+        ),
+    ):
+        stopped.add(flag_key)
+        # A finished job keeps its result (the post-processing may still use it).
+        for (step, _), job in st.session_state.get(RUNNING_JOBS, {}).items():
+            if step == flag_key and not job["future"].done():
+                job["stop"].set()
+    if flag_key in stopped:
+        st.info("Stopping the search...")
+
+
+# Session key of the jobs of each step, by (step run flag, job function).
+RUNNING_JOBS = "_running_jobs"
+# Session key of the step whose job is being run (its run flag).
+_JOB_STEP = "_job_step"
+# Session key of each step's run settings, fixed at the click (by run flag).
+STEP_RUNS = "_step_runs"
+# Session key of the steps stopped by the user (run flags), until run again.
+STOPPED_STEPS = "_stopped_steps"
+
+
+def drop_jobs(flag_key: str | None = None):
+    """Forget the jobs of one step (by its run flag), or of all steps, and
+    whether they were stopped.
+
+    The next run of the step starts a new job instead of re-attaching. A job
+    still running is kept, marked dropped, so the next run waits for it to end
+    rather than run beside it (or the user stops it).
+    """
+    jobs = st.session_state.get(RUNNING_JOBS, {})
+    for key in [k for k in jobs if flag_key is None or k[0] == flag_key]:
+        job = jobs[key]
+        if job["logsink"] is not None:
+            job["logsink"].close()
+        if job["future"].done():
+            del jobs[key]
+        else:
+            job["dropped"] = True
+    stopped = st.session_state.get(STOPPED_STEPS, set())
+    if flag_key is None:
+        stopped.clear()
+    else:
+        stopped.discard(flag_key)
 
 
 def highlight_low_identity(row):
@@ -730,10 +1551,114 @@ def highlight_low_identity(row):
     return [style] * len(row)
 
 
-def highlight_below_mol(row):
-    """Apply highlight style for species that would not have passed the MOL filter."""
-    style = "background-color: #ffe0b2;" if row.get("below_mol", False) else ""
+# The label of each HYPO check result where Results counts, filters and
+# excludes it, the result's own words (see CHECK_NOTES).
+CHECK_LABELS = {result: f"HYPO check: {result}" for result in CHECK_NOTES}
+
+# The colour of the rows of each HYPO check result with a hit (see
+# add_check_result): the background, and the legend's square.
+CHECK_COLOURS = {
+    CHECK_DIFFERS: ("#ffe0b2", "orange"),
+    CHECK_PARTIAL: ("#e8dff5", "violet"),
+    CHECK_MATCHES: ("#c8e6c9", "green"),
+}
+
+
+def check_legends(df) -> list[str]:
+    """The legend of each HYPO check result highlight_check_result colours in
+    *df*."""
+    results = set(df["hypo_check_result"].dropna()) if len(df) else set()
+    return [
+        f":{square}[■] {CHECK_NOTES[result]}"
+        for result, (_, square) in CHECK_COLOURS.items()
+        if result in results
+    ]
+
+
+def highlight_check_result(row):
+    """Colour a HYPO species' row by its check result (see CHECK_COLOURS)."""
+    colour = CHECK_COLOURS.get(row.get("hypo_check_result"))
+    style = f"background-color: {colour[0]}; color: black;" if colour else ""
     return [style] * len(row)
+
+
+def hypo_check_results() -> dict:
+    """The HYPO check's result of each candidate of the HYPO list, by
+    (seq_id, scientificName), judged by the MOL filter of the current results
+    (add_check_result). Kept until the HYPO list, the MOL search's hits or the
+    MOL settings change: a judgement filters a copy of its sequence's hits for
+    every candidate, and the HYPO tab and Results show the results on every
+    rerun."""
+    state = st.session_state
+    hypo_df, hits, settings = state.hypo_df, state.ncbi_search_df, check_settings()
+    if hypo_df is None:
+        return {}
+    memo = state.check_result_memo
+    if (
+        memo is None
+        or memo["hypo"] is not hypo_df
+        or memo["hits"] is not hits
+        or memo["settings"] != settings
+    ):
+        judged = add_check_result(
+            hypo_df.reindex(columns=CHECK_INPUT_COLUMNS), hits, **settings
+        )
+        results = dict(
+            zip(
+                zip(judged["seq_id"], judged["scientificName"]),
+                judged["hypo_check_result"],
+            )
+        )
+        memo = {"hypo": hypo_df, "hits": hits, "settings": settings, "results": results}
+        state.check_result_memo = memo
+    return memo["results"]
+
+
+def with_check_result(df):
+    """*df* (rows of the HYPO list's candidates) with the HYPO check's result
+    of each (see hypo_check_results)."""
+    return lookup_check_results(df, hypo_check_results())
+
+
+def stored_low_identity_threshold() -> float:
+    """The MOL step's low identity threshold, as the current results used it."""
+    stored = (st.session_state.get("mol_params") or {}).get(
+        "ncbi_low_identity_threshold"
+    )
+    return coerce_stored_value(stored, float(NCBI_LOW_IDENTITY_THRESHOLD_DEFAULT))
+
+
+def check_settings():
+    """The MOL settings that judge a HYPO check hit (add_check_result): the
+    filter's, and the low identity threshold when the MOL step enforces it."""
+    stored = st.session_state.get("mol_params") or {}
+    enforced = coerce_stored_value(
+        stored.get("ncbi_enforce_low_identity"), NCBI_ENFORCE_LOW_IDENTITY_DEFAULT
+    )
+    threshold = stored_low_identity_threshold() if enforced else None
+    return {**mol_filter_settings(), "threshold": threshold}
+
+
+def mol_query_cover():
+    """The MOL filter's query cover, which the best HYPO check hit and the
+    best identity of a sequence also require (a partial hit says less)."""
+    stored = (st.session_state.get("mol_params") or {}).get("ncbi_query_cover")
+    return coerce_stored_value(stored, float(NCBI_QUERY_COVER_DEFAULT))
+
+
+def mol_filter_settings():
+    """The MOL filter settings of the current results, as filter arguments."""
+    stored = st.session_state.get("mol_params") or {}
+    return {
+        "query_cover": mol_query_cover(),
+        "gap_size": coerce_stored_value(
+            stored.get("ncbi_gap_size"), float(NCBI_GAP_SIZE_DEFAULT)
+        ),
+        "method": stored.get("ncbi_method") or NCBI_METHOD_DEFAULT,
+        "gap_min_top": coerce_stored_value(
+            stored.get("ncbi_gap_min_top"), float(NCBI_GAP_MIN_TOP_DEFAULT)
+        ),
+    }
 
 
 def highlight_empty_sequence(row):
@@ -747,31 +1672,84 @@ def highlight_empty_sequence(row):
     return [style] * len(row)
 
 
+def same_species_as(names: pd.Series, groups: pd.DataFrame | None = None) -> pd.Series:
+    """The species each of *names* is possibly the same as, indexed by name;
+    only the linked ones. *groups*: same_species_groups of *names*, when
+    already computed."""
+    if groups is None:
+        groups = same_species_groups(names, st.session_state.name_table)
+    return groups.set_index("scientificName")["same_species_as"]
+
+
+def with_same_species(df: pd.DataFrame) -> pd.DataFrame:
+    """df with same_species_as (see same_species_as); empty for other rows."""
+    names = df["scientificName"]
+    return df.assign(same_species_as=names.map(same_species_as(names)))
+
+
+def display_same_species(df: pd.DataFrame) -> pd.DataFrame:
+    """List the species of df another source counts as one species; returns
+    their same_species_groups."""
+    groups = same_species_groups(df["scientificName"], st.session_state.name_table)
+    if groups.empty:
+        return groups
+    n_groups = groups["group"].nunique()
+    with st.expander(
+        f"⚠️ {n_groups} species possibly listed under several names",
+        expanded=False,
+    ):
+        st.caption(
+            "Another source counts these names as one species. WoRMS may keep "
+            "one species under two names, or the sources may disagree. The "
+            "names are kept and counted apart: check them."
+        )
+        st.dataframe(
+            groups,
+            width="stretch",
+            hide_index=True,
+            column_order=["scientificName", "same_species_as"],
+            column_config=column_config(["scientificName", "same_species_as"]),
+        )
+    return groups
+
+
 def highlight_in_mol(row):
-    """Apply highlight style for species found in NCBI."""
+    """Apply highlight style for MOL species."""
     style = "background-color: #c6efce; color: black;" if row["in_mol"] else ""
     return [style] * len(row)
 
 
-def get_recent_param_sets(db_path, table_name, columns, limit=5):
-    """Return distinct recent parameter combinations from cache history."""
+def get_recent_param_sets(db_path, table_name, columns, limit=5, only=None):
+    """Return distinct recent parameter combinations from cache history.
+
+    *limit* None returns them all. *only*: values the rows must hold (e.g. the
+    BLAST database), so a preset never names results the step cannot reuse.
+    """
+    only = only or {}
     if not os.path.exists(db_path):
         return []
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cols_sql = ", ".join(columns)
-        where_clauses = " AND ".join(
-            f"{col} IS NOT NULL AND {col} <> 'None' AND {col} <> ''" for col in columns
-        )
-        query = f"""
-            SELECT {cols_sql} FROM {table_name}
-            WHERE {where_clauses}
-            GROUP BY {cols_sql} ORDER BY MAX(run_id) DESC LIMIT ?
-        """
-        cursor.execute(query, (limit,))
-        rows = cursor.fetchall()
-        conn.close()
+        with get_connection(db_path) as conn:
+            # A table without one of these columns predates that setting: no preset
+            stored = set(table_columns(conn, table_name))
+            if stored and not set(columns) | set(only) <= stored:
+                logger.debug(f"No presets from {table_name}: written before {columns}")
+                return []
+            cols_sql = ", ".join(columns)
+            where_clauses = " AND ".join(
+                f"{col} IS NOT NULL AND {col} <> 'None' AND {col} <> ''"
+                for col in columns
+            )
+            for col in only:
+                where_clauses += f" AND {col} = ?"
+            query = f"""
+                SELECT {cols_sql} FROM {table_name}
+                WHERE {where_clauses}
+                GROUP BY {cols_sql} ORDER BY MAX(run_id) DESC LIMIT ?
+            """
+            rows = conn.execute(
+                query, (*only.values(), -1 if limit is None else limit)
+            ).fetchall()
         return [dict(zip(columns, row)) for row in rows]
     except sqlite3.OperationalError as exc:
         # A missing table is normal before its step has run for the first time,
@@ -785,6 +1763,20 @@ def get_recent_param_sets(db_path, table_name, columns, limit=5):
         return []
 
 
+# Prefix of the session keys recording the preset each selector last applied.
+PRESET_MARKER = "_prev_"
+
+
+def prefill_settings(values: dict):
+    """Pre-fill widgets of the later steps (widget key -> value).
+
+    Call after reset_for_new_analysis. A preset selector covering these
+    widgets keeps the values on its first render instead of applying the
+    latest history preset; picking a preset in its menu applies it as usual.
+    """
+    st.session_state._widget_overrides.update(values)
+
+
 def param_preset_selector(presets, format_fn, key):
     """Selectbox of previous parameter sets. Updates widget overrides on change.
 
@@ -792,7 +1784,7 @@ def param_preset_selector(presets, format_fn, key):
     """
     if not presets:
         return
-    cols = [k for k in presets[0] if k != "run_id"]
+    cols = list(presets[0])
 
     if len(presets) == 1:
         # Single preset: apply silently, no UI
@@ -804,28 +1796,44 @@ def param_preset_selector(presets, format_fn, key):
         current = {
             col: str(st.session_state._widget_overrides.get(col, "")) for col in cols
         }
-        selected_idx = 0
-        for i, p in enumerate(presets):
-            if all(str(p.get(k, "")) == v for k, v in current.items()):
-                selected_idx = i
-                break
+        # The latest set for empty fields (it is applied below). None when the
+        # fields hold values of no saved set: any set chosen then applies.
+        filled = any(c in st.session_state._widget_overrides for c in cols)
+        selected_idx = next(
+            (
+                i
+                for i, p in enumerate(presets)
+                if all(str(p.get(k, "")) == v for k, v in current.items())
+            ),
+            None if filled else 0,
+        )
 
         choice = st.selectbox(
             "Previously used settings",
             labels,
             index=selected_idx,
             key=key,
+            placeholder="Current settings (not a saved set)",
             help="Pre-fill the fields below with a previously used parameter set.",
         )
+        if choice is None:
+            st.session_state[f"{PRESET_MARKER}{key}"] = None
+            return
         preset = presets[labels.index(choice)]
 
     # Only apply preset when the selection actually changed
-    prev_key = f"_prev_{key}"
+    prev_key = f"{PRESET_MARKER}{key}"
     preset_id = tuple(str(preset.get(c, "")) for c in cols)
-    if st.session_state.get(prev_key) != preset_id:
+    overrides = st.session_state._widget_overrides
+    if prev_key not in st.session_state and any(c in overrides for c in cols):
+        # First render since the analysis was loaded, and the fields already
+        # hold values (pre-filled, or typed before any history existed): keep
+        # them, and record the preset as seen.
+        st.session_state[prev_key] = preset_id
+    elif st.session_state.get(prev_key) != preset_id:
         st.session_state[prev_key] = preset_id
         for col in cols:
             st.session_state._widget_overrides[col] = preset[col]
-            # Delete widget key so persist_value re-seeds from override
+            # Delete widget key so setting_widget re-seeds from override
             if col in st.session_state:
                 del st.session_state[col]

@@ -1,440 +1,790 @@
+"""Results tab: the combined MOL+GEO and HYPO results, laid out per sequence:
+a summary first, one row per (M)OTU/ASV with its assignment, the selected
+sequence's candidate species (curated there) and their path through the
+steps, and every download at the end.
 """
-Results UI Module
 
-Displays the combined MOL+GEO and HYPO species results table
-with per-sequence and per-species views, and export options.
-"""
+from functools import partial
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from pathlib import Path
+
+from trident.clients.gbif import area_label
+from trident.core.config import is_streamlit_cloud
+from trident.core.database import fingerprint, load_provenance
+from trident.core.utils import (
+    count_phrase,
+    failed_items,
+    name_list,
+    normalize_name,
+    pluralize,
+    species_for_sequences,
+)
+from trident.pipelines.names import resolved_names, species_key, species_of
 
 from trident.pipelines.results_pipeline import (
+    FAILED_STEPS,
+    LOSS_REASONS,
+    build_species_flows,
+    plot_species_flow,
+    species_flow_table,
     build_results_df,
-    find_sequence_exclusion_step,
-    add_low_identity_warning,
+    exclusion_keys,
+    flows_lost_at,
     filter_excluded_results,
-    RESULT_COLS,
+    EXPORT_COLS,
+    build_gbif_export_df,
+    build_assignments,
+    flag_low_identity,
+    CHECK_DIFFERS,
+    CHECK_NOTES,
+    CHECK_PARTIAL,
 )
-from trident.core.database import load_provenance
-
+from trident.ui.geo import display_gbif_sequence_table
 from trident.ui.ui import (
+    column_config,
+    continued_failures,
+    failed_item_label,
+    held_message,
+    held_steps,
+    ready,
+    SELECTED_SEQUENCE_KEY,
+    setting_widget,
     styled_or_plain,
-    COL,
     highlight_low_identity,
-    highlight_below_mol,
+    CHECK_LABELS,
+    check_legends,
+    highlight_check_result,
     highlight_empty_sequence,
+    hypo_check_results,
+    mol_query_cover,
+    stored_low_identity_threshold,
     sequence_selector,
+    display_same_species,
+    same_species_as,
 )
 
 
+THRESHOLD_KEY = "flag_identity"
+
+# The columns of a candidate the Results tables show, after the sequence:
+# for a HYPO species, also the MOL species its CO1 proxy hit and the
+# sequence's MOL identity to it.
+CANDIDATE_COLS = [
+    "validation_step",
+    "scientificName",
+    "taxonURL",
+    "geo_url",
+    "kingdom",
+    "phylum",
+    "class",
+    "order",
+    "family",
+    "genus",
+    "specificEpithet",
+    "scientificNameAuthorship",
+    "mol_identity",
+    "mol_query_cover",
+    "mol_hit_url",
+    "hypo_check_result",
+    "hypo_check_identity",
+    "hypo_check_query_cover",
+    "hypo_check_hit_url",
+    "proxy_hit_species",
+    "proxy_identity",
+    "proxy_query_cover",
+    "via_mol_identity",
+    "proxy_url",
+    "geo_occurrences",
+]
+# The columns of a species' NCBI hits.
+NCBI_HIT_COLS = [
+    "seq_id",
+    "scientificName",
+    "hit_def",
+    "identity_percentage",
+    "query_cover",
+    "hit_url",
+]
+# The columns of the assignment table, one row per sequence.
+ASSIGNMENT_COLS = [
+    "seq_id",
+    "scientificName",
+    "taxonRank",
+    "n_species",
+    "best_identity",
+    "paths",
+    "note",
+]
+FILTER_KEY = "results_filter"
+ASSIGNMENTS_KEY = "results_assignments"
+
+FILTERS = [
+    "All",
+    "Species level",
+    "Higher rank",
+    "Unassigned",
+    "Low identity",
+    CHECK_LABELS[CHECK_DIFFERS],
+    CHECK_LABELS[CHECK_PARTIAL],
+]
+
 # --------------------------------------------------------------------
-# DISPLAY HELPERS
+# DATA
 # -------------------------------------------------------------------
 
 
-RESULTS_COLUMN_CONFIG = {
-    "seq_id": COL["seq_id"],
-    "validation_step": st.column_config.TextColumn(
-        "Validation",
-        help="MOL+GEO = confirmed via NCBI + geography. HYPO = confirmed via BOLD/NCBI proxy.",
-    ),
-    "scientificName": COL["scientificName"],
-    "taxonURL": COL["taxonURL"],
-    "kingdom": COL["kingdom"],
-    "phylum": COL["phylum"],
-    "class": COL["class"],
-    "order": COL["order"],
-    "family": COL["family"],
-    "genus": COL["genus"],
-    "specificEpithet": COL["specificEpithet"],
-    "scientificNameAuthorship": COL["scientificNameAuthorship"],
-    "ncbi_top_identity_percentage": st.column_config.NumberColumn(
-        "Identity (%)",
-        format="%.2f",
-        help="Best NCBI BLAST identity for this species.",
-    ),
-    "ncbi_top_query_cover": st.column_config.NumberColumn(
-        "Query Cover (%)",
-        format="%.2f",
-        help="Query coverage of the best NCBI hit.",
-    ),
-    "ncbi_top_hit_url": COL["ncbi_top_hit_url"],
-    "bold_seq_url": COL["bold_seq_url"],
-    "gbif_occurrences": COL["gbif_occurrences"],
-    "gbif_taxonURL": COL["gbif_taxonURL"],
-    "low_identity_warning": None,
-    "below_mol": None,
-    "dna_sequence": None,
-}
+# The session tables of the species flow, named as build_species_flow's arguments.
+FLOW_TABLES = [
+    "ncbi_search_df",
+    "mol_df",
+    "tax_df",
+    "geo_df",
+    "extra_df",
+    "hypo_df",
+]
+
+
+def _flow_tables():
+    """The arguments of build_species_flows (and flows_lost_at) besides the
+    sequences, for the steps run and not held (see held_steps)."""
+    state = st.session_state
+    return {
+        **{key: ready(key) for key in FLOW_TABLES},
+        # The GBIF search's session table is the merge of TAX with its counts.
+        "gbif_merge_df": state.get("gbif_search_df"),
+        "failed": continued_failures(),
+        "excluded": state.get("excluded_results", []),
+        "name_table": state.get("name_table"),
+    }
+
+
+def _lost_at(seq_ids):
+    """flow_lost_at of each sequence, kept until a step's table or the name
+    table changes: rebuilding a flow per sequence on every rerun takes seconds
+    on thousands of sequences. Steps replace their tables, never edit them, so
+    the same objects mean the same data. An exclusion changes only its own
+    sequence's flow, and the failures gone on without are compared by value."""
+    state = st.session_state
+    tables = [
+        *(ready(key) for key in FLOW_TABLES),
+        *(state.get(key) for key in ["gbif_search_df", "name_table"]),
+    ]
+    failed = continued_failures()
+    excluded = set(state.get("excluded_results", []))
+    memo = state.get("lost_at_memo")
+    if (
+        memo is None
+        or memo["failed"] != failed
+        or any(old is not new for old, new in zip(memo["tables"], tables))
+    ):
+        memo = {"tables": tables, "failed": failed, "excluded": excluded, "lost": {}}
+        state.lost_at_memo = memo
+    lost = memo["lost"]
+    for key in memo["excluded"] ^ excluded:
+        lost.pop(key.split("||", 1)[0], None)
+    memo["excluded"] = excluded
+    missing = [seq_id for seq_id in seq_ids if seq_id not in lost]
+    if missing:
+        lost.update(flows_lost_at(missing, **_flow_tables()))
+    return {seq_id: lost[seq_id] for seq_id in seq_ids}
+
+
+def _assignments(curated_df, threshold):
+    """build_assignments with the MOL filter's query cover and the lost-at
+    steps kept between reruns (_lost_at)."""
+    return build_assignments(curated_df, threshold, mol_query_cover(), _lost_at)
+
+
+def _filtered_seq_ids(assignments, choice):
+    """Sequence IDs shown for a filter choice (all of them for "All" or no choice)."""
+    n_species = assignments["n_species"]
+    species_level = assignments["species_level"]
+    mask = {
+        "Species level": species_level,
+        "Higher rank": (n_species > 0) & ~species_level,
+        "Unassigned": n_species == 0,
+        "Low identity": assignments["low_identity"],
+        CHECK_LABELS[CHECK_DIFFERS]: assignments["check_differs"],
+        CHECK_LABELS[CHECK_PARTIAL]: assignments["check_partial"],
+    }.get(choice)
+    return assignments["seq_id"] if mask is None else assignments.loc[mask, "seq_id"]
+
+
+def _default_threshold():
+    """The MOL filter's low identity warning, so both steps flag alike."""
+    return int(stored_low_identity_threshold())
+
+
+def _threshold_slider():
+    """The identity below which sequences are flagged (Low identity). Starts
+    at the MOL filter's low identity warning and follows it when it changes,
+    else keeps the user's value."""
+    default = _default_threshold()
+    if st.session_state.get("_flag_identity_seed") != default:
+        st.session_state._flag_identity_seed = default
+        st.session_state[THRESHOLD_KEY] = default
+        st.session_state._widget_overrides[THRESHOLD_KEY] = default
+    threshold = setting_widget(
+        st.slider,
+        THRESHOLD_KEY,
+        default,
+        50,
+        100,
+        label="Flag sequences whose best identity is below (%)",
+        caption=False,
+        help=(
+            "Starts at the MOL filter's low identity warning. A sequence whose "
+            "best NCBI identity is below it is flagged; nothing is removed. A "
+            "HYPO species without check hit counts with the MOL hit of the "
+            "species its CO1 proxy hit."
+        ),
+    )
+    return threshold
 
 
 # --------------------------------------------------------------------
-# OVERVIEW & PER SEQUENCE
+# CALLBACKS (run before the page, so the summary at the top is current)
 # -------------------------------------------------------------------
 
 
-def show_results_overview(results_df):
-    """Display full results table with low-identity highlighting."""
-
-    with st.container(border=True):
-        col_header, col_slider = st.columns([2, 1], vertical_alignment="top")
-
-        with col_header:
-            st.markdown("### 📊 Results Overview")
-
-        with col_slider:
-            low_identity = st.slider(
-                "Low Identity Threshold (%)",
-                90,
-                100,
-                97,
-                key="low_id",
-                help="Highlight species below this identity threshold",
-            )
-
-        display_df = add_low_identity_warning(results_df.copy(), low_identity)
-
-        # Apply highlights: below_mol first, then low_identity and empty_sequence
-        # override (red takes priority over orange)
-        styled_df = (
-            styled_or_plain(display_df, highlight_below_mol)
-            .apply(highlight_low_identity, axis=1)
-            .apply(highlight_empty_sequence, axis=1)
-        )
-
-        legends = []
-        if display_df["low_identity_warning"].any():
-            legends.append(f":red[■] Low identity (<{low_identity}%)")
-        if display_df["below_mol"].any():
-            legends.append(
-                ":orange[■] Found in NCBI but would not have passed the MOL filter"
-            )
-        if display_df["scientificName"].isna().any():
-            legends.append(":gray[■] No species assigned")
-        if legends:
-            st.caption(" · ".join(legends))
-
-        st.dataframe(
-            styled_df,
-            width="stretch",
-            hide_index=True,
-            column_order=RESULT_COLS,
-            column_config=RESULTS_COLUMN_CONFIG,
-        )
-
-
-def show_results_per_sequence(results_df):
-    """Display per-sequence detail view with sequence selector."""
-
-    with st.container(border=True):
-        col_header, col_slider = st.columns([2, 1], vertical_alignment="top")
-        with col_header:
-            st.markdown("### 🔬 Results per (M)OTU/ASV")
-        with col_slider:
-            low_identity_seq = st.slider(
-                "Low Identity Threshold (%)",
-                90,
-                100,
-                97,
-                key="low_id_seq",
-                help="Highlight species below this identity threshold",
-            )
-
-        # Build per-seq_id warning flags for the selector
-        def _seq_label(seq_id):
-            sdf = results_df[results_df["seq_id"] == seq_id]
-            flags = ""
-            if sdf["scientificName"].isna().all():
-                return f"{seq_id} ∅"
-            identity = pd.to_numeric(
-                sdf.get("ncbi_top_identity_percentage"), errors="coerce"
-            )
-            if identity.notna().any() and identity.min() < low_identity_seq:
-                flags += " ⚠"
-            if sdf.get("below_mol") is not None and sdf["below_mol"].any():
-                flags += " ⚠"
-            return f"{seq_id}{flags}" if flags else seq_id
-
-        selected_seq = sequence_selector(format_fn=_seq_label)
-        seq_df = results_df[results_df["seq_id"] == selected_seq]
-
-        if seq_df.empty or seq_df["scientificName"].isna().all():
-            exclusion = find_sequence_exclusion_step(
-                all_seq_ids=[selected_seq],
-                ncbi_search_df=st.session_state.get("ncbi_search_df"),
-                mol_df=st.session_state.get("mol_df"),
-                tax_df=st.session_state.get("tax_df"),
-                geo_df=st.session_state.get("geo_df"),
-            )
-            if not exclusion.empty:
-                step = exclusion.iloc[0]["pipeline_step"]
-                st.info(f"No species assigned — sequence lost at **{step}**.")
+def _apply_keep_edits(editor_key, row_keys):
+    """Turn the Keep checkboxes into exclusions."""
+    edits = st.session_state[editor_key]["edited_rows"]
+    excluded = set(st.session_state.excluded_results)
+    for i, change in edits.items():
+        if "keep" in change:
+            key = row_keys[int(i)]
+            if change["keep"]:
+                excluded.discard(key)
             else:
-                st.info("No species assigned to this sequence.")
-            return
+                excluded.add(key)
+    _set_excluded(excluded)
 
-        n_mol_geo = (seq_df["validation_step"] == "MOL+GEO").sum()
-        n_hypo = (seq_df["validation_step"] == "HYPO").sum()
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Species", len(seq_df))
-        c2.metric("MOL+GEO", n_mol_geo)
-        c3.metric("HYPO", n_hypo)
+def _toggle_bulk(name, keys):
+    """Exclude a group of candidates at once, or restore the ones that group's
+    button excluded. Candidates excluded by hand stay excluded, and so do the
+    ones another button also excluded."""
+    excluded = set(st.session_state.excluded_results)
+    bulk = dict(st.session_state.bulk_excluded)
+    if name in bulk:
+        mine = set(bulk.pop(name))
+        excluded -= mine - set().union(*bulk.values())
+    else:
+        by_hand = excluded - set().union(*bulk.values())
+        bulk[name] = sorted(set(keys) - by_hand)
+        excluded |= set(keys)
+    st.session_state.bulk_excluded = bulk
+    _set_excluded(excluded)
 
-        display_df = add_low_identity_warning(seq_df.copy(), low_identity_seq)
 
-        legends = []
-        if display_df["low_identity_warning"].any():
-            legends.append(f":red[■] Low Identity (<{low_identity_seq}%)")
-        if display_df["below_mol"].any():
-            legends.append(
-                ":orange[■] Found in NCBI but would not have passed the MOL filter"
-            )
-        if legends:
-            st.caption(" · ".join(legends))
+def _set_excluded(excluded):
+    st.session_state.excluded_results = sorted(excluded)
+    # A new editor key drops the edits the table holds, so it shows the
+    # exclusions as they are now rather than replaying old clicks.
+    st.session_state._keep_version = st.session_state.get("_keep_version", 0) + 1
 
-        styled_df = styled_or_plain(
-            display_df, highlight_below_mol, highlight_low_identity
-        )
 
-        st.dataframe(
-            styled_df,
-            width="stretch",
-            hide_index=True,
-            column_order=RESULT_COLS,
-            column_config=RESULTS_COLUMN_CONFIG,
-        )
-
-        # Curation: checkboxes to exclude species
-        species_flags = (
-            display_df.dropna(subset=["scientificName"])
-            .groupby(["scientificName", "validation_step"], sort=False)
-            .agg(
-                low_id=("low_identity_warning", "any"),
-                below=("below_mol", "any"),
-            )
-            .reset_index()
-            .sort_values("scientificName")
-        )
-        if not species_flags.empty:
-            excluded = set(st.session_state.excluded_results)
-            st.caption("Uncheck to exclude a species from the curated results:")
-            changed = False
-            for _, row in species_flags.iterrows():
-                flags = ""
-                if row["low_id"]:
-                    flags += " :red[⚠]"
-                if row["below"]:
-                    flags += " :orange[⚠]"
-                key = f"{selected_seq}||{row['scientificName']}"
-                kept = st.checkbox(
-                    f"{row['scientificName']} ({row['validation_step']}){flags}",
-                    value=key not in excluded,
-                    key=f"keep_{key}",
-                )
-                if kept and key in excluded:
-                    excluded.discard(key)
-                    changed = True
-                elif not kept and key not in excluded:
-                    excluded.add(key)
-                    changed = True
-            if changed:
-                st.session_state.excluded_results = sorted(excluded)
+def _select_sequence(table_key, seq_ids):
+    """Show the sequence clicked in the assignment table below it."""
+    rows = st.session_state[table_key]["selection"]["rows"]
+    if rows:
+        seq_id = seq_ids[rows[0]]
+        st.session_state[SELECTED_SEQUENCE_KEY] = seq_id
+        st.session_state._widget_overrides[SELECTED_SEQUENCE_KEY] = seq_id
 
 
 # --------------------------------------------------------------------
-# CURATION
+# SECTIONS
 # -------------------------------------------------------------------
 
 
-def show_curated_results(results_df):
-    """Show the curated results list and CSV export."""
-    from trident.pipelines.results_pipeline import EXPORT_COLS, build_gbif_export_df
+def show_summary(assignments, curated_df, results_df, threshold):
+    """Counts of sequences by assignment level and of candidate species."""
+    st.markdown("### 📋 Summary")
 
-    curated_df = filter_excluded_results(
-        results_df, set(st.session_state.excluded_results)
+    n_species = assignments["n_species"]
+    species_level = assignments["species_level"]
+    higher = assignments[(n_species > 0) & ~species_level]
+    unassigned = assignments[n_species == 0]
+
+    st.markdown("**Sequences**")
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+    c1.metric("Total", len(assignments))
+    c2.metric(
+        "Species level",
+        int(species_level.sum()),
+        help="Sequences whose candidates resolve to one species.",
     )
-    n_excluded = len(results_df.dropna(subset=["scientificName"])) - len(
-        curated_df.dropna(subset=["scientificName"])
+    c3.metric(
+        "Higher rank",
+        len(higher),
+        help=(
+            "Sequences with several candidate species, assigned to the lowest "
+            "rank they share (as in the one-row-per-sequence table)."
+        ),
+    )
+    c4.metric(
+        "Unassigned",
+        len(unassigned),
+        help="Sequences without a candidate species.",
+    )
+    c5.metric(
+        f"Identity < {threshold}%",
+        int(assignments["low_identity"].sum()),
+        help="Sequences whose best NCBI identity is below the threshold.",
+    )
+    c6.metric(
+        CHECK_LABELS[CHECK_DIFFERS],
+        int(assignments["check_differs"].sum()),
+        help=(
+            f"Sequences with a {CHECK_NOTES[CHECK_DIFFERS]}. Check them and keep "
+            "or exclude the species."
+        ),
+    )
+    c7.metric(
+        CHECK_LABELS[CHECK_PARTIAL],
+        int(assignments["check_partial"].sum()),
+        help=(
+            f"Sequences with a {CHECK_NOTES[CHECK_PARTIAL]}. Check them and keep "
+            "or exclude the species."
+        ),
+    )
+    if not higher.empty:
+        ranks = pd.Series(
+            [
+                rank.lower()
+                if pd.notna(rank)
+                else ("no shared taxon" if n > 1 else "rank unknown")
+                for rank, n in zip(higher["taxonRank"], higher["n_species"])
+            ]
+        )
+        st.caption(f"Higher rank: {count_phrase(ranks)}.")
+    if not unassigned.empty:
+        reasons = unassigned["note"].value_counts()
+        st.caption(
+            "Unassigned: "
+            + ", ".join(f"{n} with {reason}" for reason, n in reasons.items())
+            + "."
+        )
+
+    species_rows = curated_df.dropna(subset=["scientificName"])
+    steps = species_rows.groupby("validation_step")["scientificName"].nunique()
+    resolved_species = assignments.loc[species_level, "species"].dropna().unique()
+
+    st.markdown("**Species**")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(
+        "Candidate species",
+        species_rows["scientificName"].nunique(),
+        help=(
+            "Every species kept for at least one sequence, including the "
+            "candidates of sequences assigned at a higher rank."
+        ),
+    )
+    c2.metric(
+        "MOL+GEO",
+        steps.get("MOL+GEO", 0),
+        help="MOL species of the sequence that GEO kept.",
+    )
+    c3.metric(
+        "HYPO",
+        steps.get("HYPO", 0),
+        help=(
+            "HYPO species: validated through their BOLD CO1 proxy (HYPO settings). "
+            "Those whose check hit the MOL identity filter would drop are flagged; "
+            "those whose check hit covers only part of the sequence are marked for "
+            "review."
+        ),
+    )
+    c4.metric(
+        "Species identified",
+        len(resolved_species),
+        help="Species to which at least one sequence resolves.",
     )
 
-    with st.container(border=True):
-        col_header, col_slider = st.columns([2, 1], vertical_alignment="top")
-        with col_header:
-            st.markdown("### ✅ Curated Results")
-        with col_slider:
-            low_identity_curated = st.slider(
-                "Low Identity Threshold (%)",
-                90,
-                100,
-                97,
-                key="low_id_curated",
-                help="Highlight species below this identity threshold",
-            )
-
-        valid_curated = curated_df.dropna(subset=["scientificName"])
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric(
-            "Total Species",
-            valid_curated["scientificName"].nunique(),
-            help="Unique species remaining after manual curation.",
-        )
-        c2.metric(
-            "MOL+GEO",
-            (valid_curated["validation_step"] == "MOL+GEO").sum(),
-            help="Species confirmed via direct NCBI hit + geographic validation.",
-        )
-        c3.metric(
-            "HYPO",
-            (valid_curated["validation_step"] == "HYPO").sum(),
-            help="Species confirmed via CO1 proxy validation (BOLD/NCBI).",
-        )
-        c4.metric(
-            "Excluded",
-            n_excluded,
-            delta=f"-{n_excluded}" if n_excluded else None,
-            delta_color="inverse",
-            help="Species manually removed via the 'Keep' checkboxes above.",
-        )
-
-        # Styled table with highlights
-        display_df = add_low_identity_warning(curated_df.copy(), low_identity_curated)
-
-        legends = []
-        if display_df["low_identity_warning"].any():
-            legends.append(f":red[■] Low Identity (<{low_identity_curated}%)")
-        if display_df["below_mol"].any():
-            legends.append(
-                ":orange[■] Found in NCBI but would not have passed the MOL filter"
-            )
-        if display_df["scientificName"].isna().any():
-            legends.append(":gray[■] No species assigned")
-        if legends:
-            st.caption(" · ".join(legends))
-
-        styled_df = (
-            styled_or_plain(display_df, highlight_below_mol)
-            .apply(highlight_low_identity, axis=1)
-            .apply(highlight_empty_sequence, axis=1)
-        )
-
-        st.dataframe(
-            styled_df,
-            width="stretch",
-            hide_index=True,
-            column_order=RESULT_COLS,
-            column_config=RESULTS_COLUMN_CONFIG,
-        )
-
-        # CSV exports
-        analysis_name = st.session_state.get("analysis_name", "results")
-
-        export_cols = [c for c in EXPORT_COLS if c in curated_df.columns]
-        csv_full = curated_df[export_cols].to_csv(index=False)
-
-        dl1, dl2 = st.columns(2)
-        with dl1:
-            st.download_button(
-                label="📥 Full results (CSV)",
-                data=csv_full,
-                file_name=f"{analysis_name}_results.csv",
-                mime="text/csv",
+    excluded = results_df.dropna(subset=["scientificName"])
+    excluded = excluded[
+        exclusion_keys(excluded).isin(st.session_state.excluded_results)
+    ].drop_duplicates(subset=["seq_id", "scientificName"])
+    if not excluded.empty:
+        with st.expander(f"Excluded by hand ({species_for_sequences(excluded)})"):
+            st.caption("Select the sequence and check Keep to restore a species.")
+            st.dataframe(
+                excluded,
                 width="stretch",
+                hide_index=True,
+                column_order=[
+                    "seq_id",
+                    "scientificName",
+                    "validation_step",
+                    "mol_identity",
+                    "hypo_check_identity",
+                ],
+                column_config=column_config(
+                    [
+                        "seq_id",
+                        "scientificName",
+                        "validation_step",
+                        "mol_identity",
+                        "hypo_check_identity",
+                    ]
+                ),
             )
-        with dl2:
-            if st.button("📥 GBIF export (CSV)", width="stretch"):
-                with st.spinner("Looking up higher-level taxa in WoRMS..."):
-                    gbif_df = build_gbif_export_df(curated_df)
-                st.session_state._gbif_export_csv = gbif_df.to_csv(index=False)
-
-            if "_gbif_export_csv" in st.session_state:
-                st.download_button(
-                    label="⬇️ Download GBIF export",
-                    data=st.session_state._gbif_export_csv,
-                    file_name=f"{analysis_name}_gbif_export.csv",
-                    mime="text/csv",
-                    width="stretch",
-                )
 
 
-# --------------------------------------------------------------------
-# PER SPECIES
-# -------------------------------------------------------------------
+def _bulk_button(col, name, rows, label, what, criterion):
+    """One exclude button, labelled Restore once it has excluded its rows."""
+    done = st.session_state.bulk_excluded.get(name)
+    if done is not None:
+        excluded = set(st.session_state.excluded_results)
+        label = f"Restore the {len(set(done) & excluded)} excluded {what}"
+    col.button(
+        label,
+        key=f"exclude_{name}",
+        on_click=_toggle_bulk,
+        args=(name, exclusion_keys(rows).tolist()),
+        disabled=done is None and rows.empty,
+        width="stretch",
+        help=(
+            f"{criterion} They leave the curated results and the exports. "
+            "Click again to restore them, or restore one by selecting its "
+            "sequence and checking Keep."
+        ),
+    )
+
+
+def _from_sequences(n: int, kind: str = "") -> str:
+    """ "from 3 low identity sequences", or "from 1 low identity sequence"."""
+    return f"from {n} {kind} {pluralize(n, 'sequence')}".replace("  ", " ")
+
+
+def show_bulk_buttons(assignments, curated_df, threshold):
+    """Buttons excluding at once what a filter flags: every candidate of the
+    low identity sequences (which then become unassigned), the HYPO species
+    whose check hit differs, or those with a partial check hit. A second click
+    restores what the button excluded."""
+    species_rows = curated_df.dropna(subset=["scientificName"])
+    check = species_rows["hypo_check_result"]
+    low = assignments.loc[assignments["low_identity"], "seq_id"]
+    low_rows = species_rows[species_rows["seq_id"].isin(low)]
+    col1, col2, col3 = st.columns(3)
+    _bulk_button(
+        col1,
+        "Low identity",
+        low_rows,
+        label=(
+            f"Exclude all {len(low_rows)} {pluralize(len(low_rows), 'candidate')} "
+            f"{_from_sequences(low.nunique(), 'low identity')}"
+        ),
+        what="low identity candidates",
+        criterion=(
+            "Excludes every candidate species of the sequences whose best NCBI "
+            f"identity is below {threshold}% (the slider above). These "
+            "sequences become unassigned."
+        ),
+    )
+    for col, result in ((col2, CHECK_DIFFERS), (col3, CHECK_PARTIAL)):
+        what = f'"{result}" HYPO species'
+        rows = species_rows[check == result]
+        n_seqs = rows["seq_id"].nunique()
+        _bulk_button(
+            col,
+            CHECK_LABELS[result],
+            rows,
+            label=f"Exclude the {len(rows)} {what} {_from_sequences(n_seqs)}",
+            what=what,
+            criterion=f"Excludes each {CHECK_NOTES[result]}.",
+        )
+
+
+def show_assignments(assignments, curated_df, threshold):
+    """One row per sequence, filtered; clicking a row selects that sequence."""
+    with st.container(border=True):
+        st.markdown("### 🧬 Assignment per (M)OTU/ASV")
+        counts = {
+            choice: len(_filtered_seq_ids(assignments, choice)) for choice in FILTERS
+        }
+        choice = setting_widget(
+            st.segmented_control,
+            FILTER_KEY,
+            "All",
+            FILTERS,
+            label="Show",
+            caption=False,
+            format_func=lambda c: f"{c} ({counts[c]})",
+            help=(
+                f"{CHECK_LABELS[CHECK_DIFFERS]}, a {CHECK_NOTES[CHECK_DIFFERS]}. "
+                f"{CHECK_LABELS[CHECK_PARTIAL]}, a {CHECK_NOTES[CHECK_PARTIAL]}. "
+                f"Low identity: best NCBI identity below {threshold}%."
+            ),
+        )
+        # Clicking the active button deselects it: show everything then.
+        choice = choice or "All"
+        show_bulk_buttons(assignments, curated_df, threshold)
+        shown = assignments[
+            assignments["seq_id"].isin(_filtered_seq_ids(assignments, choice))
+        ].reset_index(drop=True)
+        st.caption(
+            "Click a row to see and curate its candidate species in the "
+            '"Candidate species of a (M)OTU/ASV" panel below.'
+        )
+        # A selection belongs to one table: a new key per filter and per shown
+        # sequence keeps it from pointing at another row once either changes.
+        table_key = (
+            f"{ASSIGNMENTS_KEY}_{choice}_{st.session_state.get(SELECTED_SEQUENCE_KEY)}"
+        )
+        st.dataframe(
+            shown,
+            width="stretch",
+            hide_index=True,
+            on_select=partial(_select_sequence, table_key, shown["seq_id"].tolist()),
+            selection_mode="single-row",
+            key=table_key,
+            column_order=ASSIGNMENT_COLS,
+            column_config=column_config(
+                ASSIGNMENT_COLS,
+                scientificName=st.column_config.TextColumn(
+                    "Assignment",
+                    help="The species, or the lowest taxon its candidates share.",
+                ),
+                n_species=st.column_config.NumberColumn(
+                    "Candidates", help="Candidate species kept for this sequence."
+                ),
+                note=st.column_config.TextColumn("To Check"),
+            ),
+        )
+
+
+# What an unassigned sequence had at the step that lost it: the session table
+# that step read, and the sentence above it (the note above says why).
+LOST_AT_TABLES = {
+    "MOL Filter": ("ncbi_search_df", "This sequence's NCBI hits:"),
+    "TAX": ("mol_df", "This sequence's MOL hits:"),
+    "TAX failed": ("mol_df", "This sequence's MOL hits:"),
+    "GEO match": (
+        "tax_df",
+        "This sequence's candidates with no confident GBIF match (also listed "
+        'on the GEO page under "TAX species not found in GBIF"):',
+    ),
+    "GEO failed": ("tax_df", "This sequence's candidates whose GBIF search failed:"),
+    "EXTRA": ("geo_df", "This sequence's candidates added by TAX:"),
+    "EXTRA failed": (
+        "geo_df",
+        "This sequence's candidates added by TAX whose BOLD search failed:",
+    ),
+    "HYPO search failed": (
+        "geo_df",
+        "This sequence's candidates added by TAX whose HYPO BLAST search failed:",
+    ),
+    "HYPO check failed": (
+        "geo_df",
+        "This sequence's candidates added by TAX whose HYPO check failed:",
+    ),
+    "EXTRA not run": ("geo_df", "This sequence's candidates added by TAX:"),
+    "HYPO": ("geo_df", "The candidates added by TAX that HYPO tested:"),
+    "HYPO not run": ("geo_df", "This sequence's candidates added by TAX:"),
+}
+LOST_AT_COLS = [
+    "scientificName",
+    "accepted_name",
+    "identity_percentage",
+    "query_cover",
+    "hit_def",
+    "hit_url",
+    "geo_occurrences",
+    "geo_url",
+    "taxonURL",
+]
+
+
+def _show_lost_at(seq_id, step):
+    """Show what an unassigned sequence had at the step that lost it, as
+    that step recorded it."""
+    names = _lost_at([seq_id])[seq_id][1]
+    if step == "GEO":
+        params = st.session_state.geo_params
+        min_occ = params["gbif_min_occurrences"]
+        extent = params["gbif_filter_extent"]
+        df = st.session_state.gbif_search_df
+        # Only the candidates lost at GEO, not a congener the MOL filter
+        # rejected that TAX kept.
+        seq_df = df[(df["seq_id"] == seq_id) & df["scientificName"].isin(names)]
+        area = area_label(extent, params.get("gbif_area"))
+        st.caption(
+            f"This sequence's candidates and their GBIF occurrences. GEO keeps a "
+            f"species with at least {min_occ} {pluralize(min_occ, 'occurrence')} "
+            f"{area}."
+        )
+        display_gbif_sequence_table(
+            seq_df,
+            min_occ,
+            st.session_state.gbif_search_params["gbif_extents"],
+            extent,
+            note_empty_area=False,
+        )
+        return
+    if step not in LOST_AT_TABLES:
+        return
+    key, caption = LOST_AT_TABLES[step]
+    df = st.session_state[key]
+    rows = df[df["seq_id"] == seq_id]
+    if key in ("tax_df", "geo_df"):
+        # Only the candidates that ended at this step: TAX and GEO also list
+        # species lost elsewhere, such as a congener the MOL filter rejected
+        # and TAX kept.
+        rows = rows[rows["scientificName"].isin(names)]
+    name_table = st.session_state.name_table
+    if key == "mol_df" and not resolved_names(name_table).empty:
+        rows = rows.assign(accepted_name=species_of(rows["scientificName"], name_table))
+    if "identity_percentage" in rows.columns:
+        rows = rows.sort_values("identity_percentage", ascending=False)
+    st.caption(caption)
+    st.dataframe(
+        rows,
+        width="stretch",
+        hide_index=True,
+        column_order=[c for c in LOST_AT_COLS if c in rows.columns],
+        column_config=column_config(LOST_AT_COLS),
+    )
+
+
+def show_species_flow(seq_id):
+    """The selected sequence's candidates at each step, as a Sankey."""
+    state = st.session_state
+    links = build_species_flows([seq_id], **_flow_tables())[seq_id]
+    if not links:
+        if seq_id in continued_failures().get("ncbi_search_failed", []):
+            st.info(f"{LOSS_REASONS['MOL failed']}.")
+        else:
+            st.info("No NCBI hit for this sequence.")
+        return
+    st.caption(
+        "Candidate species of this sequence at each step. Hover over a box or "
+        "a flow to see its species."
+    )
+    st.plotly_chart(
+        plot_species_flow(links),
+        width="stretch",
+        config={
+            "displayModeBar": True,
+            "toImageButtonOptions": {
+                "format": "png",
+                "scale": 4,
+                "filename": f"species_flow_{seq_id}",
+            },
+        },
+    )
+    table = species_flow_table(
+        seq_id, links, state.get("ncbi_search_df"), state.get("name_table")
+    )
+    with st.expander(
+        f"Species at each step ({len(table)} {pluralize(len(table), 'name')})"
+    ):
+        st.dataframe(
+            table,
+            width="stretch",
+            hide_index=True,
+            column_config=column_config(["species", "origin", "outcome", "identity"]),
+        )
+
+
+def show_sequence_detail(results_df, assignments, threshold):
+    """The selected sequence's assignment and candidates, with Keep checkboxes."""
+    with st.container(border=True):
+        st.markdown("### 🔬 Candidate species of a (M)OTU/ASV")
+        by_seq = assignments.set_index("seq_id")
+
+        labels = {
+            seq_id: f"{seq_id} ∅" if n == 0 else f"{seq_id} ⚠" if note else seq_id
+            for seq_id, n, note in zip(
+                assignments["seq_id"], assignments["n_species"], assignments["note"]
+            )
+        }
+        selected_seq = sequence_selector(labels=labels)
+        row = by_seq.loc[selected_seq]
+        n = row["n_species"]
+        rank = row["taxonRank"].lower() if pd.notna(row["taxonRank"]) else None
+        candidates = f", {n} candidate species" if n > 1 else ""
+        if n == 0:
+            st.info(f"Unassigned: {row['note']}.")
+            _show_lost_at(selected_seq, row["lost_at"])
+        elif row["species_level"] or rank:
+            st.markdown(
+                f"Assigned to **{row['scientificName']}** "
+                f"({rank or 'species'}){candidates}."
+            )
+        elif n > 1:
+            st.markdown(f"{n} candidate species with no shared taxon.")
+        else:
+            st.markdown(f"Assigned to **{row['scientificName']}** (rank unknown).")
+        if row["note"] and row["n_species"]:
+            st.caption(f"⚠ {row['note'][:1].upper()}{row['note'][1:]}.")
+
+        tab_table, tab_flow = st.tabs(["Candidates", "Plot (steps)"])
+        with tab_table:
+            _show_candidates(results_df, assignments, threshold, selected_seq)
+        with tab_flow:
+            show_species_flow(selected_seq)
+
+
+def _show_candidates(results_df, assignments, threshold, selected_seq):
+    """The selected sequence's candidates, with Keep checkboxes."""
+    species_rows = results_df.dropna(subset=["scientificName"])
+    table = species_rows[species_rows["seq_id"] == selected_seq].reset_index(drop=True)
+    if table.empty:
+        st.caption("No candidate species.")
+        return
+    table = flag_low_identity(
+        table, threshold, assignments.set_index("seq_id")["best_identity"]
+    )
+    row_keys = exclusion_keys(table).tolist()
+    excluded = set(st.session_state.excluded_results)
+    table.insert(0, "keep", [key not in excluded for key in row_keys])
+
+    legends = ["Uncheck Keep to exclude a candidate from this sequence."]
+    if table["low_identity_warning"].any():
+        legends.append(f":red[■] Best identity below {threshold}%")
+    legends += check_legends(table)
+    st.caption("  \n".join(legends))
+
+    editor_key = f"keep_{selected_seq}_{st.session_state.get('_keep_version', 0)}"
+    st.data_editor(
+        styled_or_plain(table, highlight_check_result, highlight_low_identity),
+        width="stretch",
+        hide_index=True,
+        key=editor_key,
+        on_change=_apply_keep_edits,
+        args=(editor_key, row_keys),
+        disabled=[c for c in table.columns if c != "keep"],
+        column_order=["keep", *CANDIDATE_COLS],
+        column_config=column_config(["keep", *CANDIDATE_COLS]),
+    )
 
 
 def _species_breakdown_columns(sp_df, is_hypo):
-    """Build column_order and column_config for the per-species breakdown table."""
-    if is_hypo:
-        col_order = [
+    """The columns of the per-species breakdown table of one validation."""
+    if not is_hypo:
+        return [
             "seq_id",
             "validation_step",
-            "proxy_identity_percentage",
-            "proxy_query_cover",
-            "gbif_occurrences",
+            "mol_identity",
+            "mol_query_cover",
+            "geo_occurrences",
         ]
-        col_config = {
-            "seq_id": COL["seq_id"],
-            "validation_step": RESULTS_COLUMN_CONFIG["validation_step"],
-            "proxy_identity_percentage": st.column_config.NumberColumn(
-                "Identity (%)",
-                format="%.2f",
-                help="BLAST identity from CO1 proxy validation.",
-            ),
-            "proxy_query_cover": st.column_config.NumberColumn(
-                "Query Cover (%)",
-                format="%.2f",
-                help="Query coverage from CO1 proxy validation.",
-            ),
-            "gbif_occurrences": COL["gbif_occurrences"],
-        }
-        if sp_df["ncbi_top_identity_percentage"].notna().any():
-            col_order.extend(["ncbi_top_identity_percentage", "ncbi_top_query_cover"])
-            col_config["ncbi_top_identity_percentage"] = st.column_config.NumberColumn(
-                "Check Identity (%)",
-                format="%.2f",
-                help="NCBI marker check identity (species found for target marker).",
-            )
-            col_config["ncbi_top_query_cover"] = st.column_config.NumberColumn(
-                "Check Query Cover (%)",
-                format="%.2f",
-                help="NCBI marker check query coverage.",
-            )
-    else:
-        col_order = [
-            "seq_id",
-            "validation_step",
-            "ncbi_top_identity_percentage",
-            "ncbi_top_query_cover",
-            "gbif_occurrences",
-        ]
-        col_config = {
-            "seq_id": COL["seq_id"],
-            "validation_step": RESULTS_COLUMN_CONFIG["validation_step"],
-            "ncbi_top_identity_percentage": RESULTS_COLUMN_CONFIG[
-                "ncbi_top_identity_percentage"
-            ],
-            "ncbi_top_query_cover": RESULTS_COLUMN_CONFIG["ncbi_top_query_cover"],
-            "gbif_occurrences": COL["gbif_occurrences"],
-        }
-
-    col_config["low_identity_warning"] = None
-    return col_order, col_config
-
-
-def _show_species_breakdown_table(df, is_hypo, threshold):
-    """Render a styled breakdown table for a subset of species rows."""
-    col_order, col_config = _species_breakdown_columns(df, is_hypo)
-    col_config["below_mol"] = None
-    display_df = add_low_identity_warning(df.copy(), threshold)
-    styled_df = styled_or_plain(display_df, highlight_below_mol, highlight_low_identity)
-    st.dataframe(
-        styled_df,
-        width="stretch",
-        hide_index=True,
-        column_order=col_order,
-        column_config=col_config,
-    )
+    shown = [
+        "seq_id",
+        "validation_step",
+        "proxy_identity",
+        "proxy_query_cover",
+        "geo_occurrences",
+        "hypo_check_result",
+    ]
+    if sp_df["hypo_check_identity"].notna().any():
+        shown += ["hypo_check_identity", "hypo_check_query_cover"]
+    return shown
 
 
 def _show_all_hits_expander(species, is_hypo):
@@ -447,39 +797,29 @@ def _show_all_hits_expander(species, is_hypo):
         if hits.empty:
             return
 
-        col_order = [
+        shown = [
             "seq_id",
-            "scientificName_hit",
-            "identity_percentage",
-            "query_cover",
-            "hit_url",
+            "proxy_hit_species",
+            "proxy_identity",
+            "proxy_query_cover",
+            "proxy_hit_url",
+            "proxy_url",
         ]
-        col_config = {
-            "seq_id": COL["seq_id"],
-            "scientificName_hit": st.column_config.TextColumn("Proxy Species"),
-            "identity_percentage": COL["identity_percentage"],
-            "query_cover": COL["query_cover"],
-            "hit_url": COL["hit_url"],
-        }
-        if "seq_url" in hits.columns:
-            col_order.append("seq_url")
-            col_config["seq_url"] = st.column_config.LinkColumn(
-                "BOLD Link", display_text="🔗 View"
-            )
-
         with st.expander(f"All proxy validation hits ({len(hits)})"):
             st.dataframe(
                 hits,
                 width="stretch",
                 hide_index=True,
-                column_order=col_order,
-                column_config=col_config,
+                column_order=shown,
+                column_config=column_config(shown),
             )
     else:
         mol_df = st.session_state.get("mol_df")
         if mol_df is None:
             return
-        hits = mol_df[mol_df["scientificName"] == species]
+        # The species' hits under any of its NCBI names.
+        keys = species_key(mol_df["scientificName"], st.session_state.name_table)
+        hits = mol_df[keys == normalize_name(species)]
         if hits.empty:
             return
 
@@ -488,34 +828,24 @@ def _show_all_hits_expander(species, is_hypo):
                 hits,
                 width="stretch",
                 hide_index=True,
-                column_order=[
-                    "seq_id",
-                    "hit_def",
-                    "identity_percentage",
-                    "query_cover",
-                    "hit_url",
-                ],
-                column_config={
-                    "seq_id": COL["seq_id"],
-                    "hit_def": COL["hit_def"],
-                    "identity_percentage": COL["identity_percentage"],
-                    "query_cover": COL["query_cover"],
-                    "hit_url": COL["hit_url"],
-                },
+                column_order=NCBI_HIT_COLS,
+                column_config=column_config(
+                    NCBI_HIT_COLS,
+                    scientificName=st.column_config.TextColumn("NCBI Name"),
+                ),
             )
 
 
-def show_results_per_species(results_df):
-    """Display per-species detail view with species selector."""
-
+def show_results_per_species(results_df, assignments, threshold, same_species):
+    """Taxonomy, links and sequences of one species. same_species: see
+    same_species_as."""
     with st.container(border=True):
         st.markdown("### 🐟 Species Summary & Links")
 
         valid_df = results_df.dropna(subset=["scientificName"])
         species_list = sorted(valid_df["scientificName"].unique().tolist())
-
         if not species_list:
-            st.info("No validated species yet.")
+            st.info("No candidate species yet.")
             return
 
         selected_species = st.selectbox(
@@ -524,11 +854,9 @@ def show_results_per_species(results_df):
             index=0,
             key="results_species_selector",
         )
-
         sp_df = valid_df[valid_df["scientificName"] == selected_species]
         row = sp_df.iloc[0]
 
-        # Taxonomy card
         tax_parts = []
         for rank in ["kingdom", "phylum", "class", "order", "family", "genus"]:
             val = row.get(rank)
@@ -537,93 +865,67 @@ def show_results_per_species(results_df):
         if pd.notna(row.get("scientificNameAuthorship")):
             tax_parts.append(f"**Authorship:** {row['scientificNameAuthorship']}")
         st.markdown(" · ".join(tax_parts))
+        same = same_species.get(selected_species)
+        if same:
+            st.warning(
+                f"Possibly the same species as {same}: another source counts "
+                "them as one species.",
+                icon="⚠️",
+            )
 
-        # Links
         links = []
-        if pd.notna(row.get("taxonURL")):
-            links.append(f"[🔗 WoRMS]({row['taxonURL']})")
-        if pd.notna(row.get("gbif_taxonURL")):
-            links.append(f"[🔗 GBIF]({row['gbif_taxonURL']})")
-        if pd.notna(row.get("ncbi_top_hit_url")):
-            links.append(f"[🔗 NCBI]({row['ncbi_top_hit_url']})")
-        if pd.notna(row.get("bold_seq_url")):
-            links.append(f"[🔗 BOLD]({row['bold_seq_url']})")
+        for col, label in (
+            ("taxonURL", "WoRMS"),
+            ("geo_url", "GBIF"),
+            ("mol_hit_url", "NCBI"),
+            ("proxy_url", "BOLD"),
+        ):
+            if pd.notna(row.get(col)):
+                links.append(f"[🔗 {label}]({row[col]})")
         if links:
             st.markdown(" · ".join(links))
 
         st.divider()
 
-        # Per-sequence breakdown — split by validation path when both exist
-        low_identity = st.session_state.get("low_id", 97)
-        has_mol_geo = (sp_df["validation_step"] == "MOL+GEO").any()
-        has_hypo = (sp_df["validation_step"] == "HYPO").any()
-
-        if has_mol_geo and has_hypo:
-            # Both paths — show separate tables with appropriate columns
-            st.markdown("#### MOL+GEO Sequences")
-            mol_geo_df = sp_df[sp_df["validation_step"] == "MOL+GEO"]
-            _show_species_breakdown_table(
-                mol_geo_df, is_hypo=False, threshold=low_identity
+        best_identity = assignments.set_index("seq_id")["best_identity"]
+        for step, is_hypo in (("MOL+GEO", False), ("HYPO", True)):
+            step_df = sp_df[sp_df["validation_step"] == step]
+            if step_df.empty:
+                continue
+            st.markdown(f"#### {step} Sequences")
+            if legends := check_legends(step_df):
+                st.caption("  \n".join(legends))
+            shown = _species_breakdown_columns(step_df, is_hypo)
+            st.dataframe(
+                styled_or_plain(
+                    flag_low_identity(step_df, threshold, best_identity),
+                    highlight_check_result,
+                    highlight_low_identity,
+                ),
+                width="stretch",
+                hide_index=True,
+                column_order=shown,
+                column_config=column_config(shown),
             )
-            _show_all_hits_expander(selected_species, is_hypo=False)
-
-            st.markdown("#### HYPO Sequences")
-            hypo_df = sp_df[sp_df["validation_step"] == "HYPO"]
-            _show_species_breakdown_table(hypo_df, is_hypo=True, threshold=low_identity)
-            _show_all_hits_expander(selected_species, is_hypo=True)
-        else:
-            st.markdown("#### Sequences")
-            _show_species_breakdown_table(
-                sp_df, is_hypo=has_hypo, threshold=low_identity
-            )
-            _show_all_hits_expander(selected_species, is_hypo=has_hypo)
+            _show_all_hits_expander(selected_species, is_hypo=is_hypo)
 
 
-# --------------------------------------------------------------------
-# DOWNLOAD
-# -------------------------------------------------------------------
-
-
-def show_db_download_button():
-    """Download button for the SQLite database."""
-    db_path_str = st.session_state.get("db_path")
-    if not db_path_str:
-        st.caption("*No analysis started yet.*")
-        return
-
-    db_path = Path(db_path_str)
-    if not db_path.is_file():
-        st.caption("*Database file not found.*")
-        return
-
-    with open(db_path, "rb") as f:
-        db_bytes = f.read()
-
-    analysis_name = st.session_state.get("analysis_name", "analysis")
-    st.download_button(
-        label=f"📥 Download Database ({analysis_name}.db)",
-        data=db_bytes,
-        file_name=f"{analysis_name}.db",
-        mime="application/x-sqlite3",
-        width="stretch",
-    )
-
-
-# --------------------------------------------------------------------
-# MAIN
-# -------------------------------------------------------------------
-
-
-def _show_export_section():
-    """Database export — always visible when an analysis is active."""
+def show_curated_results(curated_df):
+    """Every kept candidate of every sequence: the rows the CSV export writes."""
     with st.container(border=True):
-        st.markdown("### 💾 Export")
-        st.caption(
-            "Download the full SQLite database containing all intermediate results, "
-            "cached searches, and parameters from every pipeline step. "
-            "This file can be re-imported at the Start tab to restore or share an analysis."
+        st.markdown("### ✅ Curated results")
+        # Flags are handled above (filters, buttons): only empty sequences show.
+        legends = ["One row per sequence and kept candidate species."]
+        if curated_df["scientificName"].isna().any():
+            legends.append(":gray[■] No species assigned")
+        st.caption("  \n".join(legends))
+        st.dataframe(
+            styled_or_plain(curated_df, highlight_empty_sequence),
+            width="stretch",
+            hide_index=True,
+            column_order=["seq_id", *CANDIDATE_COLS],
+            column_config=column_config(["seq_id", *CANDIDATE_COLS]),
         )
-        show_db_download_button()
 
 
 # Search steps whose query date reflects the state of a live external database.
@@ -633,6 +935,8 @@ _SOURCE_STEPS = [
     ("gbif_search", "GBIF", "GEO"),
     ("bold_search", "BOLD", "EXTRA"),
     ("hypo_search", "NCBI", "HYPO"),
+    ("hypo_check", "NCBI", "HYPO check"),
+    ("worms_higher_taxa", "WoRMS", "One row per sequence table"),
 ]
 
 
@@ -646,8 +950,10 @@ def show_provenance_section():
     if prov.empty:
         return
 
-    versions = prov["trident_version"].dropna()
-    version = versions.iloc[0] if not versions.empty else "unknown"
+    # Every version of the saved runs, by date of first use: a step rerun
+    # after an upgrade has another one.
+    by_date = prov.sort_values("queried_on", kind="stable")
+    versions = list(dict.fromkeys(by_date["trident_version"].dropna()))
 
     rows = []
     for table, source, step in _SOURCE_STEPS:
@@ -661,44 +967,204 @@ def show_provenance_section():
         return
 
     with st.expander("🔎 Data sources & provenance", expanded=False):
+        if not versions:
+            produced = "TRIDENT version unknown."
+        elif len(versions) == 1:
+            produced = f"Produced with TRIDENT {versions[0]}."
+        else:
+            produced = (
+                "This analysis file holds runs made with TRIDENT "
+                f"{', '.join(versions[:-1])} and {versions[-1]}."
+            )
         st.caption(
-            f"Produced with trident {version}. Dates are when each live database "
-            "was queried (UTC); they reflect the database state used for this analysis."
+            f"{produced} Dates are when each live database was queried, for "
+            "the runs saved in this file (UTC)."
         )
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 
-def results_main():
-    st.title("📦 Analysis Results")
-    st.divider()
+def show_exports(curated_df):
+    """Every download in one place, with the provenance of the analysis."""
+    with st.container(border=True):
+        st.markdown("### 💾 Export")
+        analysis_name = st.session_state.get("analysis_name", "results")
 
-    _show_export_section()
+        if curated_df is not None:
+            st.caption(
+                "Results after curation: one row per sequence and candidate "
+                "species, or one row per sequence at its assigned rank. The "
+                "second follows Darwin Core and the FAIRe taxa table, ready for "
+                "a GBIF submission."
+            )
+            if continued_failures():
+                st.caption(
+                    "⚠️ They leave out the failed queries you went on without "
+                    "(listed at the top of the page)."
+                )
+            if held := held_steps("excluded_results"):
+                st.caption(
+                    f"⚠️ They leave out the {FAILED_STEPS[held[0]].step} and "
+                    "the steps after it, which wait for its failed queries (see "
+                    "the top of the page)."
+                )
+            export_cols = [c for c in EXPORT_COLS if c in curated_df.columns]
+            dl1, dl2 = st.columns(2)
+            # Built when clicked, from the results shown now.
+            dl1.download_button(
+                label="📥 One row per candidate species (CSV)",
+                data=lambda: curated_df[export_cols].to_csv(index=False),
+                file_name=f"{analysis_name}_candidates.csv",
+                mime="text/csv",
+                width="stretch",
+                key="results_csv",
+            )
+            with dl2:
+                # Built in the script run, where the session's contact email
+                # and the spinner apply; offered for the results it was built
+                # from, which are hashed only once an export exists.
+                shown = None
+                if st.button(
+                    "📥 One row per sequence (Darwin Core CSV)",
+                    width="stretch",
+                    key="gbif_csv",
+                ):
+                    shown = fingerprint(curated_df[export_cols])
+                    with st.spinner("Building the table..."):
+                        gbif_df = build_gbif_export_df(
+                            curated_df, db_path=st.session_state.get("db_path")
+                        )
+                    st.session_state._gbif_export = (
+                        shown,
+                        gbif_df.to_csv(index=False),
+                        failed_items(gbif_df),
+                    )
+                built = st.session_state.get("_gbif_export")
+                if built and built[0] == (
+                    shown or fingerprint(curated_df[export_cols])
+                ):
+                    if built[2]:
+                        n = len(built[2])
+                        st.warning(
+                            f"WoRMS could not be reached for {n} higher-level "
+                            f"{pluralize(n, 'taxon')} ({name_list(built[2])}): "
+                            "their ID and author are left empty. Click **One "
+                            "row per sequence** again later to complete them."
+                        )
+                    st.download_button(
+                        label="⬇️ Download the table",
+                        data=built[1],
+                        file_name=f"{analysis_name}_assignments.csv",
+                        mime="text/csv",
+                        width="stretch",
+                        key="gbif_download",
+                    )
+
+        db_path = st.session_state.get("db_path")
+        if not db_path or not Path(db_path).is_file():
+            return
+        # On Cloud the analysis is on the server, not on the user's computer.
+        keep = (
+            "Download it to keep it or to share it."
+            if is_streamlit_cloud()
+            else "It is already saved on this computer: download it to keep a "
+            "copy elsewhere or to share it."
+        )
+        st.caption(
+            "The whole analysis in one file: the results of every step, the "
+            f"database searches and the settings used. {keep} It is a SQLite "
+            "database, readable with any SQLite tool: a sequence column may hold "
+            "the id of its sequence in the sequence_store table, where each is "
+            "kept once (see the README)."
+        )
+        st.download_button(
+            label=f"📥 Analysis file ({Path(db_path).name})",
+            data=Path(db_path).read_bytes,
+            file_name=f"{analysis_name}.db",
+            mime="application/x-sqlite3",
+            help="It can be opened again in Start Analysis.",
+            width="stretch",
+            key="db_download",
+        )
     show_provenance_section()
 
-    if st.session_state.get("geo_df") is None:
-        st.info(
-            "📊 No results yet. Complete at least steps 1–3 "
-            "(MOL → TAX → GEO) to see results."
+
+# --------------------------------------------------------------------
+# MAIN
+# -------------------------------------------------------------------
+
+
+def show_failures_notice():
+    """Say which step waits for its failed queries (Results leaves it out, and
+    the steps after it), and which failed items the user went on without.
+    Returns whether a step waits."""
+    held = held_message(
+        "excluded_results", "Results leaves out that step and the ones after it"
+    )
+    if held:
+        st.warning(held)
+    continued = continued_failures()
+    if continued:
+        lines = "\n".join(
+            f"- {FAILED_STEPS[name].step}: "
+            f"{name_list([failed_item_label(item) for item in failed])}"
+            for name, failed in continued.items()
         )
+        st.warning(
+            "⚠️ These results are incomplete: they leave out queries that "
+            "failed, as you chose to go on without them. Run their step again "
+            f"to complete the results.\n\n{lines}"
+        )
+    return held is not None
+
+
+def results_main():
+    """Render the Results tab."""
+    st.title("📦 Analysis Results")
+    st.divider()
+    held = show_failures_notice()
+
+    geo_df = ready("geo_df")
+    if geo_df is None:
+        # A held step was run: the notice above says what it waits for.
+        if not held:
+            st.info(
+                "📊 No results yet. Complete at least steps 1–3 "
+                "(MOL → TAX → GEO) to see results."
+            )
+        show_exports(None)
         return
 
     results_df = build_results_df(
         sequences_df=st.session_state.sequences_df,
-        geo_df=st.session_state.geo_df,
-        mol_df=st.session_state.mol_df,
-        hypo_df=st.session_state.get("hypo_df"),
-        ncbi_search_df=st.session_state.get("ncbi_search_df"),
+        geo_df=geo_df,
+        mol_df=ready("mol_df"),
+        hypo_df=ready("hypo_df"),
+        name_table=st.session_state.get("name_table"),
+        # Judged once for the HYPO tab and kept, not on every rerun here.
+        check_results=hypo_check_results() if ready("hypo_df") is not None else None,
     )
-
     if results_df.empty:
         st.info("📊 No results available.")
+        show_exports(None)
         return
 
-    st.divider()
-    show_results_overview(results_df)
-    st.divider()
-    show_results_per_sequence(results_df)
-    st.divider()
-    show_curated_results(results_df)
-    st.divider()
-    show_results_per_species(results_df)
+    curated_df = filter_excluded_results(
+        results_df, set(st.session_state.excluded_results)
+    )
+
+    with st.container(border=True):
+        threshold = _threshold_slider()
+        assignments = _assignments(curated_df, threshold)
+        show_summary(assignments, curated_df, results_df, threshold)
+        same_species = display_same_species(curated_df)
+
+    show_assignments(assignments, curated_df, threshold)
+    show_sequence_detail(results_df, assignments, threshold)
+    show_curated_results(curated_df)
+    show_results_per_species(
+        results_df,
+        assignments,
+        threshold,
+        same_species_as(curated_df["scientificName"], same_species),
+    )
+    show_exports(curated_df)

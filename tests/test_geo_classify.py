@@ -1,17 +1,9 @@
-"""Tests for geo_pipeline.classify_gbif_extents — per-sequence extent bucketing.
-
-Pure data logic extracted from the GEO UI: pivot one sequence's GBIF
-occurrences to wide form and bucket species into local / smaller / larger /
-never relative to the priority extent.
-"""
-
-import inspect
+"""Tests for geo_pipeline.classify_gbif_extents: one sequence's species put
+in buckets (local, smaller, larger, never) relative to the priority extent."""
 
 import pandas as pd
 
-from trident.pipelines.geo_pipeline import classify_gbif_extents, finalize_geo_results
-
-_finalize_geo = inspect.unwrap(finalize_geo_results)
+from trident.pipelines.geo_pipeline import classify_gbif_extents
 
 
 def _long_df(rows):
@@ -21,9 +13,9 @@ def _long_df(rows):
             {
                 "scientificName": sp,
                 "in_mol": False,
-                "gbif_taxonURL": f"http://gbif/{sp}",
-                "gbif_extent": ext,
-                "occurrences": occ,
+                "geo_url": f"http://gbif/{sp}",
+                "geo_extent": ext,
+                "geo_occurrences": occ,
             }
             for sp, ext, occ in rows
         ]
@@ -94,58 +86,28 @@ def test_smaller_bucket_subsets_local_with_total():
     assert smaller["total"] == 2  # denominator = local count (A, B)
 
 
-def test_larger_dedup_does_not_repeat_species():
-    # B fails at 500 (priority) but passes at both 1000 and global.
-    # It must appear once (first larger extent), not in every larger bucket.
-    seq_df = _long_df(
-        [
-            ("A", 500, 5),
-            ("B", 500, 1),
-            ("B", 1000, 5),
-            ("B", "global", 9),
-        ]
-    )
+def test_species_go_to_the_nearest_extent_where_they_reach_the_threshold():
+    """Reaching the threshold exactly counts; smaller extents only split the
+    local species, larger ones (nearest first, then global) take the others
+    once each, in km order whatever the order the extents are given in."""
+    rows = [("A", 100, 3), ("A", 500, 3)]
+    rows += [("B", 500, 2), ("B", 1000, 3), ("B", "global", 3)]
+    rows += [("C", 500, 2), ("C", 1000, 2), ("C", "global", 3)]
+    rows += [("D", 100, 2), ("D", 500, 2), ("D", "global", 2)]
     _, classification = classify_gbif_extents(
-        seq_df,
+        _long_df(rows),
         min_occurrences=3,
-        extents=[500, 1000, "global"],
+        extents=[1000, 100, "global", 500],
         priority_extent=500,
     )
-    larger = _buckets_by_kind(classification)["larger"]
-    appearances = [
-        sp for b in larger for sp in b["df"]["scientificName"].tolist() if sp == "B"
+    layout = [
+        (b["kind"], b["extent_col"], b["df"]["scientificName"].tolist())
+        for b in classification["buckets"]
     ]
-    assert appearances == ["B"]
-
-
-# --- finalize_geo_results: drop NCBI-seen-but-MOL-rejected pairs ---
-#
-# A (seq_id, species) pair is removed only when in_mol is False AND that exact
-# pair appeared in the raw NCBI search (NCBI evaluated it and MOL rejected it).
-
-
-def _geo_rows():
-    return pd.DataFrame(
-        {
-            "seq_id": ["t1", "t1", "t1"],
-            "scientificName": ["A", "B", "C"],
-            "in_mol": [True, False, False],
-        }
-    )
-
-
-def test_finalize_removes_only_rejected_non_mol_pairs():
-    out = _finalize_geo(_geo_rows(), ncbi_search_pairs={("t1", "B")})
-    # B: not in_mol AND seen by NCBI -> removed. A: in_mol -> kept.
-    # C: not in_mol but never seen by NCBI -> kept.
-    assert out["scientificName"].tolist() == ["A", "C"]
-
-
-def test_finalize_keeps_in_mol_pair_even_if_in_ncbi_pairs():
-    out = _finalize_geo(_geo_rows(), ncbi_search_pairs={("t1", "A")})
-    assert "A" in out["scientificName"].tolist()  # in_mol shields it
-
-
-def test_finalize_noop_without_pairs():
-    out = _finalize_geo(_geo_rows(), ncbi_search_pairs=None)
-    assert len(out) == 3
+    assert layout == [
+        ("local", "500 km", ["A"]),
+        ("smaller", "100 km", ["A"]),
+        ("larger", "1000 km", ["B"]),
+        ("larger", "global", ["C"]),
+        ("never", None, ["D"]),
+    ]

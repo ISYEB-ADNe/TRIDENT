@@ -27,7 +27,7 @@
   <a href="#license">License</a>
 </p>
 
-TRIDENT identifies species from environmental DNA (eDNA) barcode sequences. You upload a FASTA file of MOTU/ASV sequences, and TRIDENT cross-checks them against four biodiversity databases (NCBI, WoRMS, GBIF, BOLD) to produce a validated species list, ready for export.
+TRIDENT identifies species from environmental DNA (eDNA) barcode sequences. You upload a FASTA file of MOTU/ASV sequences, and TRIDENT cross-checks them against four biodiversity databases (GenBank through NCBI, WoRMS, GBIF, BOLD) to give each sequence its candidate species and an assignment, ready for export.
 
 It runs as a cross-platform web app (macOS, Windows, Linux), with no coding required once it is installed.
 
@@ -37,16 +37,16 @@ TRIDENT takes your sequences through five steps. Each step has its own tab in th
 
 | Step | Tab | What happens | What you get |
 |------|-----|--------------|--------------|
-| 1 | **MOL** | Your sequences are BLAST-searched against NCBI, then filtered by identity and a barcoding-gap test | Species with a direct molecular match |
-| 2 | **TAX** | Every genus found in MOL is expanded to all its accepted marine species via WoRMS | A wider candidate species list |
-| 3 | **GEO** | Candidate species are checked against GBIF occurrence records inside your study area | Only species that plausibly occur where you sampled |
-| 4 | **EXTRA** | For species with no direct NCBI match, CO1 proxy sequences are fetched from BOLD | Proxy sequences for indirect validation |
-| 5 | **HYPO** | The BOLD proxy sequences are BLAST-validated against NCBI | Hypothetical species confirmed by proxy |
+| 1 | **MOL** | Your sequences are BLAST-searched against GenBank (NCBI core_nt), and the hits are filtered by query cover and a barcoding gap | The MOL list: the species of the hits kept for each sequence |
+| 2 | **TAX** | The MOL names are checked in WoRMS, and each MOL genus is expanded to its accepted species (marine only by default) | The TAX list: MOL species plus the species added by TAX |
+| 3 | **GEO** | The TAX species are counted in GBIF occurrences within your study area | The GEO list: species with enough occurrences where you sampled |
+| 4 | **EXTRA** | For the GEO species BLAST did not return for the sequence, CO1 sequences are fetched from BOLD | Proxy sequences for these species |
+| 5 | **HYPO** | The proxies are BLAST-searched against GenBank, restricted to the MOL species of each sequence | Hypothetical species, validated through their CO1 proxy |
 
-The **Results** tab merges the two validation paths into a final table:
+The **Results** tab gives each sequence its candidate species, from two paths:
 
-- **MOL+GEO**: species with a direct NCBI match for your marker, confirmed geographically.
-- **HYPO**: species validated indirectly through a CO1 proxy, confirmed geographically.
+- **MOL+GEO**: species with a hit for your target marker, kept by GEO.
+- **HYPO**: hypothetical species, kept by GEO and validated through a CO1 proxy.
 
 ## Getting started
 
@@ -54,7 +54,7 @@ The **Results** tab merges the two validation paths into a final table:
 
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/) (package manager)
-- A contact email address (sent with every API request, required by NCBI, GBIF, WoRMS and BOLD)
+- A contact email address (sent with every request to NCBI, GBIF, WoRMS and BOLD so they can reach you in case of heavy use)
 
 ### Quick start
 
@@ -63,7 +63,7 @@ uv sync
 uv run trident
 ```
 
-The app opens in your browser. Set your contact email in the **Settings** panel on first launch.
+The app opens in your browser. Set your contact email in the **Settings** panel on first launch: an analysis can only be started or opened once it is set.
 
 <details>
 <summary><strong>Detailed installation guide (click to expand)</strong></summary>
@@ -105,40 +105,43 @@ This creates a virtual environment and installs everything needed.
 uv run trident
 ```
 
-Set your contact email in the **Settings** panel on first launch, or pre-fill it in `.streamlit/secrets.toml`:
+Set your contact email in the **Settings** panel on first launch, or pre-fill it in `.streamlit/secrets.toml` (the field stays editable; the address typed is used for the session):
 
 ```toml
 CONTACT_EMAIL = "your-email@example.com"
 ```
 
-You can also use a `.env` file at the project root:
+Copy `.streamlit/secrets.toml.example` to start; the notebooks and scripts read the same file.
 
-```env
-CONTACT_EMAIL=your-email@example.com
-```
+If BLAST searches start failing after a change on NCBI's side, `BLAST_CLIENT = "qblast"` in `secrets.toml` switches to Biopython's BLAST client.
+
+Each analysis is saved as a `.db` file in the `results/` folder of TRIDENT, whatever folder you start it from; the Start tab shows its path. `RESULTS_DIR` in `secrets.toml` (an absolute path) sets another folder.
 
 </details>
 
 ## How to use the app
 
-1. **Start Analysis**: Upload a FASTA file of your MOTU/ASV sequences (`.fasta`, `.fa`, `.fas`, `.txt`). Click **Process FASTA**, then **Proceed to MOL**.
-2. **Run each step in order**: Open MOL, TAX, GEO, EXTRA, HYPO one at a time. Each tab has its own settings; review them, then run the step. A ✅ on the tab means the step is done.
-3. **Set your study area in GEO**: Enter the latitude, longitude, and extent of your sampling region. Species not recorded there are dropped.
-4. **Results**: Once HYPO is done, open the Results tab to view the final species list and download exports.
+1. **Start Analysis**: Upload a FASTA file of your MOTU/ASV sequences (`.fasta`, `.fa`, `.fas`, `.txt`). Each sequence needs its own name: TRIDENT names a sequence by its header up to the first space or tab, and refuses a file where two share one. Click **Process FASTA**, then **Next: MOL**.
+2. **Run each step in order**: Open MOL, TAX, GEO, EXTRA, HYPO one at a time. Each tab has its own settings; review them, then run the step. A ✅ on the tab means the step is done. When some queries of a step fail, the next steps wait until you ask again for the failed ones or accept the incomplete result and continue without them.
+3. **Set your study area in GEO**: Enter the latitude and longitude of your site and one or more extents (km). Species with too few occurrences in the filtering area are left out.
+4. **Results**: The Results tab opens once MOL, TAX and GEO are done; EXTRA and HYPO add the hypothetical species. It shows a summary, the assignment of each sequence (its species, or the lowest taxon its candidate species share), the candidate species of a sequence with the step where each other species was lost, and the curated results, where you can leave out a species by hand.
+
+The **Parameters** tab lists the settings of every step that has run.
 
 ### Exports
 
-- **Full results CSV**: every species with its validation path and warning flags.
-- **GBIF-compatible CSV**: one row per MOTU/ASV; multi-species MOTUs are resolved to their lowest common taxon.
-- **SQLite database (`.db`)**: the complete analysis. Re-upload it on the Start tab to restore your work later.
+- **One row per candidate species** (`<analysis>_candidates.csv`): each sequence with its candidate species, its taxonomy, its path (MOL+GEO or HYPO), the identity and query cover of its hits, its GBIF occurrences and links to each source.
+- **One row per sequence** (`<analysis>_assignments.csv`): each sequence at its assigned rank, following Darwin Core and the FAIRe taxa table, ready for a GBIF submission.
+- **Parameters** (`<analysis>_parameters.txt`): the settings of every step, from the Parameters tab.
+- **Analysis file (`.db`)**: the whole analysis, already saved in `results/`. Download it to keep a copy elsewhere or to share it, and open it again from the Start tab. It is a SQLite database, readable with any SQLite tool. To save space, each sequence of the step tables is stored once, in the `sequence_store` table: their `*_sequence` columns hold its `id` there. The `sequences` table (the FASTA) and the `*_inputs` tables hold the sequences themselves, as do rows saved by TRIDENT versions before the store.
 
 ### Online demo
 
-A hosted demo is live on Streamlit Cloud: <https://trident-nxanjv7pk4z2fnkyulzvwt.streamlit.app/>. It is meant for trying TRIDENT on small inputs and may be limited. In particular, the EXTRA step (BOLD) may be blocked on the hosted demo, since BOLD can refuse requests from shared cloud IPs; run TRIDENT locally (above) for full analyses.
+A hosted demo is live on Streamlit Cloud: <https://trident-nxanjv7pk4z2fnkyulzvwt.streamlit.app/>. It is meant for trying TRIDENT on small inputs and may be limited. In particular, the EXTRA step (BOLD) may be blocked on the hosted demo, since BOLD can refuse requests from shared cloud IPs; run TRIDENT locally (above) for full analyses, and for unpublished data: your files stay on the demo server until it restarts.
 
 ## Example
 
-`example/example.fasta` is a small bundled set of 4 MOTU/ASV sequences. Upload it in the app for a quick end-to-end demo of the pipeline.
+`example/example.fasta` holds the 4 Svalbard MOTUs of the paper's worked example (16S, Vert16S primers). Click "Try the example" on the Start tab for a quick end-to-end demo of the pipeline: it also sets the GEO area to the sampling site (latitude 78.5, longitude 14.5, extents 250 and 500 km) and the GEO filtering area to 250 km. If you upload the file instead, enter these values in the GEO step.
 
 <details>
 <summary><strong>Run the example as a notebook (advanced)</strong></summary>
@@ -151,81 +154,91 @@ Open it in any Jupyter front-end (VS Code, JupyterLab, ...); the project ships t
 
 ## Pipeline overview
 
-Input MOTU/ASV sequences pass through five steps; the Results tab merges the two validation paths (MOL+GEO direct molecular match, HYPO indirect CO1-proxy match).
+Input MOTU/ASV sequences pass through five steps; the Results tab gives each sequence its candidate species from two paths (MOL+GEO: a hit for the target marker; HYPO: a hit through a CO1 proxy).
 
 ```text
 MOL  (NCBI BLAST)  ->  TAX (WoRMS)  ->  GEO (GBIF)  ->  EXTRA (BOLD)  ->  HYPO (NCBI BLAST)
 ```
 
-The thresholds applied at each step are detailed below. Defaults are those used by the app (`trident/ui/defaults.py`); every value is adjustable in the UI before running a step.
+The settings of each step are detailed below. Defaults are those used by the app (`trident/core/constants.py`); every setting listed is adjustable in the app before running a step, except those marked as fixed.
 
 <details>
 <summary><strong>MOL: NCBI BLAST + barcoding-gap filter</strong></summary>
 
-| Parameter | Default | Meaning / rationale |
+| Setting | Default | Meaning |
 |---|---|---|
-| Max hits per sequence | 500 | Upper bound on BLAST hits returned per query. |
-| E-value exponent | 20 (1e-20) | Significance threshold for reporting a hit. |
-| Query cover (%) | 90 | Minimum fraction of the query covered by the alignment; removes short partial matches. |
-| Filter method | `barcoding_gap` | See below; falls back to `similarity` per sequence when no gap is found. |
-| Gap size (%) | 2 | Minimum identity drop between consecutive hits to count as a barcoding gap. |
-| Gap minimum top (%) | 97 | The top of the gap must be at or above this identity; prevents calling a gap among low-identity hits. |
-| Low-identity threshold (%) | 95 | Flags species whose best hit is below this identity as a warning (not a filter, unless enforced). |
+| BLAST database | core_nt (fixed) | NCBI's Core Nucleotide database; it keeps the mitochondrial records. Each GenBank record gives one hit, its best alignment. |
+| Max hits per query | 500 | Upper bound on the BLAST hits returned per sequence (up to 1000). |
+| E-value exponent | 20 (1e-20) | Hits with a higher e-value are not returned. |
+| Query cover (%) | 90 | Minimum query cover of a hit; removes short partial hits. |
+| Filtering method | Barcoding gap | See below; a sequence with no barcoding gap falls back to the similarity range. |
+| Gap size (%) | 2 | Minimum identity drop between two consecutive hits to count as a barcoding gap, and the width of the similarity range. |
+| Gap min top (%) | 97 | The top of the gap must be at or above this identity, so no gap is called among low-identity hits. |
+| Low identity warning (%) | 95 | Flags species whose best hit is below this identity. A warning only, unless "Enforce as hard filter" is checked (default: no). |
 
-**Barcoding-gap method:** within each sequence's hits (sorted by descending identity), find the first drop >= gap size among hits at or above the gap minimum top, and keep only the hits above that gap. Sequences with no such gap fall back to the **similarity** method: keep all hits within `gap size` percent of the best hit. This keeps the tightest defensible cluster of hits per sequence.
+**Barcoding gap:** within each sequence's hits (sorted by descending identity), find the first drop of at least the gap size among hits at or above the gap min top, and keep only the hits above that gap. A sequence with no such gap falls back to the **similarity range**: keep all hits within the gap size of the best hit's identity.
+
+**Hit limit:** a sequence that reached the max hits with every hit within 3% identity of a top hit at 97% or more may have left other species with a high identity out. The MOL tab names these sequences and offers them as a FASTA file, if you want to search them again with more hits.
 
 </details>
 
 <details>
 <summary><strong>TAX: WoRMS genus expansion</strong></summary>
 
-By default only marine-flagged species are kept ("Marine species only", an advanced option); unchecking it also includes non-marine WoRMS records.
+| Setting | Default | Meaning |
+|---|---|---|
+| Marine species only | Yes | Expand each genus to its marine species only (WoRMS counts brackish species as marine too); uncheck to also add non-marine WoRMS records. |
+| Exclude species already rejected by MOL | Yes | For each sequence, leave out the species added by TAX that BLAST returned for it but that the MOL filter did not keep. A species rejected for one sequence is kept for the others. |
 
 </details>
 
 <details>
 <summary><strong>GEO: GBIF occurrence filter</strong></summary>
 
-| Parameter | Default | Meaning / rationale |
+| Setting | Default | Meaning |
 |---|---|---|
-| Name-match confidence | 95 | GBIF backbone match confidence required to accept a name. |
-| Search extent(s) (km) | 500 (+ global) | Radius of the occurrence search box around the study point. |
-| Minimum occurrences | 3 | Minimum GBIF records inside the extent to keep a species; guards against single stray records. |
+| Latitude, Longitude | | The sampling site. |
+| Search extents (km) | 500 (+ global) | Distances from the site; GBIF occurrences are counted for each extent, and worldwide. |
+| Search area | Circle | Circle: the occurrences within each extent of the site. Bounding box: the rectangle around that circle (around a pole: every longitude up to the pole). |
+| Filtering area | 500 | The extent whose counts the minimum occurrences apply to. |
+| Minimum occurrences | 3 | Minimum GBIF occurrences in the filtering area to keep a species; guards against single stray records. |
+| Name-match confidence | 95 (fixed) | GBIF name-match confidence required to accept a name. |
 
 </details>
 
 <details>
 <summary><strong>EXTRA: BOLD CO1 proxy retrieval</strong></summary>
 
-| Parameter | Default | Meaning / rationale |
+| Setting | Default | Meaning |
 |---|---|---|
-| COI-5P records only | Yes | Restrict BOLD records to the COI-5P barcode marker. |
-| Include NCBI-mined records | No | Exclude BOLD records that were mined from GenBank. |
-| Similarity threshold (%) | 98 | Sequences above this pairwise identity are treated as redundant and collapsed to one representative per cluster. |
+| COI-5P records only | Yes | Keep only BOLD records of the COI-5P barcode region. |
+| Include records mined from GenBank | No | BOLD records copied from GenBank are left out by default. |
+| Max sequences per species | No limit | Keep only the longest BOLD sequences of each species. |
+| Redundancy identity (%) | 98 | Two BOLD sequences of a species at or above this identity are redundant, and only one is kept. |
 
 </details>
 
 <details>
 <summary><strong>HYPO: NCBI BLAST validation of proxies</strong></summary>
 
-| Parameter | Default | Meaning / rationale |
+| Setting | Default | Meaning |
 |---|---|---|
 | Max hits per query | 500 | As in MOL. |
-| E-value exponent (search) | 20 (1e-20) | Significance threshold for the proxy BLAST. |
-| Identity cutoff (%) | 90 | Minimum identity to retain a proxy hit. |
-| Top N hits | 3 | Keep only the top N hits per species after the identity cutoff. |
-| Query cover (%) | 50 | Minimum query cover for the HYPO filter (looser than MOL because proxy/marker lengths differ). |
-| Identity (%) | 95 | Minimum identity for the HYPO filter. |
-| Check E-value exponent | 3 (1e-3) | Per-species confirmation BLAST, constrained to the candidate species via an Entrez organism query. |
+| E-value exponent | 20 (1e-20) | E-value limit of the proxy BLAST. |
+| Min hit identity (%) | 90 | Minimum identity of a proxy hit kept from the search. |
+| Hits kept per score | 3 | Per proxy and hit species, the search keeps the hits no other beats on both identity and query cover (a short fragment cannot push out a full-length hit); this is how many hits with the same identity and cover are kept. |
+| Query cover (%) | 50 | Minimum query cover of a proxy hit (looser than MOL, since proxy and target marker lengths differ). |
+| Proxy identity (%) | 95 | A proxy hit on a MOL species of the sequence at or above this identity makes the species hypothetical. |
+| HYPO check E-value exponent | 3 (1e-3) | E-value limit of the HYPO check. |
 
-BOLD proxy sequences are BLASTed against NCBI constrained to MOL-validated species, filtered by identity and query cover, then a final per-species check confirms the target marker exists in GenBank for each candidate.
+Each proxy is BLAST-searched against GenBank, restricted to the MOL species of its sequence, and its hits are filtered by identity and query cover. The HYPO check then BLASTs each sequence against the GenBank records of its HYPO species. Its best hit gives one of four results: **no hit in GenBank**; **matches** (the MOL filter would keep the hit); **differs** (the MOL identity filter would drop it: species flagged in Results); **partial hit** (the hit covers only part of the sequence: species marked for review in Results). The MOL filter is the same as in MOL for the sequence.
 
 </details>
 
 <details>
 <summary><strong>Reproducibility</strong></summary>
 
-Each cached run records the UTC date it queried each live database (NCBI nt, GBIF, BOLD, WoRMS) and the TRIDENT version, shown in the Results "Data sources" panel. These databases change over time, so the query date identifies which version of the source data an analysis used.
+Each cached run records the UTC date it queried each live database (NCBI core_nt, GBIF, BOLD, WoRMS) and the TRIDENT version, shown in the Results "Data sources & provenance" panel. These databases change over time, so the query date identifies which version of the source data an analysis used.
 
 </details>
 
