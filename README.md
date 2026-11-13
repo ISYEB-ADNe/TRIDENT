@@ -263,6 +263,6 @@ A preprint describing TRIDENT is available on bioRxiv. Please cite:
 
 ## License
 
-TRIDENT is released under the [PolyForm Strict License 1.0.0](https://polyformproject.org/licenses/strict/1.0.0) (see [`LICENSE`](LICENSE)). You may use and run it for any noncommercial purpose, including research and teaching. Redistributing, modifying, forking, or any commercial use requires the authors' written permission: contact <trident-contact@protonmail.com>.
+TRIDENT is released under the [PolyForm Strict License 1.0.0](https://polyformproject.org/licenses/strict/1.0.0) (see [`LICENSE`](LICENSE)). You may use and run it for any noncommercial purpose, including research and teaching. Redistributing, modifying, forking, or any commercial use requires the authors' written permission.
 </content>
 </invoke>

@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "Taxonomic Resolution and IDentification using Environmental dNa Traces"
 readme = "README.md"
 authors = [
-    { name = "The TRIDENT authors", email = "trident-contact@protonmail.com" }
+    { name = "The TRIDENT authors" }
 ]
 requires-python = ">=3.12,<3.13"
 license = "LicenseRef-PolyForm-Strict-1.0.0"
