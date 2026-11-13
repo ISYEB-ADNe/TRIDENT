@@ -2,6 +2,7 @@
 
 import pandas as pd
 
+from trident.pipelines import build_mol_sequence_report
 from trident.clients.ncbi import (
     mol_filter_cut,
     plot_identity_bars,
@@ -55,5 +56,17 @@ def test_bracket_is_the_mol_filter_cut():
     assert (cut.top, cut.bottom, cut.is_gap) == (99.85, 97.0, True)
 
     # The bars on each side of the gap sit at its ends
-    bars = plot_identity_bars(gap, cut=cut, filtered_species={"A", "B"})
-    assert {y for t in bars.data for y in t.y} == {99.85, 98.0, 97.0}
+    covered = gap[gap["query_cover"] >= 90]
+    bars = plot_identity_bars(covered, cut=cut, filtered_species={"A", "B"})
+    assert {y for t in bars.data for y in t.y} == {99.85, 97.0}
+
+
+def test_sequence_report_plots_only_the_hits_that_pass_query_cover():
+    hits = _hits(
+        [(100.0, 100, "A"), (98.0, 50, "D"), (97.0, 100, "C"), (96.0, 100, "C")]
+    )
+    mol = hits[hits["scientificName"] == "A"]
+    report = build_mol_sequence_report(
+        mol, "s1", hits, query_cover=90, gap_size=2, gap_min_top=95
+    )
+    assert set(report["search_hits"]["scientificName"]) == {"A", "C"}

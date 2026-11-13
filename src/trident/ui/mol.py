@@ -619,7 +619,8 @@ def display_ncbi_sequence_summary(sequence_data):
 def display_ncbi_sequence_plots(
     selected_sequence, sequence_ncbi_data, ncbi_filtered_df, cut
 ):
-    """Display identity plot of a sequence's BLAST hits, with the MOL filter's *cut*."""
+    """Display identity plot of a sequence's BLAST hits that pass the query
+    cover (*sequence_ncbi_data*), with the MOL filter's *cut*."""
     filtered_species = set(
         ncbi_filtered_df[ncbi_filtered_df["seq_id"] == selected_sequence][
             "scientificName"
@@ -687,7 +688,7 @@ def display_ncbi_sequence_plots(
         )
 
     # Only the hits in the identity range are plotted, so the hit axis fits
-    # them; the bracket still comes from all the hits (cut above)
+    # them; the bracket still comes from every hit that passes query cover
     shown_hits = sequence_ncbi_data[
         sequence_ncbi_data["identity_percentage"].between(*y_range)
     ]

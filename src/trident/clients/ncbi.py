@@ -1464,7 +1464,8 @@ def plot_identity_percentage(
     similarity range the MOL filter used.
 
     Args:
-        df: DataFrame with 'scientificName' and 'identity_percentage' columns.
+        df: The hits to plot, those that pass the MOL filter's query cover
+            ('scientificName' and 'identity_percentage' columns).
         cut: The MOL filter's cut, from mol_filter_cut (None: no bracket).
         filtered_species: Set/list of species names to highlight.
         title: Plot title (empty string to hide).
@@ -1554,7 +1555,8 @@ def plot_identity_bars(
     the exact identities of each segment.
 
     Args:
-        df: DataFrame with 'scientificName' and 'identity_percentage' columns.
+        df: The hits to plot, those that pass the MOL filter's query cover
+            ('scientificName' and 'identity_percentage' columns).
         cut: The MOL filter's cut, from mol_filter_cut (None: no bracket).
         filtered_species: Set/list of species names to highlight.
         title: Plot title (empty string to hide).
@@ -1570,36 +1572,10 @@ def plot_identity_bars(
     df = _name_unnamed_hits(df)
     levels = df["identity_percentage"].unique()
     if cut is not None and cut.is_gap:
-        # Bins grow away from the gap: upwards above it, downwards below it.
-        # Hits inside it (below query cover) less than a bin from one end join
-        # that end's bar, the others get their own bins: no two bars overlap
-        def near(level, end):
-            return abs(level - end) < bin_width - 1e-9
-
+        # Bins grow away from the gap: upwards above it, downwards below it
         above = sorted(level for level in levels if level >= cut.top)
-        below = sorted((level for level in levels if level <= cut.bottom), reverse=True)
-        inside = [level for level in levels if cut.bottom < level < cut.top]
-        positions = (
-            _bin_positions(above, bin_width)
-            | _bin_positions(below, bin_width)
-            | _bin_positions(
-                sorted(
-                    (
-                        level
-                        for level in inside
-                        if not near(level, cut.top) and not near(level, cut.bottom)
-                    ),
-                    reverse=True,
-                ),
-                bin_width,
-            )
-            | {level: cut.top for level in inside if near(level, cut.top)}
-            | {
-                level: cut.bottom
-                for level in inside
-                if near(level, cut.bottom) and not near(level, cut.top)
-            }
-        )
+        below = sorted((level for level in levels if level < cut.top), reverse=True)
+        positions = _bin_positions(above, bin_width) | _bin_positions(below, bin_width)
     else:
         positions = _bin_positions(sorted(levels, reverse=True), bin_width)
     # One grey segment per bin for every filtered-out species, named in its

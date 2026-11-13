@@ -445,7 +445,8 @@ def build_mol_sequence_report(
         - 'seq_id': The sequence identifier.
         - 'sequence_data': DataFrame of hits for this sequence (with an n_hits column: hits of
           its species).
-        - 'search_hits': All BLAST hits of this sequence.
+        - 'search_hits': The sequence's BLAST hits that pass *query_cover*
+          (the ones to plot).
         - 'cut': The filter's gap or range, from mol_filter_cut(); its
           is_gap says which method the filter used for this sequence.
         - 'species_across_gap': Output of species_across_gap(): species with
@@ -466,6 +467,7 @@ def build_mol_sequence_report(
     ].transform("count")
 
     search_hits = ncbi_search_df[ncbi_search_df["seq_id"] == seq_id]
+    search_hits = search_hits[search_hits["query_cover"] >= query_cover]
     cut = mol_filter_cut(
         search_hits,
         query_cover=query_cover,
