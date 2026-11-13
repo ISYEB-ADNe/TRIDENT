@@ -199,7 +199,7 @@ The settings of each step are detailed below. Defaults are those used by the app
 |---|---|---|
 | Latitude, Longitude | | The sampling site. |
 | Search extents (km) | 500 (+ global) | Distances from the site; GBIF occurrences are counted for each extent, and worldwide. |
-| Search area | Circle | Circle: the occurrences within each extent of the site. Bounding box: the rectangle around that circle. |
+| Search area | Circle | Circle: the occurrences within each extent of the site. Bounding box: the rectangle around that circle (around a pole: every longitude up to the pole). |
 | Filtering area | 500 | The extent whose counts the minimum occurrences apply to. |
 | Minimum occurrences | 3 | Minimum GBIF occurrences in the filtering area to keep a species; guards against single stray records. |
 | Name-match confidence | 95 (fixed) | GBIF name-match confidence required to accept a name. |

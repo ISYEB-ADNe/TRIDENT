@@ -61,7 +61,8 @@ def display_gbif_parameters():
         "📊 **Search areas:** GBIF occurrences are counted around your sampling "
         "site, within each search extent (km). The **circle** counts the "
         "occurrences within that distance of the site. The **bounding box** is the "
-        "rectangle (latitude and longitude ranges) around that circle."
+        "rectangle (latitude and longitude ranges) around that circle (around a "
+        "pole: every longitude up to the pole)."
     )
 
     # Previous parameter sets selector
@@ -127,7 +128,8 @@ def display_gbif_parameters():
         format_func=AREA_LABELS.get,
         horizontal=True,
         help="Circle: the occurrences within each extent of the site. Bounding box: "
-        "the rectangle around that circle.",
+        "the rectangle around that circle (around a pole: every longitude up to "
+        "the pole).",
     )
 
     if latitude is None or longitude is None or extents is None:

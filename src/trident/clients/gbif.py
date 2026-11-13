@@ -153,6 +153,7 @@ def get_bounding_box(
 
     Returns:
         If ``return_circle`` is False: ``(min_lat, max_lat, min_lon, max_lon)``.
+        Around a pole the box is the band of every longitude up to that pole.
         If ``return_circle`` is True: ``(lats_array, lons_array)``.
     """
     # 1. Parse and Validate
@@ -192,7 +193,17 @@ def get_bounding_box(
 
     # The min/max of the circle points effectively creates the
     # 'smallest bounding box' that contains the circle.
-    return float(lats.min()), float(lats.max()), float(lons.min()), float(lons.max())
+    min_lat, max_lat = float(lats.min()), float(lats.max())
+    min_lon, max_lon = float(lons.min()), float(lons.max())
+    # The circle contains a pole: the box goes up to it, over every longitude
+    reach = np.degrees(angular_distance)
+    if latitude + reach >= 90:
+        max_lat = 90.0
+    if latitude - reach <= -90:
+        min_lat = -90.0
+    if max_lat == 90.0 or min_lat == -90.0:
+        min_lon, max_lon = -180.0, 180.0
+    return min_lat, max_lat, min_lon, max_lon
 
 
 ### GBIF API ###
@@ -1008,6 +1019,11 @@ def plot_bounding_boxes(
                     [max_lat],  # close
                 ]
             )
+            if max_lon - min_lon >= 360:
+                # Around a pole the box is a band of every longitude
+                edge_lat = min_lat if max_lat == 90 else max_lat
+                bbox_lons = np.linspace(min_lon, max_lon, 8 * n)
+                bbox_lats = np.full(8 * n, edge_lat)
 
             fig.add_trace(
                 go.Scattergeo(

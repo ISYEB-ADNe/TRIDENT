@@ -13,6 +13,7 @@ from trident.clients.gbif import (
     area_params,
     counts_for_area,
     filter_taxon_matches,
+    get_bounding_box,
     get_extent_column_name,
     parse_coordinate,
     search_taxon_occurrences,
@@ -598,6 +599,15 @@ def test_area_params_circle_box_and_global():
     assert area_params(24.5, 54.4, "global", "circle") == {}
     with pytest.raises(ValueError):
         area_params(24.5, 54.4, 500, "square")
+
+
+def test_box_around_a_pole_is_every_longitude_up_to_the_pole():
+    """The circle's own points stop short of the pole it contains: the box
+    goes on to the pole."""
+    min_lat, max_lat, min_lon, max_lon = get_bounding_box(86.0, 15.0, 1000)
+    assert (max_lat, min_lon, max_lon) == (90.0, -180.0, 180.0)
+    assert 77 < min_lat < 77.1
+    assert get_bounding_box(-86.0, 15.0, 1000)[0] == -90.0
 
 
 def test_search_extents_are_whole_km():
