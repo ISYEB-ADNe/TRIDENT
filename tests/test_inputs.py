@@ -1,6 +1,7 @@
 """The inputs of an analysis: the FASTA file read into sequences, and an
 uploaded analysis already in the results folder opened without a copy."""
 
+import io
 import sqlite3
 
 import pandas as pd
@@ -59,7 +60,8 @@ def _upload(text, name):
 def test_fasta_file_gives_one_row_per_record_saved_by_filename(tmp_path):
     """Each record becomes a row with its id, length and sequence (Windows line
     endings, a UTF-8 byte order mark and a blank first line too), read back the
-    same from the analysis; a file without records gives none."""
+    same from the analysis, from a file given by its path and from a binary
+    handle with old Mac line endings; a file without records gives none."""
     text = "\ufeff\r\n>m1 first\r\nACGT\r\nAC\r\n>m2\r\nGGG\r\n>m3\r\nT\r\n"
     db_path = str(tmp_path / "analysis.db")
 
@@ -71,6 +73,14 @@ def test_fasta_file_gives_one_row_per_record_saved_by_filename(tmp_path):
         "dna_sequence": ["ACGTAC", "GGG", "T"],
     }
     pd.testing.assert_frame_equal(live, cached)
+    path = tmp_path / "by_path.fasta"
+    path.write_bytes(text.encode())
+    from_path, _ = run_fasta_workflow(str(path), db_path=str(tmp_path / "path.db"))
+    pd.testing.assert_frame_equal(live, from_path)
+    binary = io.BytesIO(text.replace("\r\n", "\r").encode())
+    binary.name = "binary.fasta"
+    from_binary, _ = run_fasta_workflow(binary, db_path=str(tmp_path / "binary.db"))
+    pd.testing.assert_frame_equal(live, from_binary)
     assert run_fasta_workflow(_upload("", "empty.fasta"), db_path=db_path)[0].empty
 
 

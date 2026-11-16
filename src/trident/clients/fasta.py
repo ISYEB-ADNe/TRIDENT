@@ -37,8 +37,12 @@ class RepeatedSequenceNames(ValueError):
 def load_fasta(fasta_file: Any) -> list[SeqRecord]:
     """Load sequences from a FASTA source.
 
+    A file at a path and binary content are read as UTF-8. A byte order mark
+    is dropped, and Windows and old Mac line endings are accepted.
+
     Args:
-        fasta_file: File path (str or Path) or text file-like object.
+        fasta_file: File path (str or Path), or text or binary file-like
+            object.
 
     Returns:
         List of SeqRecord objects parsed from the FASTA source.
@@ -48,19 +52,24 @@ def load_fasta(fasta_file: Any) -> list[SeqRecord]:
             up to its first space or tab).
         ValueError: the source has text before its first sequence header
             (blank lines there are ignored).
+        UnicodeDecodeError: the file or the binary content is not UTF-8.
     """
-    display_name = getattr(fasta_file, "name", "buffer")
     if isinstance(fasta_file, (str, os.PathLike)):
-        with open(fasta_file) as handle:
+        display_name = str(fasta_file)
+        with open(fasta_file, "rb") as handle:
             text = handle.read()
     else:
+        display_name = getattr(fasta_file, "name", "buffer")
         text = fasta_file.read()
+    if isinstance(text, bytes):
+        text = text.decode("utf-8")
     # Checked here because Biopython versions differ on text before the first
     # header: some skip it with a warning, others refuse the file.
-    text = text.lstrip()
+    text = text.removeprefix("\ufeff").lstrip()
     if text and not text.startswith(">"):
         raise ValueError("text before the first sequence header (>)")
-    sequences = list(SeqIO.parse(io.StringIO(text), "fasta"))
+    # newline=None translates \r and \r\n line endings, as open() does.
+    sequences = list(SeqIO.parse(io.StringIO(text, newline=None), "fasta"))
     counts = Counter(seq.id for seq in sequences)
     repeated = {name: n for name, n in counts.items() if n > 1}
     if repeated:

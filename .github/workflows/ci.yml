@@ -4,19 +4,23 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual run on any branch, from the Actions tab.
+  workflow_dispatch:
 
 # Least privilege: the workflow only reads the repo.
 permissions:
   contents: read
 
-# Cancel superseded runs for the same ref (saves CI minutes on rapid pushes).
+# Cancel superseded runs for the same ref and trigger (saves CI minutes on rapid pushes).
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
+    env:
+      UV_NO_SYNC: 1 # uv run would install every dependency
     steps:
       - uses: actions/checkout@v4
 
@@ -28,8 +32,9 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Install dependencies
-        run: uv sync --locked
+      # Only the development tools: the checks below do not import TRIDENT.
+      - name: Install the tools
+        run: uv sync --locked --only-dev
 
       - name: Ruff lint
         run: uv run ruff check .
@@ -42,6 +47,33 @@ jobs:
 
       - name: Notebook outputs stripped
         run: uv run nbstripout --verify example/example_pipeline.ipynb
+
+  # Install and tests on every platform TRIDENT supports.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest # Apple Silicon
+          - macos-26-intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      # --no-build: a dependency without a prebuilt wheel for this platform
+      # fails here, instead of being compiled on the user's machine.
+      - name: Install dependencies
+        run: uv sync --locked --no-build
 
       - name: Pytest
         run: uv run pytest -q

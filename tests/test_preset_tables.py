@@ -20,7 +20,7 @@ def _declared_input_tables() -> set[str]:
     """
     tables = set()
     for path in (SRC / "pipelines").glob("*.py"):
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -40,7 +40,7 @@ def _preset_table_arguments() -> list[tuple[str, int, str]]:
     """(module, lineno, table_name) for each get_recent_param_sets call."""
     calls = []
     for path in (SRC / "ui").glob("*.py"):
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)
