@@ -58,7 +58,7 @@ def test_every_shown_column_has_display_settings():
     module_constants = {"RANK_COLUMNS": ui.RANK_COLUMNS}
     missing = {}
     for path in sorted(UI_DIR.glob("*.py")):
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         constants = dict(module_constants)
         for node in tree.body:
             if isinstance(node, ast.Assign) and isinstance(node.value, ast.List):
