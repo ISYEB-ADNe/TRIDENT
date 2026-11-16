@@ -11,6 +11,9 @@ license = "LicenseRef-PolyForm-Strict-1.0.0"
 license-files = ["LICENSE"]
 dependencies = [
     "biopython>=1.85",
+    # Biopython has no macOS Intel wheel from 1.87 on: Intel Macs stay on 1.86.
+    # Drop this line when Intel Macs are no longer supported.
+    "biopython<1.87; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "joblib>=1.5.2",
     "loguru>=0.7.3",
     "numpy>=1.26",
