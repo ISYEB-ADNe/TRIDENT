@@ -58,9 +58,9 @@ def _upload(text, name):
 
 def test_fasta_file_gives_one_row_per_record_saved_by_filename(tmp_path):
     """Each record becomes a row with its id, length and sequence (Windows line
-    endings and a UTF-8 byte order mark too), read back the same from the
-    analysis; a file without records gives none."""
-    text = "\ufeff>m1 first\r\nACGT\r\nAC\r\n>m2\r\nGGG\r\n>m3\r\nT\r\n"
+    endings, a UTF-8 byte order mark and a blank first line too), read back the
+    same from the analysis; a file without records gives none."""
+    text = "\ufeff\r\n>m1 first\r\nACGT\r\nAC\r\n>m2\r\nGGG\r\n>m3\r\nT\r\n"
     db_path = str(tmp_path / "analysis.db")
 
     live, _ = run_fasta_workflow(_upload(text, "motus.fasta"), db_path=db_path)

@@ -1,6 +1,7 @@
 """FASTA I/O: load, build and serialize FASTA sequences via Biopython."""
 
 import io
+import os
 from collections import Counter
 from typing import Any
 
@@ -37,8 +38,7 @@ def load_fasta(fasta_file: Any) -> list[SeqRecord]:
     """Load sequences from a FASTA source.
 
     Args:
-        fasta_file: File path (str or Path), file-like object, or Streamlit
-            UploadedFile. Any object accepted by Bio.SeqIO.parse.
+        fasta_file: File path (str or Path) or text file-like object.
 
     Returns:
         List of SeqRecord objects parsed from the FASTA source.
@@ -46,9 +46,21 @@ def load_fasta(fasta_file: Any) -> list[SeqRecord]:
     Raises:
         RepeatedSequenceNames: two or more sequences share a name (the header
             up to its first space or tab).
+        ValueError: the source has text before its first sequence header
+            (blank lines there are ignored).
     """
     display_name = getattr(fasta_file, "name", "buffer")
-    sequences = list(SeqIO.parse(fasta_file, "fasta"))
+    if isinstance(fasta_file, (str, os.PathLike)):
+        with open(fasta_file) as handle:
+            text = handle.read()
+    else:
+        text = fasta_file.read()
+    # Checked here because Biopython versions differ on text before the first
+    # header: some skip it with a warning, others refuse the file.
+    text = text.lstrip()
+    if text and not text.startswith(">"):
+        raise ValueError("text before the first sequence header (>)")
+    sequences = list(SeqIO.parse(io.StringIO(text), "fasta"))
     counts = Counter(seq.id for seq in sequences)
     repeated = {name: n for name, n in counts.items() if n > 1}
     if repeated:
